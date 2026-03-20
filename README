@@ -1,0 +1,66 @@
+# The Curator 
+
+An autonomous, agentic photo curation and tagging pipeline designed for fine art, botanical, and macro photography. 
+
+This system uses a polyglot architecture to strictly decouple stateful job orchestration from stateless LLM inference. It provides a real-time, zero-JS frontend for uploading images and viewing AI-generated museum placards.
+
+## 🏗 System Architecture
+
+The application is structured as a monorepo containing two distinct services:
+
+* **The Orchestrator (`/orchestrator`)**
+  * **Stack:** Elixir, Phoenix LiveView, Oban, PostgreSQL.
+  * **Role:** Acts as the "Boss." Handles the LiveView UI, file ingestion, and pub/sub real-time updates. Manages the state machine and exponential backoffs using Oban to ensure no AI jobs are lost due to inference timeouts.
+* **The AI Worker (`/ai_worker`)**
+  * **Stack:** Python, FastAPI, Instructor, Hugging Face (or local Ollama).
+  * **Role:** Acts as the "Muscle." A stateless inference microservice. Receives images via HTTP, enforces strict Pydantic JSON schemas using `instructor`, and routes the data through multimodal vision models (e.g., Llama 3.2 Vision or Moondream).
+
+## 📦 Prerequisites
+
+* [Mise](https://mise.jdx.dev/) (Manages Erlang/Elixir versions)
+* [uv](https://github.com/astral-sh/uv) (Manages Python dependencies and virtual environments)
+* [Docker](https://www.docker.com/) (Runs the local PostgreSQL database)
+* A valid Hugging Face API Token (for cloud inference) or Ollama (for local inference).
+
+## 🚀 Quickstart
+
+### 1. Environment Setup
+
+Add your AI provider token to the worker environment:
+
+```bash
+echo 'HUGGINGFACE_TOKEN="hf_your_token_here"' > ai_worker/.env
+```
+
+### 2. First-Time Initialization
+
+Boot the database and install all cross-language dependencies:
+
+```bash
+make setup
+```
+
+### 3. Run the System
+
+Start both the Phoenix application and the FastAPI server concurrently:
+
+```bash
+make dev
+```
+
+Once running:
+- **UI:** http://localhost:4000
+- **AI API Docs:** http://localhost:8000/docs
+
+## 🧠 Workflow Lifecycle
+
+1. **Ingestion** — User uploads an image via the LiveView canvas.
+2. **Persistence** — File is saved to disk; LiveView enqueues a job in Oban.
+3. **Execution** — The `AiCurationWorker` fetches the job and sends the image to the FastAPI service via multipart POST.
+4. **Inference** — FastAPI validates the image, queries the Vision LLM, and enforces output into a strict Pydantic JSON schema.
+5. **Broadcast** — The worker receives JSON results and broadcasts them to the UI via Phoenix PubSub.
+6. **Resolution** — LiveView updates in real-time to display the AI-generated metadata placard.
+
+## 👨‍💻 Author
+
+Qwelian Tanner
