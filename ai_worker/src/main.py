@@ -8,20 +8,12 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# genai_client = genai.Client(api_key="GEMINI_API_KEY") 
-
-# client = instructor.from_genai(
-#     genai_client, 
-#     mode=instructor.Mode.GENAI_STRUCTURED_OUTPUTS
-# )
-
-hf_client = AsyncOpenAI(
-    base_url="http://localhost:11434/v1/",
-    api_key="ollama"
-)
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://localhost:11434/v1/")
+LLM_API_KEY = os.getenv("LLM_API_KEY", "ollama")
+LLM_MODEL = os.getenv("LLM_MODEL", "llava")
 
 client = instructor.from_openai(
-    hf_client,
+    AsyncOpenAI(base_url=LLM_BASE_URL, api_key=LLM_API_KEY),
     mode=instructor.Mode.JSON,
 )
 
@@ -45,7 +37,7 @@ async def curate_photo(file: UploadFile = File(...)):
 
     try:
         metadata = await client.chat.completions.create(
-            model="llava", 
+            model=LLM_MODEL,
             response_model=PhotoMetadata,
             messages=[
                 {

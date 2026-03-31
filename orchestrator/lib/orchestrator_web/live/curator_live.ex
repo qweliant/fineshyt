@@ -9,8 +9,8 @@ defmodule OrchestratorWeb.CuratorLive do
       socket
       |> assign(:uploaded_files, [])
       |> assign(:metadata, nil)
-      |> assign(:status, :idle) # States: :idle, :uploading, :processing, :complete
-      |> allow_upload(:photo, accept: ~w(.jpg .jpeg .png), max_entries: 1)
+      |> assign(:status, :idle) # States: :idle, :uploading, :processing, :complete, :failed
+      |> allow_upload(:photo, accept: ~w(.jpg .jpeg .png), max_entries: 1, max_file_size: 10_000_000)
 
     {:ok, socket}
   end
@@ -18,6 +18,11 @@ defmodule OrchestratorWeb.CuratorLive do
   @impl Phoenix.LiveView
   def handle_event("validate", _params, socket) do
     {:noreply, socket}
+  end
+
+  @impl Phoenix.LiveView
+  def handle_event("reset", _params, socket) do
+    {:noreply, assign(socket, status: :idle, metadata: nil, uploaded_files: [])}
   end
 
   @impl Phoenix.LiveView
@@ -45,12 +50,23 @@ defmodule OrchestratorWeb.CuratorLive do
   @impl Phoenix.LiveView
   def handle_info({:curation_complete, ref, metadata}, socket) do
     case Enum.find(socket.assigns.uploaded_files, &(&1.ref == ref)) do
-      nil ->
-        {:noreply, socket}
-      _ ->
-        {:noreply, assign(socket, metadata: metadata, status: :complete)}
+      nil -> {:noreply, socket}
+      _ -> {:noreply, assign(socket, metadata: metadata, status: :complete)}
     end
   end
+
+  @impl Phoenix.LiveView
+  def handle_info({:curation_failed, ref, _reason}, socket) do
+    case Enum.find(socket.assigns.uploaded_files, &(&1.ref == ref)) do
+      nil -> {:noreply, socket}
+      _ -> {:noreply, assign(socket, status: :failed)}
+    end
+  end
+
+  defp upload_error_to_string(:too_large), do: "File exceeds 10MB limit."
+  defp upload_error_to_string(:not_accepted), do: "Only .jpg, .jpeg, and .png files are accepted."
+  defp upload_error_to_string(:too_many_files), do: "Only one file at a time."
+  defp upload_error_to_string(_), do: "Upload failed. Please try again."
 
   @impl Phoenix.LiveView
   def render(assigns) do
@@ -61,7 +77,7 @@ defmodule OrchestratorWeb.CuratorLive do
       <%!-- Editorial Header --%>
       <header class="mb-16 border-b-[3px] border-[#111111] pb-6 flex flex-col md:flex-row md:items-end justify-between">
         <div>
-          <h1 class="text-6xl md:text-8xl font-black tracking-tight leading-none">FINE <br/>SHYT.</h1>
+          <h1 class="text-6xl md:text-8xl font-black tracking-tight leading-none">FINE.<br/>SHYT.</h1>
           <p class="mt-4 text-lg md:text-xl font-light italic text-gray-600 max-w-xl">
             An algorithmic study of composition, light, and medium. Fine shyt if you will.
           </p>
@@ -87,28 +103,47 @@ defmodule OrchestratorWeb.CuratorLive do
             >
 
               <%!-- Upload Input --%>
-              <.live_file_input upload={@uploads.photo} class="hidden" id="photo-upload" />
+              <.live_file_input upload={@uploads.photo} class="hidden" />
 
               <%!-- State: Idle --%>
               <%= if @status == :idle and @uploads.photo.entries == [] do %>
-                <label for="photo-upload" class="absolute inset-0 w-full h-full cursor-pointer flex flex-col items-center justify-center z-10">
+                <label for={@uploads.photo.ref} class="absolute inset-0 w-full h-full cursor-pointer flex flex-col items-center justify-center z-10">
                   <span class="uppercase tracking-[0.3em] text-sm font-sans mb-2">Drop Photograph</span>
                   <span class="font-serif italic text-gray-400 group-hover:text-gray-300">or click to open archives</span>
                   <span class="absolute bottom-6 left-6 text-xs font-sans uppercase tracking-widest text-gray-400">Accepts botanical, macabre, or structural studies.</span>
                 </label>
               <% end %>
 
-              <%!-- State: Image Selected / Processing / Complete --%>
+              <%!-- Upload Errors --%>
               <%= for entry <- @uploads.photo.entries do %>
+                <%= for err <- upload_errors(@uploads.photo, entry) do %>
+                  <div class="absolute bottom-4 left-4 right-4 bg-[#fcfbf9] border border-red-800 px-4 py-2 z-20">
+                    <span class="font-sans uppercase tracking-widest text-xs text-red-800">
+                      <%= upload_error_to_string(err) %>
+                    </span>
+                  </div>
+                <% end %>
+              <% end %>
+
+              <%!-- State: Image Selected / Processing / Complete --%>
+              <%= if @uploads.photo.entries != [] or @uploaded_files != [] do %>
                 <div class="absolute inset-4 overflow-hidden border border-gray-200 bg-white shadow-2xl">
-                  <.live_img_preview
-                    entry={entry}
-                    class={[
-                      "object-cover w-full h-full transition-all duration-[3000ms] ease-out",
-                      @status == :processing && "grayscale contrast-125 brightness-90 animate-pulse scale-105",
-                      @status == :complete && "grayscale-0 contrast-100 brightness-100 scale-100"
-                    ]}
-                  />
+                  <%= if @uploads.photo.entries != [] do %>
+                    <.live_img_preview
+                      entry={hd(@uploads.photo.entries)}
+                      class="object-cover w-full h-full"
+                    />
+                  <% else %>
+                    <img
+                      src={hd(@uploaded_files).url}
+                      class={[
+                        "object-cover w-full h-full transition-all duration-[3000ms] ease-out",
+                        @status == :processing && "grayscale contrast-125 brightness-90 animate-pulse scale-105",
+                        @status == :failed && "grayscale brightness-50 scale-100",
+                        @status == :complete && "grayscale-0 contrast-100 brightness-100 scale-100"
+                      ]}
+                    />
+                  <% end %>
 
                   <%!-- Processing Overlay --%>
                   <%= if @status == :processing do %>
@@ -117,6 +152,18 @@ defmodule OrchestratorWeb.CuratorLive do
                         <span class="font-sans uppercase tracking-widest text-xs font-bold flex items-center gap-3">
                           <span class="w-2 h-2 bg-[#111111] rounded-full animate-ping"></span>
                           Analyzing Subject...
+                        </span>
+                      </div>
+                    </div>
+                  <% end %>
+
+                  <%!-- Failed Overlay --%>
+                  <%= if @status == :failed do %>
+                    <div class="absolute inset-0 bg-red-900/20 flex items-center justify-center backdrop-blur-[2px]">
+                      <div class="bg-[#fcfbf9] border border-red-800 px-6 py-3 shadow-xl">
+                        <span class="font-sans uppercase tracking-widest text-xs font-bold text-red-800 flex items-center gap-3">
+                          <span class="w-2 h-2 bg-red-800 rounded-full"></span>
+                          Curation Failed
                         </span>
                       </div>
                     </div>
@@ -168,14 +215,24 @@ defmodule OrchestratorWeb.CuratorLive do
                   </div>
                 </div>
 
-                <button phx-click="save" class="mt-12 font-sans uppercase tracking-widest text-xs border-b border-[#111111] pb-1 hover:text-gray-500 hover:border-gray-500 transition-colors">
+                <button phx-click="reset" class="mt-12 font-sans uppercase tracking-widest text-xs border-b border-[#111111] pb-1 hover:text-gray-500 hover:border-gray-500 transition-colors">
                   + Curate Another Piece
                 </button>
               </div>
             <% else %>
               <%!-- Empty State --%>
-              <div class="text-gray-400 font-serif italic text-lg">
-                <p><%= if @status == :processing, do: "The system is currently observing the artwork. Awaiting transmission...", else: "No piece is currently under observation. Please submit a photograph to the canvas." %></p>
+              <div class="font-serif italic text-lg">
+                <%= cond do %>
+                  <% @status == :processing -> %>
+                    <p class="text-gray-400">The system is currently observing the artwork. Awaiting transmission...</p>
+                  <% @status == :failed -> %>
+                    <p class="text-red-800">The curation service could not be reached. Please verify the AI worker is running and try again.</p>
+                    <button phx-click="reset" class="mt-6 font-sans not-italic uppercase tracking-widest text-xs border-b border-red-800 pb-1 text-red-800 hover:text-red-600 hover:border-red-600 transition-colors">
+                      ↩ Try Again
+                    </button>
+                  <% true -> %>
+                    <p class="text-gray-400">No piece is currently under observation. Please submit a photograph to the canvas.</p>
+                <% end %>
               </div>
             <% end %>
           </div>

@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -r \"TODO\\\\|FIXME\\\\|BUG\\\\|HACK\\\\|XXX\" /Users/qwelian/Programs/fineshyt --include=*.ex --include=*.exs --include=*.py --include=*.md)"
+    ]
+  }
+}
