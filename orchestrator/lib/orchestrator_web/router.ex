@@ -18,6 +18,7 @@ defmodule OrchestratorWeb.Router do
     pipe_through :browser
 
     live "/", CuratorLive
+    live "/gallery", GalleryLive
   end
 
   # Other scopes may use custom stacks.

@@ -17,7 +17,7 @@ start-phoenix:
 	cd orchestrator && mix phx.server
 
 start-ai:
-	cd ai_worker && uv run fastapi dev src/main.py
+	cd ai_worker && uv run fastapi dev src/main.py --reload
 
 # --- Initial Setup (Run this once) ---
 setup: db-up

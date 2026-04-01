@@ -1,66 +1,81 @@
-# The Curator 
+# FINE. SHYT.
 
-An autonomous, agentic photo curation and tagging pipeline designed for fine art, botanical, and macro photography. 
+I take photos. Mostly macro, mostly botanical, mostly black and white, mostly things other people walk past without a second look. After a while you accumulate a lot of TIFFs and an existential question: which of these are actually good and which am I just emotionally attached to because I spent 45 minutes on my knees in the dirt to get the shot.
 
-This system uses a polyglot architecture to strictly decouple stateful job orchestration from stateless LLM inference. It provides a real-time, zero-JS frontend for uploading images and viewing AI-generated museum placards.
+This project is my answer to that question. I described my own aesthetic to an AI and let it go through my archive and tell me what fits. Fine shyt, if you will.
 
-## 🏗 System Architecture
+It's also an excuse to get back into ML. The last time I did anything in this space was [deploying a transformer model in 2021](https://qwelian.com/posts/Deploying_Transformer_Models). Which like in AI years, is basically the Jurassic period. A lot has changed. Vision models that can actually reason about composition and aesthetic? That's new and worth playing with.
 
-The application is structured as a monorepo containing two distinct services:
+## What it does
 
-* **The Orchestrator (`/orchestrator`)**
-  * **Stack:** Elixir, Phoenix LiveView, Oban, PostgreSQL.
-  * **Role:** Acts as the "Boss." Handles the LiveView UI, file ingestion, and pub/sub real-time updates. Manages the state machine and exponential backoffs using Oban to ensure no AI jobs are lost due to inference timeouts.
-* **The AI Worker (`/ai_worker`)**
-  * **Stack:** Python, FastAPI, Instructor, Hugging Face (or local Ollama).
-  * **Role:** Acts as the "Muscle." A stateless inference microservice. Receives images via HTTP, enforces strict Pydantic JSON schemas using `instructor`, and routes the data through multimodal vision models (e.g., Llama 3.2 Vision or Moondream).
+You give it a style description in plain english. Something like "black and white macro botanical photography, high contrast, minimal composition, technically precise." It pulls your Instagram posts, runs each image through a vision LLM, and the LLM decides: does this fit the vibe or not.
 
-## 📦 Prerequisites
+Results go into a gallery. You can filter by match, no match, or everything. Each photo gets a score and a one-sentence explanation. The whole thing updates in real-time while the jobs run. No refreshing, no polling, just Phoenix doing what Phoenix does.
 
-* [Mise](https://mise.jdx.dev/) (Manages Erlang/Elixir versions)
-* [uv](https://github.com/astral-sh/uv) (Manages Python dependencies and virtual environments)
-* [Docker](https://www.docker.com/) (Runs the local PostgreSQL database)
-* A valid Hugging Face API Token (for cloud inference) or Ollama (for local inference).
+Single image curation still works too, at `/`. Drop a photo, get a museum placard back.
 
-## 🚀 Quickstart
+## Architecture
 
-### 1. Environment Setup
+Two services, intentionally decoupled.
 
-Add your AI provider token to the worker environment:
+**The Orchestrator** (`/orchestrator`) — Elixir, Phoenix LiveView, Oban, PostgreSQL. This is the main service. It owns the UI, the job queue, the database, and the pub/sub fanout that makes the real-time updates work. Oban handles retries with backoff so a slow inference call doesn't just silently disappear.
+
+**The AI Worker** (`/ai_worker`) — Python, FastAPI, Instructor. This is the muscle. Stateless. It gets an image over HTTP, encodes it to base64, asks the vision model what it sees, and enforces the response into a strict Pydantic schema via `instructor`. It also handles Instagram downloads via `instaloader`.
+
+The two services talk over plain HTTP. You could swap out either side without touching the other. Python has the AI ecosystem, Elixir has the concurrency story. No reason to compromise on either.
+
+## LLM options
+
+The worker is configured via environment variables so you can point it at whatever you have:
 
 ```bash
-echo 'HUGGINGFACE_TOKEN="hf_your_token_here"' > ai_worker/.env
+# Local (default) — needs Ollama running with llava pulled
+LLM_BASE_URL=http://localhost:11434/v1/
+LLM_API_KEY=ollama
+LLM_MODEL=llava
+
+# Claude
+LLM_BASE_URL=https://api.anthropic.com/v1/
+LLM_API_KEY=sk-ant-...
+LLM_MODEL=claude-opus-4-6
+
+# HuggingFace
+LLM_BASE_URL=https://api-inference.huggingface.co/v1/
+LLM_API_KEY=hf_...
+LLM_MODEL=meta-llama/Llama-3.2-11B-Vision-Instruct
 ```
 
-### 2. First-Time Initialization
+Local inference is free and private but will make your fans spin. Claude is genuinely good at this. It reasons about aesthetic intent, not just subject matter, which is exactly what you need when the question is "does this fit a style" rather than "what is in this image."
 
-Boot the database and install all cross-language dependencies:
+## Instagram auth
+
+Instagram doesn't let you scrape unauthenticated anymore (fair). Save a session once:
+
+```bash
+cd ai_worker && uv run instaloader --login=your_username
+```
+
+After that the session file lives at `~/.config/instaloader/session-your_username` and the worker picks it up automatically. You can also just put `INSTAGRAM_USERNAME` and `INSTAGRAM_PASSWORD` in `ai_worker/.env` but Instagram has been increasingly weird about password logins so the session file is more reliable.
+
+## Running it
+
+Prerequisites: [Mise](https://mise.jdx.dev/), [uv](https://github.com/astral-sh/uv), [Docker](https://www.docker.com/).
+
+First time:
 
 ```bash
 make setup
 ```
 
-### 3. Run the System
-
-Start both the Phoenix application and the FastAPI server concurrently:
+Every time after that:
 
 ```bash
 make dev
 ```
 
-Once running:
-- **UI:** http://localhost:4000
-- **AI API Docs:** http://localhost:8000/docs
+- Gallery + single upload: [localhost:4000](http://localhost:4000)
+- AI worker API docs: [localhost:8000/docs](http://localhost:8000/docs)
 
-## 🧠 Workflow Lifecycle
+## Author
 
-1. **Ingestion** — User uploads an image via the LiveView canvas.
-2. **Persistence** — File is saved to disk; LiveView enqueues a job in Oban.
-3. **Execution** — The `AiCurationWorker` fetches the job and sends the image to the FastAPI service via multipart POST.
-4. **Inference** — FastAPI validates the image, queries the Vision LLM, and enforces output into a strict Pydantic JSON schema.
-5. **Broadcast** — The worker receives JSON results and broadcasts them to the UI via Phoenix PubSub.
-6. **Resolution** — LiveView updates in real-time to display the AI-generated metadata placard.
-
-## 👨‍💻 Author
-
-Qwelian Tanner
+Qwelian Tanner — [qwelian.com](https://www.qwelian.com)

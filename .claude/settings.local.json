@@ -1,7 +1,12 @@
 {
   "permissions": {
     "allow": [
-      "Bash(grep -r \"TODO\\\\|FIXME\\\\|BUG\\\\|HACK\\\\|XXX\" /Users/qwelian/Programs/fineshyt --include=*.ex --include=*.exs --include=*.py --include=*.md)"
+      "Bash(grep -r \"TODO\\\\|FIXME\\\\|BUG\\\\|HACK\\\\|XXX\" /Users/qwelian/Programs/fineshyt --include=*.ex --include=*.exs --include=*.py --include=*.md)",
+      "Bash(grep -r \"schema\\\\|table\\\\|create\\\\|add_column\" /Users/qwelian/Programs/fineshyt/orchestrator/lib --include=*.ex)",
+      "Bash(mix ecto.gen.migration create_photos)",
+      "Bash(mix ecto.migrate)",
+      "Bash(mix compile:*)",
+      "WebFetch(domain:www.qwelian.com)"
     ]
   }
 }
