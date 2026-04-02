@@ -49,13 +49,13 @@ Local inference is free and private but will make your fans spin. Claude is genu
 
 ## Instagram auth
 
-Instagram doesn't let you scrape unauthenticated anymore (fair). Save a session once:
+Instagram requires a session to access your posts. Set your credentials in `ai_worker/.env` and run this once:
 
 ```bash
-cd ai_worker && uv run instaloader --login=your_username
+make instagram-auth
 ```
 
-After that the session file lives at `~/.config/instaloader/session-your_username` and the worker picks it up automatically. You can also just put `INSTAGRAM_USERNAME` and `INSTAGRAM_PASSWORD` in `ai_worker/.env` but Instagram has been increasingly weird about password logins so the session file is more reliable.
+That logs in, saves a session file to `~/.config/instaloader/session-<username>`, and from that point forward the worker loads the session at startup, we dont need no passwords flying around on every request, no "unusual login" alerts from Instagram. If the session ever expires, just run it again.
 
 ## Running it
 

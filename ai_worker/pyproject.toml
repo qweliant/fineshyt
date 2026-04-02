@@ -11,3 +11,17 @@ dependencies = [
     "python-dotenv>=1.2.1",
     "instaloader>=4.14",
 ]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.8",
+]

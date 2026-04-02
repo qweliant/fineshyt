@@ -53,6 +53,13 @@ defmodule Orchestrator.Workers.BatchImportWorker do
 
         :ok
 
+      {:ok, %Req.Response{status: 429, body: body}} ->
+        detail = get_in(body, ["detail"]) || "Instagram is rate-limiting requests. Wait a few minutes and try again."
+        Logger.warning("Instagram rate-limited: #{detail}")
+        Phoenix.PubSub.broadcast(Orchestrator.PubSub, "photo_updates", {:import_failed, detail})
+        # Snooze the Oban job so it retries automatically in 5 minutes
+        {:snooze, 300}
+
       {:ok, %Req.Response{status: status, body: body}} ->
         detail = get_in(body, ["detail"]) || "status #{status}"
         Logger.error("Instagram download failed (#{status}): #{detail}")

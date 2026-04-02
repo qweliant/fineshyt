@@ -1,14 +1,13 @@
 import base64
 import os
-import shutil
-import tempfile
 from pathlib import Path
-from fastapi import FastAPI, Form, UploadFile, File, HTTPException
-from pydantic import BaseModel, Field
-from openai import AsyncOpenAI
-import instructor
+
 import instaloader
+import instructor
 from dotenv import load_dotenv
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from openai import AsyncOpenAI
+from pydantic import BaseModel, Field
 
 load_dotenv()
 
@@ -24,19 +23,86 @@ client = instructor.from_openai(
     mode=instructor.Mode.JSON,
 )
 
+# Build a single shared Instaloader instance at startup.
+# Strategy: load saved session → skip login entirely.
+# If no session exists yet: login with credentials → save session for next time.
+_loader = instaloader.Instaloader(
+    download_videos=False,
+    download_video_thumbnails=False,
+    download_geotags=False,
+    download_comments=False,
+    save_metadata=False,
+    post_metadata_txt_pattern="",
+    quiet=True,
+)
+_instagram_ready = False
+_instagram_error: str | None = None
+
+def _try_load_session() -> bool:
+    """Load session from file, trusting it if the file loads cleanly.
+    test_login() hits the network and can be rate-limited — treat that as a
+    soft warning, not a hard failure. Only reject if the file is missing or
+    the session belongs to a different user."""
+    global _instagram_ready, _instagram_error
+    if not INSTAGRAM_USERNAME:
+        _instagram_error = "INSTAGRAM_USERNAME is not set in ai_worker/.env"
+        return False
+    try:
+        _loader.load_session_from_file(INSTAGRAM_USERNAME)
+    except FileNotFoundError:
+        _instagram_error = f"No session file for @{INSTAGRAM_USERNAME}. Run: make instagram-auth"
+        return False
+    except Exception as e:
+        _instagram_error = f"Could not load session for @{INSTAGRAM_USERNAME}: {e}. Run: make instagram-auth"
+        return False
+
+    # Session file loaded. Optionally verify with test_login, but don't fail
+    # on rate-limit errors — Instagram 401s here just mean "try later".
+    try:
+        logged_in_as = _loader.test_login()
+        if logged_in_as is not None and logged_in_as != INSTAGRAM_USERNAME:
+            _instagram_error = f"Session belongs to @{logged_in_as}, expected @{INSTAGRAM_USERNAME}. Run: make instagram-auth"
+            return False
+        if logged_in_as == INSTAGRAM_USERNAME:
+            print(f"[instagram] session verified for @{INSTAGRAM_USERNAME}")
+        else:
+            print(f"[instagram] session loaded for @{INSTAGRAM_USERNAME} (test_login rate-limited, proceeding anyway)")
+    except Exception:
+        print(f"[instagram] session loaded for @{INSTAGRAM_USERNAME} (test_login failed, proceeding anyway)")
+
+    _instagram_ready = True
+    _instagram_error = None
+    return True
+
+
+if INSTAGRAM_USERNAME:
+    _try_load_session()
+else:
+    _instagram_error = "INSTAGRAM_USERNAME is not set in ai_worker/.env"
+
 
 app = FastAPI(title="Fineshyt Photo Curation API")
 
 
 class PhotoMetadata(BaseModel):
     subject: str = Field(description="The primary subject of the photo.")
-    is_macro: bool = Field(description="True if the photo appears to be a macro or extreme close-up shot.")
-    lighting_critique: str = Field(description="A brief, one-sentence critique of the lighting and contrast.")
+    is_macro: bool = Field(
+        description="True if the photo appears to be a macro or extreme close-up shot."
+    )
+    lighting_critique: str = Field(
+        description="A brief, one-sentence critique of the lighting and contrast."
+    )
     artistic_mood: str = Field(description="The emotional tone of the photo.")
     suggested_tags: list[str] = Field(description="5 to 7 specific tags for a portfolio database.")
-    style_match: bool = Field(description="True if the photo matches the provided style description. False if no style description was given.")
-    style_score: int = Field(description="Style match confidence from 0 to 100. 0 if no style description was given.")
-    style_reason: str = Field(description="One sentence explaining the style match decision. Empty string if no style description was given.")
+    style_match: bool = Field(
+        description="True if the photo matches the provided style description. False if no style description was given."
+    )
+    style_score: int = Field(
+        description="Style match confidence from 0 to 100. 0 if no style description was given."
+    )
+    style_reason: str = Field(
+        description="One sentence explaining the style match decision. Empty string if no style description was given."
+    )
 
 
 class InstagramDownloadRequest(BaseModel):
@@ -58,7 +124,7 @@ async def curate_photo(
         raise HTTPException(status_code=400, detail="File must be an image.")
 
     image_bytes = await file.read()
-    base64_image = base64.b64encode(image_bytes).decode('utf-8')
+    base64_image = base64.b64encode(image_bytes).decode("utf-8")
 
     style_prompt = ""
     if style_description:
@@ -82,10 +148,13 @@ if the photo genuinely fits the described aesthetic. Set style_score (0-100) and
                     "content": [
                         {
                             "type": "text",
-                            "text": f"You are an expert photo curator. Analyze this photograph and extract the metadata.\n\n{style_prompt}"
+                            "text": f"You are an expert photo curator. Analyze this photograph and extract the metadata.\n\n{style_prompt}",
                         },
-                        {"type": "image_url", "image_url": {"url": f"data:{file.content_type};base64,{base64_image}"}}
-                    ]
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:{file.content_type};base64,{base64_image}"},
+                        },
+                    ],
                 }
             ],
             max_retries=3,
@@ -96,86 +165,51 @@ if the photo genuinely fits the described aesthetic. Set style_score (0-100) and
         raise HTTPException(status_code=500, detail=f"AI Processing failed: {str(e)}")
 
 
-@app.post("/api/v1/download/instagram", response_model=InstagramDownloadResponse, tags=["Ingestion"])
+@app.post(
+    "/api/v1/download/instagram", response_model=InstagramDownloadResponse, tags=["Ingestion"]
+)
 async def download_instagram(request: InstagramDownloadRequest):
-    """Download recent posts from a public Instagram profile."""
+    """Download recent posts from an Instagram profile using the shared authenticated loader."""
+    if not _instagram_ready and not _try_load_session():
+        raise HTTPException(
+            status_code=401, detail=_instagram_error or "Instagram not authenticated."
+        )
+
     dest_dir = Path(UPLOAD_DIR) / "instagram" / request.username
     dest_dir.mkdir(parents=True, exist_ok=True)
 
-    loader = instaloader.Instaloader(
-        download_videos=False,
-        download_video_thumbnails=False,
-        download_geotags=False,
-        download_comments=False,
-        save_metadata=False,
-        post_metadata_txt_pattern="",
-        filename_pattern="{shortcode}",
-        dirname_pattern=str(dest_dir),
-        quiet=True,
-    )
-
-    # Try password login from env first (most reliable)
-    session_loaded = False
-    if INSTAGRAM_USERNAME and INSTAGRAM_PASSWORD:
-        try:
-            loader.login(INSTAGRAM_USERNAME, INSTAGRAM_PASSWORD)
-            if not loader.context.is_logged_in:
-                raise HTTPException(status_code=401, detail="Instagram login appeared to succeed but session is not authenticated. Instagram may be blocking this login — use the session file approach instead: uv run instaloader --login=" + INSTAGRAM_USERNAME)
-            session_loaded = True
-        except HTTPException:
-            raise
-        except Exception as e:
-            raise HTTPException(status_code=401, detail=f"Instagram login failed: {str(e)}")
-
-    # Fall back to saved session file (created by: uv run instaloader --login=<username>)
-    if not session_loaded:
-        session_user = INSTAGRAM_USERNAME or request.username
-        try:
-            loader.load_session_from_file(session_user)
-            session_loaded = True
-        except FileNotFoundError:
-            pass
-        except Exception as e:
-            raise HTTPException(status_code=401, detail=f"Session file invalid: {str(e)}. Run: uv run instaloader --login={request.username}")
-
-    if not session_loaded:
-        raise HTTPException(
-            status_code=401,
-            detail=(
-                f"Instagram requires authentication. "
-                f"Either set INSTAGRAM_USERNAME and INSTAGRAM_PASSWORD in ai_worker/.env, "
-                f"or run: uv run instaloader --login={request.username}"
-            ),
-        )
-
     try:
-        profile = instaloader.Profile.from_username(loader.context, request.username)
+        profile = instaloader.Profile.from_username(_loader.context, request.username)
     except instaloader.exceptions.ProfileNotExistsException as e:
-        raise HTTPException(status_code=404, detail=f"Instagram profile '{request.username}' not found or session expired: {str(e)}")
+        # Instagram returns 404 for both missing profiles AND rate limiting.
+        # If the username looks right, it's almost certainly a rate limit.
+        raise HTTPException(
+            status_code=429,
+            detail=f"Instagram is rate-limiting the profile lookup for @{request.username}. Wait a few minutes and try again. (Raw: {str(e)})"
+        )
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Failed to fetch Instagram profile: {str(e)}")
+        raise HTTPException(status_code=502, detail=f"Failed to fetch profile: {str(e)}")
 
     file_paths = []
     shortcodes = []
 
     try:
-        posts = profile.get_posts()
         count = 0
-        for post in posts:
+        for post in profile.get_posts():
             if count >= request.max_posts:
                 break
             if post.is_video:
                 continue
             try:
-                loader.download_post(post, target=dest_dir)
-                # instaloader saves as {shortcode}.jpg
+                _loader.dirname_pattern = str(dest_dir)
+                _loader.filename_pattern = "{shortcode}"
+                _loader.download_post(post, target=dest_dir)
                 candidate = dest_dir / f"{post.shortcode}.jpg"
                 if candidate.exists():
                     file_paths.append(str(candidate))
                     shortcodes.append(post.shortcode)
                     count += 1
             except Exception:
-                # Skip posts that fail individually
                 continue
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Failed to download posts: {str(e)}")

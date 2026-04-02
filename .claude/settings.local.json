@@ -6,7 +6,9 @@
       "Bash(mix ecto.gen.migration create_photos)",
       "Bash(mix ecto.migrate)",
       "Bash(mix compile:*)",
-      "WebFetch(domain:www.qwelian.com)"
+      "WebFetch(domain:www.qwelian.com)",
+      "Bash(mix deps.get)",
+      "WebFetch(domain:instaloader.github.io)"
     ]
   }
 }

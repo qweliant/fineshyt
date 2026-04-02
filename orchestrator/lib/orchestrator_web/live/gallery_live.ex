@@ -11,6 +11,7 @@ defmodule OrchestratorWeb.GalleryLive do
     socket =
       socket
       |> assign(:photos, Photos.list_photos())
+      |> assign(:tag_profile, Photos.tag_affinity_profile())
       |> assign(:filter, :all)
       |> assign(:style_description, "")
       |> assign(:instagram_username, "qwelian")
@@ -64,10 +65,18 @@ defmodule OrchestratorWeb.GalleryLive do
   end
 
   @impl Phoenix.LiveView
+  def handle_event("rate", %{"id" => id, "rating" => rating_str}, socket) do
+    rating = String.to_integer(rating_str)
+    Photos.rate_photo(String.to_integer(id), rating)
+    profile = Photos.tag_affinity_profile()
+    photos = Photos.list_photos()
+    {:noreply, assign(socket, photos: photos, tag_profile: profile)}
+  end
+
+  @impl Phoenix.LiveView
   def handle_info({:curation_complete, _ref, _metadata}, socket) do
     photos = Photos.list_photos()
-    importing = Enum.any?(photos, fn _ -> false end)
-    {:noreply, assign(socket, photos: photos, importing: importing)}
+    {:noreply, assign(socket, photos: photos)}
   end
 
   @impl Phoenix.LiveView
@@ -192,6 +201,7 @@ defmodule OrchestratorWeb.GalleryLive do
       <% else %>
         <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
           <%= for photo <- filtered_photos(@photos, @filter) do %>
+            <% vibe = Photos.vibe_score(photo, @tag_profile) %>
             <div class="group relative aspect-square overflow-hidden border border-gray-200 bg-gray-50">
               <img
                 src={photo.url}
@@ -199,13 +209,20 @@ defmodule OrchestratorWeb.GalleryLive do
                 class="object-cover w-full h-full transition-transform duration-500 group-hover:scale-105"
               />
 
-              <%!-- Style badge --%>
-              <div class={[
-                "absolute top-2 right-2 font-sans text-xs font-bold uppercase tracking-wider px-2 py-1",
-                photo.style_match && "bg-[#111111] text-[#fcfbf9]",
-                photo.style_match == false && "bg-white text-gray-500 border border-gray-300"
-              ]}>
-                <%= if photo.style_match, do: "✓ Match", else: "✗ No" %>
+              <%!-- Top badges --%>
+              <div class="absolute top-2 right-2 flex flex-col items-end gap-1">
+                <div class={[
+                  "font-sans text-xs font-bold uppercase tracking-wider px-2 py-1",
+                  photo.style_match && "bg-[#111111] text-[#fcfbf9]",
+                  photo.style_match == false && "bg-white text-gray-500 border border-gray-300"
+                ]}>
+                  <%= if photo.style_match, do: "✓ Match", else: "✗ No" %>
+                </div>
+                <%= if vibe do %>
+                  <div class="bg-[#fcfbf9] border border-[#111111] font-sans text-[10px] uppercase tracking-wider px-2 py-1 font-bold">
+                    vibe <%= vibe %>
+                  </div>
+                <% end %>
               </div>
 
               <%!-- Hover overlay --%>
@@ -219,6 +236,31 @@ defmodule OrchestratorWeb.GalleryLive do
                 <%= if photo.style_reason && photo.style_reason != "" do %>
                   <p class="text-gray-400 font-sans text-xs mt-1 italic leading-snug"><%= photo.style_reason %></p>
                 <% end %>
+                <%= if photo.suggested_tags != [] do %>
+                  <div class="flex flex-wrap gap-1 mt-2">
+                    <%= for tag <- photo.suggested_tags do %>
+                      <span class="font-sans text-[10px] uppercase tracking-wider border border-gray-500 text-gray-300 px-1.5 py-0.5">
+                        <%= String.downcase(tag) %>
+                      </span>
+                    <% end %>
+                  </div>
+                <% end %>
+
+                <%!-- Star rating --%>
+                <div class="flex gap-1 mt-3">
+                  <%= for star <- 1..5 do %>
+                    <button
+                      phx-click="rate"
+                      phx-value-id={photo.id}
+                      phx-value-rating={star}
+                      class={[
+                        "text-lg leading-none transition-colors",
+                        photo.user_rating && photo.user_rating >= star && "text-[#fcfbf9]",
+                        !(photo.user_rating && photo.user_rating >= star) && "text-gray-600 hover:text-gray-300"
+                      ]}
+                    >★</button>
+                  <% end %>
+                </div>
               </div>
             </div>
           <% end %>

@@ -41,7 +41,7 @@ defmodule OrchestratorWeb.CuratorLive do
         |> Orchestrator.Workers.AiCurationWorker.new()
         |> Oban.insert()
 
-        {:ok, %{url: ~p"/uploads/#{entry.client_name}", ref: ref}}
+        {:ok, %{url: "/uploads/#{entry.client_name}", ref: ref}}
       end)
 
     {:noreply, assign(socket, uploaded_files: uploaded_files)}
@@ -62,6 +62,8 @@ defmodule OrchestratorWeb.CuratorLive do
       _ -> {:noreply, assign(socket, status: :failed)}
     end
   end
+
+  def handle_info(_unhandled, socket), do: {:noreply, socket}
 
   defp upload_error_to_string(:too_large), do: "File exceeds 10MB limit."
   defp upload_error_to_string(:not_accepted), do: "Only .jpg, .jpeg, and .png files are accepted."
@@ -85,6 +87,9 @@ defmodule OrchestratorWeb.CuratorLive do
         <div class="mt-6 md:mt-0 text-right uppercase tracking-widest text-xs font-sans font-bold">
           <p>Edition No. 001</p>
           <p class="text-gray-500">Autonomous Archival System</p>
+          <a href="/gallery" class="mt-3 inline-block border-b border-[#111111] pb-0.5 hover:text-gray-500 hover:border-gray-500 transition-colors">
+            View Gallery →
+          </a>
         </div>
       </header>
 
