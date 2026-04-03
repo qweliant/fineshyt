@@ -8,7 +8,9 @@
       "Bash(mix compile:*)",
       "WebFetch(domain:www.qwelian.com)",
       "Bash(mix deps.get)",
-      "WebFetch(domain:instaloader.github.io)"
+      "WebFetch(domain:instaloader.github.io)",
+      "WebSearch",
+      "WebFetch(domain:github.com)"
     ]
   }
 }

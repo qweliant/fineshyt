@@ -31,6 +31,22 @@ defmodule Orchestrator.Photos do
     |> Repo.update()
   end
 
+  def set_project(id, project) do
+    get_photo!(id)
+    |> Photo.changeset(%{project: project})
+    |> Repo.update()
+  end
+
+  # Photos approved for blog export: rated >= 4 stars OR style_score >= 75.
+  # Unrated photos are never included. Newer first.
+  def list_approved do
+    Repo.all(
+      from p in Photo,
+        where: not is_nil(p.user_rating) and (p.user_rating >= 4 or p.style_score >= 75),
+        order_by: [desc: p.inserted_at]
+    )
+  end
+
   # Returns a map of %{tag => mean_rating} for all rated photos.
   # This is the user's learned preference profile.
   def tag_affinity_profile do

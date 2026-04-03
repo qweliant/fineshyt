@@ -18,6 +18,7 @@ defmodule Orchestrator.Photos.Photo do
     field :is_macro, :boolean
     field :suggested_tags, {:array, :string}, default: []
     field :user_rating, :integer
+    field :project, :string
 
     timestamps()
   end
@@ -28,7 +29,7 @@ defmodule Orchestrator.Photos.Photo do
       :file_path, :url, :source, :instagram_shortcode,
       :style_match, :style_score, :style_reason,
       :subject, :artistic_mood, :lighting_critique, :is_macro, :suggested_tags,
-      :user_rating
+      :user_rating, :project
     ])
     |> validate_inclusion(:user_rating, 1..5, message: "must be between 1 and 5")
     |> validate_required([:file_path])

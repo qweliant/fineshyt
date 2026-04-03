@@ -1,12 +1,13 @@
 import base64
 import os
+import random
 from pathlib import Path
 
-import instaloader
 import instructor
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from openai import AsyncOpenAI
+from PIL import Image
 from pydantic import BaseModel, Field
 
 load_dotenv()
@@ -14,72 +15,13 @@ load_dotenv()
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://localhost:11434/v1/")
 LLM_API_KEY = os.getenv("LLM_API_KEY", "ollama")
 LLM_MODEL = os.getenv("LLM_MODEL", "llava")
-INSTAGRAM_USERNAME = os.getenv("INSTAGRAM_USERNAME", "")
-INSTAGRAM_PASSWORD = os.getenv("INSTAGRAM_PASSWORD", "")
-UPLOAD_DIR = os.getenv("UPLOAD_DIR", "/tmp/fineshyt_uploads")
+# Where converted JPEGs are written — must match orchestrator's priv/static/uploads/
+STATIC_UPLOADS_DIR = os.getenv("STATIC_UPLOADS_DIR", "/tmp/fineshyt_uploads")
 
 client = instructor.from_openai(
     AsyncOpenAI(base_url=LLM_BASE_URL, api_key=LLM_API_KEY),
     mode=instructor.Mode.JSON,
 )
-
-# Build a single shared Instaloader instance at startup.
-# Strategy: load saved session → skip login entirely.
-# If no session exists yet: login with credentials → save session for next time.
-_loader = instaloader.Instaloader(
-    download_videos=False,
-    download_video_thumbnails=False,
-    download_geotags=False,
-    download_comments=False,
-    save_metadata=False,
-    post_metadata_txt_pattern="",
-    quiet=True,
-)
-_instagram_ready = False
-_instagram_error: str | None = None
-
-def _try_load_session() -> bool:
-    """Load session from file, trusting it if the file loads cleanly.
-    test_login() hits the network and can be rate-limited — treat that as a
-    soft warning, not a hard failure. Only reject if the file is missing or
-    the session belongs to a different user."""
-    global _instagram_ready, _instagram_error
-    if not INSTAGRAM_USERNAME:
-        _instagram_error = "INSTAGRAM_USERNAME is not set in ai_worker/.env"
-        return False
-    try:
-        _loader.load_session_from_file(INSTAGRAM_USERNAME)
-    except FileNotFoundError:
-        _instagram_error = f"No session file for @{INSTAGRAM_USERNAME}. Run: make instagram-auth"
-        return False
-    except Exception as e:
-        _instagram_error = f"Could not load session for @{INSTAGRAM_USERNAME}: {e}. Run: make instagram-auth"
-        return False
-
-    # Session file loaded. Optionally verify with test_login, but don't fail
-    # on rate-limit errors — Instagram 401s here just mean "try later".
-    try:
-        logged_in_as = _loader.test_login()
-        if logged_in_as is not None and logged_in_as != INSTAGRAM_USERNAME:
-            _instagram_error = f"Session belongs to @{logged_in_as}, expected @{INSTAGRAM_USERNAME}. Run: make instagram-auth"
-            return False
-        if logged_in_as == INSTAGRAM_USERNAME:
-            print(f"[instagram] session verified for @{INSTAGRAM_USERNAME}")
-        else:
-            print(f"[instagram] session loaded for @{INSTAGRAM_USERNAME} (test_login rate-limited, proceeding anyway)")
-    except Exception:
-        print(f"[instagram] session loaded for @{INSTAGRAM_USERNAME} (test_login failed, proceeding anyway)")
-
-    _instagram_ready = True
-    _instagram_error = None
-    return True
-
-
-if INSTAGRAM_USERNAME:
-    _try_load_session()
-else:
-    _instagram_error = "INSTAGRAM_USERNAME is not set in ai_worker/.env"
-
 
 app = FastAPI(title="Fineshyt Photo Curation API")
 
@@ -105,14 +47,14 @@ class PhotoMetadata(BaseModel):
     )
 
 
-class InstagramDownloadRequest(BaseModel):
-    username: str
-    max_posts: int = 50
+class LocalIngestRequest(BaseModel):
+    dir_path: str
+    sample: int | None = None
 
 
-class InstagramDownloadResponse(BaseModel):
+class LocalIngestResponse(BaseModel):
     file_paths: list[str]
-    shortcodes: list[str]
+    total_found: int
 
 
 @app.post("/api/v1/curate", response_model=PhotoMetadata, tags=["Agent Workflow"])
@@ -126,7 +68,6 @@ async def curate_photo(
     image_bytes = await file.read()
     base64_image = base64.b64encode(image_bytes).decode("utf-8")
 
-    style_prompt = ""
     if style_description:
         style_prompt = f"""
 The photographer's style is described as:
@@ -165,53 +106,92 @@ if the photo genuinely fits the described aesthetic. Set style_score (0-100) and
         raise HTTPException(status_code=500, detail=f"AI Processing failed: {str(e)}")
 
 
-@app.post(
-    "/api/v1/download/instagram", response_model=InstagramDownloadResponse, tags=["Ingestion"]
-)
-async def download_instagram(request: InstagramDownloadRequest):
-    """Download recent posts from an Instagram profile using the shared authenticated loader."""
-    if not _instagram_ready and not _try_load_session():
+# Formats Pillow can open natively
+_PILLOW_EXTS = {".tif", ".tiff", ".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tga", ".psd"}
+
+# Camera RAW formats — handled by rawpy if available
+_RAW_EXTS = {".cr2", ".cr3", ".nef", ".arw", ".dng", ".raf", ".orf", ".rw2", ".pef", ".srw", ".x3f", ".3fr", ".erf", ".mef", ".mos", ".nrw"}
+
+_ALL_EXTS = _PILLOW_EXTS | _RAW_EXTS
+
+try:
+    import rawpy
+    import numpy as np
+    _RAWPY_AVAILABLE = True
+except ImportError:
+    _RAWPY_AVAILABLE = False
+
+
+def _open_as_pil(path: Path) -> Image.Image:
+    """Open any supported image file and return an RGB PIL Image."""
+    ext = path.suffix.lower()
+    if ext in _RAW_EXTS:
+        if not _RAWPY_AVAILABLE:
+            raise RuntimeError(f"rawpy not available — cannot open RAW file {path.name}")
+        with rawpy.imread(str(path)) as raw:
+            rgb = raw.postprocess(use_camera_wb=True, output_bps=8)
+        return Image.fromarray(np.asarray(rgb))
+    else:
+        return Image.open(path).convert("RGB")
+
+
+def _resize_to_long_edge(img: Image.Image, long_edge: int) -> Image.Image:
+    w, h = img.size
+    if max(w, h) <= long_edge:
+        return img
+    if w >= h:
+        return img.resize((long_edge, round(h * long_edge / w)), Image.LANCZOS)
+    return img.resize((round(w * long_edge / h), long_edge), Image.LANCZOS)
+
+
+def _unique_output_path(uploads_dir: Path, stem: str) -> Path:
+    out = uploads_dir / f"{stem}.jpg"
+    counter = 1
+    while out.exists():
+        out = uploads_dir / f"{stem}_{counter}.jpg"
+        counter += 1
+    return out
+
+
+@app.post("/api/v1/ingest/local", response_model=LocalIngestResponse, tags=["Ingestion"])
+def ingest_local(request: LocalIngestRequest):
+    """Walk a local directory, find all supported image files (JPEG, TIFF, PNG, WebP,
+    camera RAW, etc.), optionally random-sample N, convert to JPEG (1440px long edge,
+    q=82), and save to the static uploads directory.
+    Runs synchronously (FastAPI threadpool) — safe for large batches."""
+    source_dir = Path(request.dir_path)
+    if not source_dir.is_dir():
+        raise HTTPException(status_code=400, detail=f"Directory not found: {request.dir_path}")
+
+    image_files = [
+        p for p in source_dir.rglob("*")
+        if p.is_file() and p.suffix.lower() in _ALL_EXTS
+    ]
+
+    if not image_files:
         raise HTTPException(
-            status_code=401, detail=_instagram_error or "Instagram not authenticated."
+            status_code=404,
+            detail=f"No supported image files found in {request.dir_path}"
         )
 
-    dest_dir = Path(UPLOAD_DIR) / "instagram" / request.username
-    dest_dir.mkdir(parents=True, exist_ok=True)
+    total_found = len(image_files)
 
-    try:
-        profile = instaloader.Profile.from_username(_loader.context, request.username)
-    except instaloader.exceptions.ProfileNotExistsException as e:
-        # Instagram returns 404 for both missing profiles AND rate limiting.
-        # If the username looks right, it's almost certainly a rate limit.
-        raise HTTPException(
-            status_code=429,
-            detail=f"Instagram is rate-limiting the profile lookup for @{request.username}. Wait a few minutes and try again. (Raw: {str(e)})"
-        )
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Failed to fetch profile: {str(e)}")
+    if request.sample is not None and request.sample < total_found:
+        image_files = random.sample(image_files, request.sample)
+
+    uploads_dir = Path(STATIC_UPLOADS_DIR)
+    uploads_dir.mkdir(parents=True, exist_ok=True)
 
     file_paths = []
-    shortcodes = []
+    for img_path in image_files:
+        try:
+            img = _open_as_pil(img_path)
+            img = _resize_to_long_edge(img, 1440)
+            out_path = _unique_output_path(uploads_dir, img_path.stem)
+            img.save(out_path, "JPEG", quality=82, optimize=True)
+            file_paths.append(str(out_path))
+        except Exception as e:
+            print(f"[ingest] Skipped {img_path.name}: {e}")
+            continue
 
-    try:
-        count = 0
-        for post in profile.get_posts():
-            if count >= request.max_posts:
-                break
-            if post.is_video:
-                continue
-            try:
-                _loader.dirname_pattern = str(dest_dir)
-                _loader.filename_pattern = "{shortcode}"
-                _loader.download_post(post, target=dest_dir)
-                candidate = dest_dir / f"{post.shortcode}.jpg"
-                if candidate.exists():
-                    file_paths.append(str(candidate))
-                    shortcodes.append(post.shortcode)
-                    count += 1
-            except Exception:
-                continue
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Failed to download posts: {str(e)}")
-
-    return InstagramDownloadResponse(file_paths=file_paths, shortcodes=shortcodes)
+    return LocalIngestResponse(file_paths=file_paths, total_found=total_found)
