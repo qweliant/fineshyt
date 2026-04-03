@@ -16,13 +16,22 @@ defmodule Orchestrator.Workers.AiCurationWorker do
     style_description = Map.get(args, "style_description", "")
     source = Map.get(args, "source", "upload")
     instagram_shortcode = Map.get(args, "instagram_shortcode")
+    basename = Path.basename(file_path)
 
     result =
       try do
-        image_binary = File.read!(file_path)
+        # Ensure the file is in priv/static/uploads/ so Phoenix can serve it.
+        # CuratorLive puts files there directly; the local ingest pipeline saves
+        # to STATIC_UPLOADS_DIR (Python side) which may differ. Always normalise here.
+        uploads_dir = Path.join([:code.priv_dir(:orchestrator), "static", "uploads"])
+        File.mkdir_p!(uploads_dir)
+        dest = Path.join(uploads_dir, basename)
+        if file_path != dest, do: File.cp!(file_path, dest)
+
+        image_binary = File.read!(dest)
 
         form_fields =
-          [file: {image_binary, filename: Path.basename(file_path), content_type: "image/jpeg"}] ++
+          [file: {image_binary, filename: basename, content_type: "image/jpeg"}] ++
             if style_description != "", do: [style_description: style_description], else: []
 
         case Req.post("http://127.0.0.1:8000/api/v1/curate",
@@ -30,10 +39,10 @@ defmodule Orchestrator.Workers.AiCurationWorker do
                receive_timeout: 60_000
              ) do
           {:ok, %Req.Response{status: 200, body: metadata}} ->
-            url = "/uploads/#{Path.basename(file_path)}"
+            url = "/uploads/#{basename}"
 
             Photos.create_photo(%{
-              file_path: file_path,
+              file_path: dest,
               url: url,
               source: source,
               instagram_shortcode: instagram_shortcode,
@@ -47,8 +56,12 @@ defmodule Orchestrator.Workers.AiCurationWorker do
               suggested_tags: metadata["suggested_tags"]
             })
 
-            Logger.info("AI Curation successful for #{file_path}!")
-            Phoenix.PubSub.broadcast(Orchestrator.PubSub, "photo_updates", {:curation_complete, ref, metadata})
+            Logger.info("AI Curation successful for #{basename}!")
+            Phoenix.PubSub.broadcast(
+              Orchestrator.PubSub,
+              "photo_updates",
+              {:curation_complete, ref, metadata, basename}
+            )
             :ok
 
           {:ok, %Req.Response{status: status}} ->

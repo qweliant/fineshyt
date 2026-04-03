@@ -48,7 +48,7 @@ defmodule OrchestratorWeb.CuratorLive do
   end
 
   @impl Phoenix.LiveView
-  def handle_info({:curation_complete, ref, metadata}, socket) do
+  def handle_info({:curation_complete, ref, metadata, _basename}, socket) do
     case Enum.find(socket.assigns.uploaded_files, &(&1.ref == ref)) do
       nil -> {:noreply, socket}
       _ -> {:noreply, assign(socket, metadata: metadata, status: :complete)}

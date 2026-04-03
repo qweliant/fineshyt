@@ -28,10 +28,19 @@ defmodule Orchestrator.Workers.LocalBatchImportWorker do
          status: 200,
          body: %{"file_paths" => file_paths, "total_found" => total_found}
        }} ->
-        count = length(file_paths)
-        Logger.info("Converted #{count}/#{total_found} TIFFs, queuing for AI curation...")
+        basenames = Enum.map(file_paths, &Path.basename/1)
+        already_done = Photos.existing_basenames(basenames)
 
-        for file_path <- file_paths do
+        new_paths =
+          Enum.reject(file_paths, fn path ->
+            MapSet.member?(already_done, Path.basename(path))
+          end)
+
+        skipped = length(file_paths) - length(new_paths)
+        if skipped > 0, do: Logger.info("Skipping #{skipped} already-processed files.")
+        Logger.info("Converted #{length(file_paths)}/#{total_found} images, queuing #{length(new_paths)} new for AI curation...")
+
+        for file_path <- new_paths do
           ref = make_ref() |> inspect()
 
           %{
@@ -47,7 +56,7 @@ defmodule Orchestrator.Workers.LocalBatchImportWorker do
         Phoenix.PubSub.broadcast(
           Orchestrator.PubSub,
           "photo_updates",
-          {:import_started, count}
+          {:import_started, length(new_paths)}
         )
 
         :ok

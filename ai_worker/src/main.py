@@ -110,7 +110,7 @@ if the photo genuinely fits the described aesthetic. Set style_score (0-100) and
 _PILLOW_EXTS = {".tif", ".tiff", ".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tga", ".psd"}
 
 # Camera RAW formats — handled by rawpy if available
-_RAW_EXTS = {".cr2", ".cr3", ".nef", ".arw", ".dng", ".raf", ".orf", ".rw2", ".pef", ".srw", ".x3f", ".3fr", ".erf", ".mef", ".mos", ".nrw"}
+_RAW_EXTS = {".cr2", ".cr3", ".nef", ".arw", ".dng", ".raf", ".orf", ".rw2", ".pef", ".srw", ".x3f", ".3fr", ".erf", ".mef", ".mos", ".nrw", ".raw"}
 
 _ALL_EXTS = _PILLOW_EXTS | _RAW_EXTS
 
@@ -165,7 +165,9 @@ def ingest_local(request: LocalIngestRequest):
 
     image_files = [
         p for p in source_dir.rglob("*")
-        if p.is_file() and p.suffix.lower() in _ALL_EXTS
+        if p.is_file()
+        and not p.name.startswith(".")  # skip macOS ._sidecar and hidden files
+        and p.suffix.lower() in _ALL_EXTS
     ]
 
     if not image_files:

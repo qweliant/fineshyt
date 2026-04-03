@@ -1,6 +1,8 @@
 defmodule OrchestratorWeb.GalleryLive do
   use OrchestratorWeb, :live_view
 
+  import Ecto.Query
+
   alias Orchestrator.Photos
   alias Orchestrator.Workers.LocalBatchImportWorker
 
@@ -18,11 +20,11 @@ defmodule OrchestratorWeb.GalleryLive do
       |> assign(:tag_profile, Photos.tag_affinity_profile())
       |> assign(:filter, :all)
       |> assign(:style_description, @default_style)
-      |> assign(:dir_path, "")
-      |> assign(:sample, 200)
       |> assign(:importing, false)
       |> assign(:import_queued, 0)
+      |> assign(:import_processed, 0)
       |> assign(:import_error, nil)
+      |> assign(:activity_log, [])
 
     {:ok, socket}
   end
@@ -33,36 +35,51 @@ defmodule OrchestratorWeb.GalleryLive do
   end
 
   @impl Phoenix.LiveView
-  def handle_event("set_style", %{"style_description" => desc}, socket) do
-    {:noreply, assign(socket, :style_description, desc)}
-  end
-
-  @impl Phoenix.LiveView
-  def handle_event("set_dir_path", %{"dir_path" => path}, socket) do
-    {:noreply, assign(socket, :dir_path, path)}
-  end
-
-  @impl Phoenix.LiveView
-  def handle_event("set_sample", %{"sample" => n}, socket) do
-    case Integer.parse(n) do
-      {val, _} when val > 0 -> {:noreply, assign(socket, :sample, val)}
-      _ -> {:noreply, socket}
+  def handle_event("import", params, socket) do
+    dir_path = params |> Map.get("dir_path", "") |> String.trim()
+    style = Map.get(params, "style_description", @default_style)
+    sample = case Integer.parse(Map.get(params, "sample", "50")) do
+      {n, _} when n > 0 -> n
+      _ -> 50
     end
+
+    if dir_path != "" do
+      %{"dir_path" => dir_path, "style_description" => style, "sample" => sample}
+      |> LocalBatchImportWorker.new()
+      |> Oban.insert()
+    end
+
+    {:noreply, assign(socket,
+      importing: dir_path != "",
+      import_error: nil,
+      import_queued: 0,
+      import_processed: 0,
+      activity_log: []
+    )}
   end
 
   @impl Phoenix.LiveView
-  def handle_event("import", _params, socket) do
-    dir_path = String.trim(socket.assigns.dir_path)
+  def handle_event("stop_import", _params, socket) do
+    Oban.cancel_all_jobs(from(j in Oban.Job, where: j.queue == "ai_jobs"))
+    {:noreply, assign(socket, importing: false)}
+  end
 
-    %{
-      "dir_path" => dir_path,
-      "style_description" => socket.assigns.style_description,
-      "sample" => socket.assigns.sample
-    }
-    |> LocalBatchImportWorker.new()
-    |> Oban.insert()
+  @impl Phoenix.LiveView
+  def handle_event("clear_log", _params, socket) do
+    {:noreply, assign(socket, activity_log: [])}
+  end
 
-    {:noreply, assign(socket, importing: true, import_error: nil)}
+  @impl Phoenix.LiveView
+  def handle_event("override_score", %{"id" => id, "score" => score}, socket) do
+    Photos.override_curation(String.to_integer(id), %{style_score: String.to_integer(score)})
+    {:noreply, assign(socket, :photos, Photos.list_photos())}
+  end
+
+  @impl Phoenix.LiveView
+  def handle_event("toggle_match", %{"id" => id}, socket) do
+    photo = Photos.get_photo!(String.to_integer(id))
+    Photos.override_curation(photo.id, %{style_match: !photo.style_match})
+    {:noreply, assign(socket, :photos, Photos.list_photos())}
   end
 
   @impl Phoenix.LiveView
@@ -91,14 +108,36 @@ defmodule OrchestratorWeb.GalleryLive do
   end
 
   @impl Phoenix.LiveView
-  def handle_info({:curation_complete, _ref, _metadata}, socket) do
-    photos = Photos.list_photos()
-    {:noreply, assign(socket, photos: photos)}
+  def handle_info({:curation_complete, _ref, metadata, basename}, socket) do
+    entry = %{
+      filename: basename,
+      subject: metadata["subject"] || "—",
+      score: metadata["style_score"] || 0,
+      match: metadata["style_match"] || false
+    }
+
+    log = [entry | socket.assigns.activity_log] |> Enum.take(50)
+    processed = socket.assigns.import_processed + 1
+    done = processed >= socket.assigns.import_queued and socket.assigns.import_queued > 0
+
+    {:noreply,
+     socket
+     |> assign(:photos, Photos.list_photos())
+     |> assign(:activity_log, log)
+     |> assign(:import_processed, processed)
+     |> assign(:importing, not done)}
   end
 
   @impl Phoenix.LiveView
   def handle_info({:curation_failed, _ref, _reason}, socket) do
-    {:noreply, assign(socket, photos: Photos.list_photos())}
+    processed = socket.assigns.import_processed + 1
+    done = processed >= socket.assigns.import_queued and socket.assigns.import_queued > 0
+
+    {:noreply,
+     socket
+     |> assign(:photos, Photos.list_photos())
+     |> assign(:import_processed, processed)
+     |> assign(:importing, not done)}
   end
 
   defp filtered_photos(photos, :all), do: photos
@@ -124,14 +163,12 @@ defmodule OrchestratorWeb.GalleryLive do
       </header>
 
       <%!-- Local Ingest Controls --%>
-      <div class="mb-10 flex flex-col gap-4">
+      <form phx-submit="import" class="mb-10 flex flex-col gap-4">
         <div class="flex flex-col md:flex-row gap-4">
           <div class="flex-1">
-            <label class="font-sans uppercase tracking-widest text-xs block mb-2 text-gray-500">TIFF Directory</label>
+            <label class="font-sans uppercase tracking-widest text-xs block mb-2 text-gray-500">Directory</label>
             <input
               type="text"
-              value={@dir_path}
-              phx-change="set_dir_path"
               name="dir_path"
               placeholder="/Volumes/drive/photos/2024"
               class="w-full border border-[#111111] bg-transparent px-4 py-3 font-sans text-sm focus:outline-none focus:ring-1 focus:ring-[#111111]"
@@ -141,9 +178,8 @@ defmodule OrchestratorWeb.GalleryLive do
             <label class="font-sans uppercase tracking-widest text-xs block mb-2 text-gray-500">Sample N</label>
             <input
               type="number"
-              value={@sample}
-              phx-change="set_sample"
               name="sample"
+              value="50"
               min="1"
               class="w-full border border-[#111111] bg-transparent px-4 py-3 font-sans text-sm focus:outline-none focus:ring-1 focus:ring-[#111111]"
             />
@@ -152,7 +188,6 @@ defmodule OrchestratorWeb.GalleryLive do
         <div>
           <label class="font-sans uppercase tracking-widest text-xs block mb-2 text-gray-500">Style Description</label>
           <textarea
-            phx-change="set_style"
             name="style_description"
             rows="3"
             class="w-full border border-[#111111] bg-transparent px-4 py-3 font-sans text-sm focus:outline-none focus:ring-1 focus:ring-[#111111] resize-none"
@@ -160,8 +195,8 @@ defmodule OrchestratorWeb.GalleryLive do
         </div>
         <div class="flex justify-end">
           <button
-            phx-click="import"
-            disabled={@importing or @dir_path == ""}
+            type="submit"
+            disabled={@importing}
             class="font-sans uppercase tracking-widest text-sm bg-[#111111] text-[#fcfbf9] px-8 py-3 hover:bg-gray-800 transition-colors disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
           >
             <%= if @importing do %>
@@ -174,7 +209,7 @@ defmodule OrchestratorWeb.GalleryLive do
             <% end %>
           </button>
         </div>
-      </div>
+      </form>
 
       <%!-- Import error --%>
       <%= if @import_error do %>
@@ -184,11 +219,54 @@ defmodule OrchestratorWeb.GalleryLive do
         </div>
       <% end %>
 
-      <%!-- Import status --%>
-      <%= if @importing and @import_queued > 0 do %>
-        <p class="font-sans text-xs uppercase tracking-widest text-gray-500 mb-8">
-          Processing <%= @import_queued %> photos...
-        </p>
+      <%!-- Activity Log --%>
+      <%= if @importing or @activity_log != [] do %>
+        <div class="mb-10 border border-gray-200">
+          <div class="flex items-center justify-between px-4 py-2 border-b border-gray-200 bg-gray-50">
+            <span class="font-sans text-xs uppercase tracking-widest text-gray-500 flex items-center gap-2">
+              <%= if @importing do %>
+                <span class="w-1.5 h-1.5 bg-[#111111] rounded-full animate-ping inline-block"></span>
+                Processing <%= @import_processed %> / <%= @import_queued %>
+              <% else %>
+                Done — <%= @import_processed %> processed
+              <% end %>
+            </span>
+            <div class="flex items-center gap-3">
+              <%= if @importing do %>
+                <button
+                  phx-click="stop_import"
+                  class="font-sans text-xs uppercase tracking-widest text-red-700 border border-red-300 px-3 py-1 hover:border-red-700 hover:text-red-900 transition-colors"
+                >
+                  Stop ×
+                </button>
+              <% end %>
+              <button
+                phx-click="clear_log"
+                class="font-sans text-xs uppercase tracking-widest text-gray-400 hover:text-gray-700 transition-colors"
+              >
+                Clear
+              </button>
+            </div>
+          </div>
+          <div class="divide-y divide-gray-100 max-h-52 overflow-y-auto">
+            <%= for entry <- @activity_log do %>
+              <div class="flex items-center gap-3 px-4 py-2 font-mono text-xs">
+                <span class={["w-3 shrink-0", entry.match && "text-[#111111]", !entry.match && "text-gray-300"]}>
+                  <%= if entry.match, do: "✓", else: "—" %>
+                </span>
+                <span class="w-44 shrink-0 text-gray-500 truncate"><%= entry.filename %></span>
+                <span class="flex-1 text-gray-400 truncate italic"><%= entry.subject %></span>
+                <span class={[
+                  "shrink-0 font-bold tabular-nums",
+                  entry.score >= 75 && "text-[#111111]",
+                  entry.score < 75 && "text-gray-400"
+                ]}>
+                  <%= entry.score %>
+                </span>
+              </div>
+            <% end %>
+          </div>
+        </div>
       <% end %>
 
       <%!-- Filter Tabs --%>
@@ -216,7 +294,7 @@ defmodule OrchestratorWeb.GalleryLive do
       <%= if filtered_photos(@photos, @filter) == [] do %>
         <div class="text-center py-24 text-gray-400 font-serif italic text-xl">
           <%= if @photos == [] do %>
-            No photos yet. Point at a TIFF directory and ingest, or curate a single photo.
+            No photos yet. Point at a directory and ingest, or curate a single photo.
           <% else %>
             No photos match this filter.
           <% end %>
@@ -256,11 +334,25 @@ defmodule OrchestratorWeb.GalleryLive do
               <%!-- Hover overlay --%>
               <div class="absolute inset-0 bg-[#111111]/80 opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex flex-col justify-end p-4">
                 <p class="text-[#fcfbf9] font-serif text-sm leading-snug mb-1"><%= photo.subject %></p>
-                <%= if photo.style_score do %>
-                  <p class="text-gray-300 font-sans text-xs uppercase tracking-wider">
-                    Score: <%= photo.style_score %>/100
-                  </p>
-                <% end %>
+
+                <%!-- Score slider --%>
+                <div class="flex items-center gap-2 mt-1">
+                  <input
+                    type="range"
+                    min="0"
+                    max="100"
+                    value={photo.style_score || 0}
+                    phx-change="override_score"
+                    phx-debounce="300"
+                    phx-value-id={photo.id}
+                    name="score"
+                    class="flex-1 h-px cursor-pointer [accent-color:white]"
+                  />
+                  <span class="text-gray-300 font-sans text-xs tabular-nums w-6 text-right shrink-0">
+                    <%= photo.style_score || 0 %>
+                  </span>
+                </div>
+
                 <%= if photo.style_reason && photo.style_reason != "" do %>
                   <p class="text-gray-400 font-sans text-xs mt-1 italic leading-snug"><%= photo.style_reason %></p>
                 <% end %>
@@ -274,20 +366,33 @@ defmodule OrchestratorWeb.GalleryLive do
                   </div>
                 <% end %>
 
-                <%!-- Star rating --%>
-                <div class="flex gap-1 mt-3">
-                  <%= for star <- 1..5 do %>
-                    <button
-                      phx-click="rate"
-                      phx-value-id={photo.id}
-                      phx-value-rating={star}
-                      class={[
-                        "text-lg leading-none transition-colors",
-                        photo.user_rating && photo.user_rating >= star && "text-[#fcfbf9]",
-                        !(photo.user_rating && photo.user_rating >= star) && "text-gray-600 hover:text-gray-300"
-                      ]}
-                    >★</button>
-                  <% end %>
+                <%!-- Star rating + match toggle --%>
+                <div class="flex items-center justify-between mt-3">
+                  <div class="flex gap-1">
+                    <%= for star <- 1..5 do %>
+                      <button
+                        phx-click="rate"
+                        phx-value-id={photo.id}
+                        phx-value-rating={star}
+                        class={[
+                          "text-lg leading-none transition-colors",
+                          photo.user_rating && photo.user_rating >= star && "text-[#fcfbf9]",
+                          !(photo.user_rating && photo.user_rating >= star) && "text-gray-600 hover:text-gray-300"
+                        ]}
+                      >★</button>
+                    <% end %>
+                  </div>
+                  <button
+                    phx-click="toggle_match"
+                    phx-value-id={photo.id}
+                    class={[
+                      "font-sans text-[10px] uppercase tracking-widest px-2 py-1 transition-colors",
+                      photo.style_match && "text-[#fcfbf9] border border-gray-500 hover:border-red-400 hover:text-red-400",
+                      !photo.style_match && "text-gray-500 border border-gray-700 hover:border-gray-400 hover:text-gray-300"
+                    ]}
+                  >
+                    <%= if photo.style_match, do: "✓ match", else: "✗ no" %>
+                  </button>
                 </div>
 
                 <%!-- Project assignment --%>

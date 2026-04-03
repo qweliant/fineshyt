@@ -23,6 +23,15 @@ defmodule Orchestrator.Photos do
 
   def shortcode_exists?(_), do: false
 
+  # Returns a MapSet of urls already in the DB for the given basenames.
+  # Used to deduplicate local ingest batches across runs.
+  def existing_basenames(basenames) do
+    urls = Enum.map(basenames, &"/uploads/#{&1}")
+    Repo.all(from p in Photo, where: p.url in ^urls, select: p.url)
+    |> Enum.map(&Path.basename/1)
+    |> MapSet.new()
+  end
+
   def get_photo!(id), do: Repo.get!(Photo, id)
 
   def rate_photo(id, rating) do
@@ -34,6 +43,12 @@ defmodule Orchestrator.Photos do
   def set_project(id, project) do
     get_photo!(id)
     |> Photo.changeset(%{project: project})
+    |> Repo.update()
+  end
+
+  def override_curation(id, attrs) do
+    get_photo!(id)
+    |> Photo.changeset(attrs)
     |> Repo.update()
   end
 
