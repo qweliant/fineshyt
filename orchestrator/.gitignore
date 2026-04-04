@@ -35,3 +35,27 @@ orchestrator-*.tar
 npm-debug.log
 /assets/node_modules/
 
+# Uploaded and processed photos — never commit these to the repo
+/priv/static/uploads/*.jpg
+/priv/static/uploads/*.jpeg
+/priv/static/uploads/*.png
+/priv/static/uploads/*.gif
+/priv/static/uploads/*.webp
+/priv/static/uploads/*.heic
+/priv/static/uploads/*.heif
+/priv/static/uploads/*.tif
+/priv/static/uploads/*.tiff
+/priv/static/uploads/*.bmp
+# RAW formats
+/priv/static/uploads/*.raw
+/priv/static/uploads/*.arw
+/priv/static/uploads/*.cr2
+/priv/static/uploads/*.cr3
+/priv/static/uploads/*.nef
+/priv/static/uploads/*.orf
+/priv/static/uploads/*.raf
+/priv/static/uploads/*.dng
+/priv/static/uploads/*.rw2
+/priv/static/uploads/*.pef
+/priv/static/uploads/*.srw
+

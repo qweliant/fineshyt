@@ -1,14 +1,7 @@
 defmodule OrchestratorWeb.GalleryLive do
   use OrchestratorWeb, :live_view
 
-  import Ecto.Query
-
   alias Orchestrator.Photos
-  alias Orchestrator.Workers.LocalBatchImportWorker
-
-  @default_style """
-  Photos that lack an obvious sense of place. High grain. Soft focus or motion blur acceptable and often preferable to technical sharpness. B&W or heavily desaturated. Subject ambiguous or secondary to atmosphere. Mood: solitary, searching, still. Framing within frames (windows, doorways, reflections) a recurring pattern. No immediate meaning — meaning deferred.\
-  """
 
   @impl Phoenix.LiveView
   def mount(_params, _session, socket) do
@@ -19,54 +12,40 @@ defmodule OrchestratorWeb.GalleryLive do
       |> assign(:photos, Photos.list_photos())
       |> assign(:tag_profile, Photos.tag_affinity_profile())
       |> assign(:filter, :all)
-      |> assign(:style_description, @default_style)
-      |> assign(:importing, false)
-      |> assign(:import_queued, 0)
-      |> assign(:import_processed, 0)
-      |> assign(:import_error, nil)
-      |> assign(:activity_log, [])
+      |> assign(:sort, :newest)
+      |> assign(:search, "")
 
     {:ok, socket}
   end
 
   @impl Phoenix.LiveView
   def handle_event("set_filter", %{"filter" => filter}, socket) do
-    {:noreply, assign(socket, :filter, String.to_existing_atom(filter))}
-  end
-
-  @impl Phoenix.LiveView
-  def handle_event("import", params, socket) do
-    dir_path = params |> Map.get("dir_path", "") |> String.trim()
-    style = Map.get(params, "style_description", @default_style)
-    sample = case Integer.parse(Map.get(params, "sample", "50")) do
-      {n, _} when n > 0 -> n
-      _ -> 50
+    atom = case filter do
+      "all" -> :all
+      "match" -> :match
+      "no_match" -> :no_match
+      "rated" -> :rated
+      "unrated" -> :unrated
+      _ -> :all
     end
+    {:noreply, assign(socket, :filter, atom)}
+  end
 
-    if dir_path != "" do
-      %{"dir_path" => dir_path, "style_description" => style, "sample" => sample}
-      |> LocalBatchImportWorker.new()
-      |> Oban.insert()
+  @impl Phoenix.LiveView
+  def handle_event("set_sort", %{"sort" => sort}, socket) do
+    atom = case sort do
+      "newest" -> :newest
+      "score_desc" -> :score_desc
+      "score_asc" -> :score_asc
+      "rating_desc" -> :rating_desc
+      _ -> :newest
     end
-
-    {:noreply, assign(socket,
-      importing: dir_path != "",
-      import_error: nil,
-      import_queued: 0,
-      import_processed: 0,
-      activity_log: []
-    )}
+    {:noreply, assign(socket, :sort, atom)}
   end
 
   @impl Phoenix.LiveView
-  def handle_event("stop_import", _params, socket) do
-    Oban.cancel_all_jobs(from(j in Oban.Job, where: j.queue == "ai_jobs"))
-    {:noreply, assign(socket, importing: false)}
-  end
-
-  @impl Phoenix.LiveView
-  def handle_event("clear_log", _params, socket) do
-    {:noreply, assign(socket, activity_log: [])}
+  def handle_event("search", %{"q" => q}, socket) do
+    {:noreply, assign(socket, :search, String.downcase(String.trim(q)))}
   end
 
   @impl Phoenix.LiveView
@@ -92,57 +71,74 @@ defmodule OrchestratorWeb.GalleryLive do
   end
 
   @impl Phoenix.LiveView
-  def handle_event("set_project", %{"id" => id, "project" => project}, socket) do
+  def handle_event("delete_tag", %{"id" => id, "tag" => tag}, socket) do
+    Photos.delete_tag(String.to_integer(id), tag)
+    {:noreply, assign(socket, :photos, Photos.list_photos())}
+  end
+
+  @impl Phoenix.LiveView
+  def handle_event("add_tag", %{"id" => id, "tag" => tag}, socket) do
+    Photos.add_tag(String.to_integer(id), tag)
+    {:noreply, assign(socket, :photos, Photos.list_photos())}
+  end
+
+  @impl Phoenix.LiveView
+  def handle_event("set_project", %{"_id" => id, "project" => project}, socket) do
     Photos.set_project(String.to_integer(id), String.trim(project))
     {:noreply, assign(socket, :photos, Photos.list_photos())}
   end
 
   @impl Phoenix.LiveView
-  def handle_info({:import_started, count}, socket) do
-    {:noreply, assign(socket, importing: true, import_queued: count, import_error: nil)}
+  def handle_event("delete_photo", %{"id" => id}, socket) do
+    Photos.delete_photo(String.to_integer(id))
+    {:noreply, assign(socket,
+      photos: Photos.list_photos(),
+      tag_profile: Photos.tag_affinity_profile()
+    )}
   end
 
   @impl Phoenix.LiveView
-  def handle_info({:import_failed, reason}, socket) do
-    {:noreply, assign(socket, importing: false, import_error: reason)}
+  def handle_info({:curation_complete, _ref, _metadata, _basename}, socket) do
+    {:noreply, assign(socket,
+      photos: Photos.list_photos(),
+      tag_profile: Photos.tag_affinity_profile()
+    )}
   end
 
   @impl Phoenix.LiveView
-  def handle_info({:curation_complete, _ref, metadata, basename}, socket) do
-    entry = %{
-      filename: basename,
-      subject: metadata["subject"] || "—",
-      score: metadata["style_score"] || 0,
-      match: metadata["style_match"] || false
-    }
+  def handle_info({:curation_failed, _ref, _reason}, socket), do: {:noreply, socket}
 
-    log = [entry | socket.assigns.activity_log] |> Enum.take(50)
-    processed = socket.assigns.import_processed + 1
-    done = processed >= socket.assigns.import_queued and socket.assigns.import_queued > 0
-
-    {:noreply,
-     socket
-     |> assign(:photos, Photos.list_photos())
-     |> assign(:activity_log, log)
-     |> assign(:import_processed, processed)
-     |> assign(:importing, not done)}
-  end
-
-  @impl Phoenix.LiveView
-  def handle_info({:curation_failed, _ref, _reason}, socket) do
-    processed = socket.assigns.import_processed + 1
-    done = processed >= socket.assigns.import_queued and socket.assigns.import_queued > 0
-
-    {:noreply,
-     socket
-     |> assign(:photos, Photos.list_photos())
-     |> assign(:import_processed, processed)
-     |> assign(:importing, not done)}
-  end
+  def handle_info(_unhandled, socket), do: {:noreply, socket}
 
   defp filtered_photos(photos, :all), do: photos
   defp filtered_photos(photos, :match), do: Enum.filter(photos, & &1.style_match)
   defp filtered_photos(photos, :no_match), do: Enum.filter(photos, &(&1.style_match == false))
+  defp filtered_photos(photos, :rated), do: Enum.filter(photos, & &1.user_rating)
+  defp filtered_photos(photos, :unrated), do: Enum.filter(photos, &is_nil(&1.user_rating))
+
+  defp sorted_photos(photos, :newest), do: photos
+  defp sorted_photos(photos, :score_desc), do: Enum.sort_by(photos, & &1.style_score || 0, :desc)
+  defp sorted_photos(photos, :score_asc), do: Enum.sort_by(photos, & &1.style_score || 0, :asc)
+  defp sorted_photos(photos, :rating_desc), do: Enum.sort_by(photos, & &1.user_rating || 0, :desc)
+
+  defp searched_photos(photos, ""), do: photos
+  defp searched_photos(photos, q) do
+    Enum.filter(photos, fn p ->
+      subject = String.downcase(p.subject || "")
+      tags = Enum.map(p.suggested_tags || [], &String.downcase/1)
+      mood = String.downcase(p.artistic_mood || "")
+      String.contains?(subject, q) or
+        String.contains?(mood, q) or
+        Enum.any?(tags, &String.contains?(&1, q))
+    end)
+  end
+
+  defp display_photos(photos, filter, sort, search) do
+    photos
+    |> filtered_photos(filter)
+    |> searched_photos(search)
+    |> sorted_photos(sort)
+  end
 
   @impl Phoenix.LiveView
   def render(assigns) do
@@ -155,132 +151,56 @@ defmodule OrchestratorWeb.GalleryLive do
           <h1 class="text-6xl md:text-8xl font-black tracking-tight leading-none">FINE.<br/>SHYT.</h1>
           <p class="mt-4 text-lg font-light italic text-gray-600">The Archive.</p>
         </div>
-        <div class="mt-6 md:mt-0">
-          <.link navigate={~p"/"} class="font-sans uppercase tracking-widest text-xs border-b border-[#111111] pb-1 hover:text-gray-500 hover:border-gray-500 transition-colors">
-            ← Curate Single Photo
+        <div class="mt-6 md:mt-0 font-sans uppercase tracking-widest text-xs">
+          <.link navigate={~p"/"} class="border-b border-[#111111] pb-0.5 hover:text-gray-500 hover:border-gray-500 transition-colors">
+            ← Ingest
           </.link>
         </div>
       </header>
 
-      <%!-- Local Ingest Controls --%>
-      <form phx-submit="import" class="mb-10 flex flex-col gap-4">
-        <div class="flex flex-col md:flex-row gap-4">
-          <div class="flex-1">
-            <label class="font-sans uppercase tracking-widest text-xs block mb-2 text-gray-500">Directory</label>
-            <input
-              type="text"
-              name="dir_path"
-              placeholder="/Volumes/drive/photos/2024"
-              class="w-full border border-[#111111] bg-transparent px-4 py-3 font-sans text-sm focus:outline-none focus:ring-1 focus:ring-[#111111]"
-            />
-          </div>
-          <div class="md:w-32">
-            <label class="font-sans uppercase tracking-widest text-xs block mb-2 text-gray-500">Sample N</label>
-            <input
-              type="number"
-              name="sample"
-              value="50"
-              min="1"
-              class="w-full border border-[#111111] bg-transparent px-4 py-3 font-sans text-sm focus:outline-none focus:ring-1 focus:ring-[#111111]"
-            />
-          </div>
+      <%!-- Search + Sort bar --%>
+      <div class="flex flex-col sm:flex-row gap-4 mb-8">
+        <div class="flex-1 relative">
+          <input
+            type="text"
+            placeholder="search subjects, tags, mood…"
+            value={@search}
+            phx-change="search"
+            phx-debounce="200"
+            name="q"
+            class="w-full border border-gray-300 bg-transparent px-4 py-2.5 font-sans text-sm focus:outline-none focus:border-[#111111] placeholder-gray-300"
+          />
+          <%= if @search != "" do %>
+            <button phx-click="search" phx-value-q="" class="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-700 font-sans text-sm">×</button>
+          <% end %>
         </div>
-        <div>
-          <label class="font-sans uppercase tracking-widest text-xs block mb-2 text-gray-500">Style Description</label>
-          <textarea
-            name="style_description"
-            rows="3"
-            class="w-full border border-[#111111] bg-transparent px-4 py-3 font-sans text-sm focus:outline-none focus:ring-1 focus:ring-[#111111] resize-none"
-          ><%= @style_description %></textarea>
-        </div>
-        <div class="flex justify-end">
-          <button
-            type="submit"
-            disabled={@importing}
-            class="font-sans uppercase tracking-widest text-sm bg-[#111111] text-[#fcfbf9] px-8 py-3 hover:bg-gray-800 transition-colors disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
-          >
-            <%= if @importing do %>
-              <span class="flex items-center gap-2">
-                <span class="w-2 h-2 bg-[#fcfbf9] rounded-full animate-ping"></span>
-                Ingesting...
-              </span>
-            <% else %>
-              Ingest from Directory →
-            <% end %>
-          </button>
-        </div>
-      </form>
-
-      <%!-- Import error --%>
-      <%= if @import_error do %>
-        <div class="mb-6 border border-red-800 px-5 py-3 flex items-start gap-3">
-          <span class="font-sans uppercase tracking-widest text-xs font-bold text-red-800 whitespace-nowrap mt-0.5">Ingest Failed</span>
-          <span class="font-sans text-xs text-red-700 leading-relaxed"><%= @import_error %></span>
-        </div>
-      <% end %>
-
-      <%!-- Activity Log --%>
-      <%= if @importing or @activity_log != [] do %>
-        <div class="mb-10 border border-gray-200">
-          <div class="flex items-center justify-between px-4 py-2 border-b border-gray-200 bg-gray-50">
-            <span class="font-sans text-xs uppercase tracking-widest text-gray-500 flex items-center gap-2">
-              <%= if @importing do %>
-                <span class="w-1.5 h-1.5 bg-[#111111] rounded-full animate-ping inline-block"></span>
-                Processing <%= @import_processed %> / <%= @import_queued %>
-              <% else %>
-                Done — <%= @import_processed %> processed
-              <% end %>
-            </span>
-            <div class="flex items-center gap-3">
-              <%= if @importing do %>
-                <button
-                  phx-click="stop_import"
-                  class="font-sans text-xs uppercase tracking-widest text-red-700 border border-red-300 px-3 py-1 hover:border-red-700 hover:text-red-900 transition-colors"
-                >
-                  Stop ×
-                </button>
-              <% end %>
-              <button
-                phx-click="clear_log"
-                class="font-sans text-xs uppercase tracking-widest text-gray-400 hover:text-gray-700 transition-colors"
-              >
-                Clear
-              </button>
-            </div>
-          </div>
-          <div class="divide-y divide-gray-100 max-h-52 overflow-y-auto">
-            <%= for entry <- @activity_log do %>
-              <div class="flex items-center gap-3 px-4 py-2 font-mono text-xs">
-                <span class={["w-3 shrink-0", entry.match && "text-[#111111]", !entry.match && "text-gray-300"]}>
-                  <%= if entry.match, do: "✓", else: "—" %>
-                </span>
-                <span class="w-44 shrink-0 text-gray-500 truncate"><%= entry.filename %></span>
-                <span class="flex-1 text-gray-400 truncate italic"><%= entry.subject %></span>
-                <span class={[
-                  "shrink-0 font-bold tabular-nums",
-                  entry.score >= 75 && "text-[#111111]",
-                  entry.score < 75 && "text-gray-400"
-                ]}>
-                  <%= entry.score %>
-                </span>
-              </div>
-            <% end %>
-          </div>
-        </div>
-      <% end %>
+        <select
+          phx-change="set_sort"
+          name="sort"
+          class="border border-gray-300 bg-[#fcfbf9] px-4 py-2.5 font-sans text-xs uppercase tracking-widest focus:outline-none focus:border-[#111111] cursor-pointer"
+        >
+          <option value="newest" selected={@sort == :newest}>Newest</option>
+          <option value="score_desc" selected={@sort == :score_desc}>Score ↓</option>
+          <option value="score_asc" selected={@sort == :score_asc}>Score ↑</option>
+          <option value="rating_desc" selected={@sort == :rating_desc}>Rating ↓</option>
+        </select>
+      </div>
 
       <%!-- Filter Tabs --%>
-      <div class="flex gap-0 mb-10 border-b border-gray-200">
-        <%= for {label, value, count} <- [
-          {"All", :all, length(@photos)},
-          {"Style Match ✓", :match, length(filtered_photos(@photos, :match))},
-          {"No Match ✗", :no_match, length(filtered_photos(@photos, :no_match))}
+      <div class="flex gap-0 mb-10 border-b border-gray-200 overflow-x-auto">
+        <%= for {label, value} <- [
+          {"All", :all},
+          {"Match ✓", :match},
+          {"No Match ✗", :no_match},
+          {"Rated", :rated},
+          {"Unrated", :unrated}
         ] do %>
+          <% count = length(display_photos(@photos, value, @sort, @search)) %>
           <button
             phx-click="set_filter"
             phx-value-filter={value}
             class={[
-              "font-sans uppercase tracking-widest text-xs px-6 py-3 border-b-2 transition-colors",
+              "font-sans uppercase tracking-widest text-xs px-5 py-3 border-b-2 transition-colors whitespace-nowrap shrink-0",
               @filter == value && "border-[#111111] text-[#111111]",
               @filter != value && "border-transparent text-gray-400 hover:text-gray-600"
             ]}
@@ -291,17 +211,21 @@ defmodule OrchestratorWeb.GalleryLive do
       </div>
 
       <%!-- Gallery Grid --%>
-      <%= if filtered_photos(@photos, @filter) == [] do %>
+      <% visible = display_photos(@photos, @filter, @sort, @search) %>
+      <%= if visible == [] do %>
         <div class="text-center py-24 text-gray-400 font-serif italic text-xl">
-          <%= if @photos == [] do %>
-            No photos yet. Point at a directory and ingest, or curate a single photo.
-          <% else %>
-            No photos match this filter.
+          <%= cond do %>
+            <% @photos == [] -> %>
+              No photos yet. <.link navigate={~p"/"} class="border-b border-gray-400">Ingest from a directory.</.link>
+            <% @search != "" -> %>
+              No photos match "<%= @search %>".
+            <% true -> %>
+              No photos match this filter.
           <% end %>
         </div>
       <% else %>
         <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-          <%= for photo <- filtered_photos(@photos, @filter) do %>
+          <%= for photo <- visible do %>
             <% vibe = Photos.vibe_score(photo, @tag_profile) %>
             <div class="group relative aspect-square overflow-hidden border border-gray-200 bg-gray-50">
               <img
@@ -319,6 +243,17 @@ defmodule OrchestratorWeb.GalleryLive do
                 ]}>
                   <%= if photo.style_match, do: "✓ Match", else: "✗ No" %>
                 </div>
+                <%= if photo.style_score != nil do %>
+                  <% conf = photo.style_score
+                     {conf_label, conf_class} = cond do
+                       conf >= 80 -> {"high conf", "bg-emerald-900/80 text-emerald-300 border-emerald-700"}
+                       conf >= 50 -> {"med conf", "bg-yellow-900/80 text-yellow-300 border-yellow-700"}
+                       true       -> {"low conf", "bg-red-900/80 text-red-300 border-red-700"}
+                     end %>
+                  <div class={["font-sans text-[9px] uppercase tracking-wider px-2 py-0.5 border font-bold", conf_class]}>
+                    <%= conf_label %> · <%= conf %>
+                  </div>
+                <% end %>
                 <%= if vibe do %>
                   <div class="bg-[#fcfbf9] border border-[#111111] font-sans text-[10px] uppercase tracking-wider px-2 py-1 font-bold">
                     vibe <%= vibe %>
@@ -332,7 +267,18 @@ defmodule OrchestratorWeb.GalleryLive do
               </div>
 
               <%!-- Hover overlay --%>
-              <div class="absolute inset-0 bg-[#111111]/80 opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex flex-col justify-end p-4">
+              <div class="absolute inset-0 bg-[#111111]/80 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity duration-300 flex flex-col justify-end p-4">
+
+                <%!-- Delete button top-left --%>
+                <button
+                  phx-click="delete_photo"
+                  phx-value-id={photo.id}
+                  data-confirm="Remove this photo from the archive?"
+                  class="absolute top-2 left-2 font-sans text-[9px] uppercase tracking-widest text-gray-600 hover:text-red-400 border border-gray-800 hover:border-red-600 px-2 py-1 transition-colors"
+                >
+                  delete
+                </button>
+
                 <p class="text-[#fcfbf9] font-serif text-sm leading-snug mb-1"><%= photo.subject %></p>
 
                 <%!-- Score slider --%>
@@ -346,6 +292,7 @@ defmodule OrchestratorWeb.GalleryLive do
                     phx-debounce="300"
                     phx-value-id={photo.id}
                     name="score"
+                    oninput="this.nextElementSibling.textContent = this.value"
                     class="flex-1 h-px cursor-pointer [accent-color:white]"
                   />
                   <span class="text-gray-300 font-sans text-xs tabular-nums w-6 text-right shrink-0">
@@ -354,17 +301,35 @@ defmodule OrchestratorWeb.GalleryLive do
                 </div>
 
                 <%= if photo.style_reason && photo.style_reason != "" do %>
-                  <p class="text-gray-400 font-sans text-xs mt-1 italic leading-snug"><%= photo.style_reason %></p>
-                <% end %>
-                <%= if photo.suggested_tags != [] do %>
-                  <div class="flex flex-wrap gap-1 mt-2">
-                    <%= for tag <- photo.suggested_tags do %>
-                      <span class="font-sans text-[10px] uppercase tracking-wider border border-gray-500 text-gray-300 px-1.5 py-0.5">
-                        <%= String.downcase(tag) %>
-                      </span>
-                    <% end %>
+                  <div class="mt-2 border-l-2 border-gray-700 pl-2">
+                    <p class="font-sans text-[9px] uppercase tracking-widest text-gray-600 mb-0.5">model says</p>
+                    <p class="text-gray-400 font-sans text-[10px] italic leading-snug"><%= photo.style_reason %></p>
                   </div>
                 <% end %>
+
+                <%!-- Tags: deletable + add new --%>
+                <div class="flex flex-wrap gap-1 mt-2">
+                  <%= for tag <- photo.suggested_tags do %>
+                    <button
+                      phx-click="delete_tag"
+                      phx-value-id={photo.id}
+                      phx-value-tag={tag}
+                      class="group/tag font-sans text-[10px] uppercase tracking-wider border border-gray-600 text-gray-400 px-1.5 py-0.5 hover:border-red-500 hover:text-red-400 transition-colors flex items-center gap-1"
+                    >
+                      <%= String.downcase(tag) %><span class="opacity-0 group-hover/tag:opacity-100 transition-opacity leading-none">×</span>
+                    </button>
+                  <% end %>
+                  <form phx-submit="add_tag" class="flex">
+                    <input type="hidden" name="id" value={photo.id} />
+                    <input
+                      type="text"
+                      name="tag"
+                      placeholder="+ tag"
+                      maxlength="30"
+                      class="font-sans text-[10px] uppercase tracking-wider border border-gray-700 border-dashed text-gray-500 bg-transparent px-1.5 py-0.5 w-16 focus:outline-none focus:border-gray-400 focus:text-gray-300 placeholder-gray-700"
+                    />
+                  </form>
+                </div>
 
                 <%!-- Star rating + match toggle --%>
                 <div class="flex items-center justify-between mt-3">
@@ -397,7 +362,7 @@ defmodule OrchestratorWeb.GalleryLive do
 
                 <%!-- Project assignment --%>
                 <form phx-submit="set_project" class="mt-2 flex gap-1">
-                  <input type="hidden" name="id" value={photo.id} />
+                  <input type="hidden" name="_id" value={photo.id} />
                   <input
                     type="text"
                     name="project"

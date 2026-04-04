@@ -29,7 +29,7 @@ defmodule Orchestrator.Workers.LocalBatchImportWorker do
          body: %{"file_paths" => file_paths, "total_found" => total_found}
        }} ->
         basenames = Enum.map(file_paths, &Path.basename/1)
-        already_done = Photos.existing_basenames(basenames)
+        already_done = Orchestrator.Photos.existing_basenames(basenames)
 
         new_paths =
           Enum.reject(file_paths, fn path ->

@@ -52,6 +52,28 @@ defmodule Orchestrator.Photos do
     |> Repo.update()
   end
 
+  def delete_tag(id, tag) do
+    photo = get_photo!(id)
+    new_tags = Enum.reject(photo.suggested_tags || [], &(String.downcase(&1) == String.downcase(tag)))
+    photo |> Photo.changeset(%{suggested_tags: new_tags}) |> Repo.update()
+  end
+
+  def delete_photo(id) do
+    get_photo!(id) |> Repo.delete()
+  end
+
+  def add_tag(id, tag) do
+    tag = String.trim(tag)
+    photo = get_photo!(id)
+    existing = Enum.map(photo.suggested_tags || [], &String.downcase/1)
+    if tag != "" and String.downcase(tag) not in existing do
+      new_tags = (photo.suggested_tags || []) ++ [tag]
+      photo |> Photo.changeset(%{suggested_tags: new_tags}) |> Repo.update()
+    else
+      {:ok, photo}
+    end
+  end
+
   # Photos approved for blog export: rated >= 4 stars OR style_score >= 75.
   # Unrated photos are never included. Newer first.
   def list_approved do
@@ -75,7 +97,7 @@ defmodule Orchestrator.Photos do
 
   # Computes a 0-100 vibe score for a photo against the affinity profile.
   # Falls back to the LLM style_score when no profile exists yet.
-  def vibe_score(%Photo{suggested_tags: tags}, profile) when map_size(profile) == 0 do
+  def vibe_score(%Photo{suggested_tags: _tags}, profile) when map_size(profile) == 0 do
     nil
   end
 
