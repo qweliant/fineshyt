@@ -9,136 +9,169 @@ defmodule OrchestratorWeb.GalleryLive do
 
     socket =
       socket
-      |> assign(:photos, Photos.list_photos())
-      |> assign(:tag_profile, Photos.tag_affinity_profile())
       |> assign(:filter, :all)
       |> assign(:sort, :newest)
       |> assign(:search, "")
+      |> assign(:page, 1)
+      |> assign(:project_filter, nil)
+      |> assign(:projects, Photos.list_projects())
+      |> assign(:tag_profile, Photos.tag_affinity_profile())
+      |> load_photos()
 
     {:ok, socket}
   end
 
+  # ── helpers ──────────────────────────────────────────────────────────────
+
+  defp query_opts(socket) do
+    [
+      filter:  socket.assigns.filter,
+      sort:    socket.assigns.sort,
+      search:  socket.assigns.search,
+      page:    socket.assigns.page,
+      project: socket.assigns.project_filter
+    ]
+  end
+
+  defp load_photos(socket) do
+    opts  = query_opts(socket)
+    total = Photos.count_photos(opts)
+    pages = max(1, ceil(total / Photos.page_size()))
+    assign(socket,
+      photos: Photos.list_photos(opts),
+      total:  total,
+      pages:  pages
+    )
+  end
+
+  defp reload(socket, overrides) do
+    socket
+    |> assign(overrides)
+    |> assign(:page, 1)
+    |> load_photos()
+  end
+
+  # ── events ────────────────────────────────────────────────────────────────
+
   @impl Phoenix.LiveView
   def handle_event("set_filter", %{"filter" => filter}, socket) do
     atom = case filter do
-      "all" -> :all
-      "match" -> :match
+      "match"    -> :match
       "no_match" -> :no_match
-      "rated" -> :rated
-      "unrated" -> :unrated
-      _ -> :all
+      "rated"    -> :rated
+      "unrated"  -> :unrated
+      _          -> :all
     end
-    {:noreply, assign(socket, :filter, atom)}
+    {:noreply, reload(socket, filter: atom)}
   end
 
   @impl Phoenix.LiveView
   def handle_event("set_sort", %{"sort" => sort}, socket) do
     atom = case sort do
-      "newest" -> :newest
-      "score_desc" -> :score_desc
-      "score_asc" -> :score_asc
+      "score_desc"  -> :score_desc
+      "score_asc"   -> :score_asc
       "rating_desc" -> :rating_desc
-      _ -> :newest
+      _             -> :newest
     end
-    {:noreply, assign(socket, :sort, atom)}
+    {:noreply, reload(socket, sort: atom)}
   end
 
   @impl Phoenix.LiveView
   def handle_event("search", %{"q" => q}, socket) do
-    {:noreply, assign(socket, :search, String.downcase(String.trim(q)))}
+    {:noreply, reload(socket, search: String.trim(q))}
+  end
+
+  @impl Phoenix.LiveView
+  def handle_event("set_project_filter", %{"project" => p}, socket) do
+    project = if p == "", do: nil, else: p
+    {:noreply, reload(socket, project_filter: project)}
+  end
+
+  @impl Phoenix.LiveView
+  def handle_event("photo_keydown", %{"id" => id, "key" => key}, socket) do
+    photo_id = String.to_integer(id)
+    case key do
+      k when k in ["1", "2", "3", "4", "5"] ->
+        Photos.rate_photo(photo_id, String.to_integer(k))
+        {:noreply, socket |> assign(:tag_profile, Photos.tag_affinity_profile()) |> load_photos()}
+      "p" ->
+        Photos.rate_photo(photo_id, 5)
+        {:noreply, socket |> assign(:tag_profile, Photos.tag_affinity_profile()) |> load_photos()}
+      "x" ->
+        Photos.delete_photo(photo_id)
+        {:noreply, socket |> assign(:tag_profile, Photos.tag_affinity_profile()) |> load_photos()}
+      _ ->
+        {:noreply, socket}
+    end
+  end
+
+  @impl Phoenix.LiveView
+  def handle_event("page", %{"n" => n}, socket) do
+    page = String.to_integer(n) |> max(1) |> min(socket.assigns.pages)
+    {:noreply, socket |> assign(:page, page) |> load_photos()}
   end
 
   @impl Phoenix.LiveView
   def handle_event("override_score", %{"id" => id, "score" => score}, socket) do
     Photos.override_curation(String.to_integer(id), %{style_score: String.to_integer(score)})
-    {:noreply, assign(socket, :photos, Photos.list_photos())}
+    {:noreply, load_photos(socket)}
   end
 
   @impl Phoenix.LiveView
   def handle_event("toggle_match", %{"id" => id}, socket) do
     photo = Photos.get_photo!(String.to_integer(id))
     Photos.override_curation(photo.id, %{style_match: !photo.style_match})
-    {:noreply, assign(socket, :photos, Photos.list_photos())}
+    {:noreply, load_photos(socket)}
   end
 
   @impl Phoenix.LiveView
   def handle_event("rate", %{"id" => id, "rating" => rating_str}, socket) do
-    rating = String.to_integer(rating_str)
-    Photos.rate_photo(String.to_integer(id), rating)
-    profile = Photos.tag_affinity_profile()
-    photos = Photos.list_photos()
-    {:noreply, assign(socket, photos: photos, tag_profile: profile)}
+    Photos.rate_photo(String.to_integer(id), String.to_integer(rating_str))
+    {:noreply, socket |> assign(:tag_profile, Photos.tag_affinity_profile()) |> load_photos()}
   end
 
   @impl Phoenix.LiveView
   def handle_event("delete_tag", %{"id" => id, "tag" => tag}, socket) do
     Photos.delete_tag(String.to_integer(id), tag)
-    {:noreply, assign(socket, :photos, Photos.list_photos())}
+    {:noreply, load_photos(socket)}
   end
 
   @impl Phoenix.LiveView
-  def handle_event("add_tag", %{"id" => id, "tag" => tag}, socket) do
-    Photos.add_tag(String.to_integer(id), tag)
-    {:noreply, assign(socket, :photos, Photos.list_photos())}
+  def handle_event("add_tag", %{"id" => id, "value" => tag}, socket) do
+    case Photos.add_tag(String.to_integer(id), tag) do
+      {:ok, _}    -> {:noreply, load_photos(socket)}
+      {:error, _} -> {:noreply, put_flash(socket, :error, "Could not add tag.")}
+    end
   end
 
   @impl Phoenix.LiveView
   def handle_event("set_project", %{"_id" => id, "project" => project}, socket) do
     Photos.set_project(String.to_integer(id), String.trim(project))
-    {:noreply, assign(socket, :photos, Photos.list_photos())}
+    {:noreply, load_photos(socket)}
   end
 
   @impl Phoenix.LiveView
   def handle_event("delete_photo", %{"id" => id}, socket) do
     Photos.delete_photo(String.to_integer(id))
-    {:noreply, assign(socket,
-      photos: Photos.list_photos(),
-      tag_profile: Photos.tag_affinity_profile()
-    )}
+    {:noreply, socket
+      |> put_flash(:info, "Photo removed from archive.")
+      |> assign(:tag_profile, Photos.tag_affinity_profile())
+      |> load_photos()}
   end
+
+  # ── pubsub ────────────────────────────────────────────────────────────────
 
   @impl Phoenix.LiveView
   def handle_info({:curation_complete, _ref, _metadata, _basename}, socket) do
-    {:noreply, assign(socket,
-      photos: Photos.list_photos(),
-      tag_profile: Photos.tag_affinity_profile()
-    )}
+    {:noreply, socket
+      |> assign(:tag_profile, Photos.tag_affinity_profile())
+      |> assign(:projects, Photos.list_projects())
+      |> load_photos()}
   end
-
-  @impl Phoenix.LiveView
-  def handle_info({:curation_failed, _ref, _reason}, socket), do: {:noreply, socket}
 
   def handle_info(_unhandled, socket), do: {:noreply, socket}
 
-  defp filtered_photos(photos, :all), do: photos
-  defp filtered_photos(photos, :match), do: Enum.filter(photos, & &1.style_match)
-  defp filtered_photos(photos, :no_match), do: Enum.filter(photos, &(&1.style_match == false))
-  defp filtered_photos(photos, :rated), do: Enum.filter(photos, & &1.user_rating)
-  defp filtered_photos(photos, :unrated), do: Enum.filter(photos, &is_nil(&1.user_rating))
-
-  defp sorted_photos(photos, :newest), do: photos
-  defp sorted_photos(photos, :score_desc), do: Enum.sort_by(photos, & &1.style_score || 0, :desc)
-  defp sorted_photos(photos, :score_asc), do: Enum.sort_by(photos, & &1.style_score || 0, :asc)
-  defp sorted_photos(photos, :rating_desc), do: Enum.sort_by(photos, & &1.user_rating || 0, :desc)
-
-  defp searched_photos(photos, ""), do: photos
-  defp searched_photos(photos, q) do
-    Enum.filter(photos, fn p ->
-      subject = String.downcase(p.subject || "")
-      tags = Enum.map(p.suggested_tags || [], &String.downcase/1)
-      mood = String.downcase(p.artistic_mood || "")
-      String.contains?(subject, q) or
-        String.contains?(mood, q) or
-        Enum.any?(tags, &String.contains?(&1, q))
-    end)
-  end
-
-  defp display_photos(photos, filter, sort, search) do
-    photos
-    |> filtered_photos(filter)
-    |> searched_photos(search)
-    |> sorted_photos(sort)
-  end
+  # ── render ────────────────────────────────────────────────────────────────
 
   @impl Phoenix.LiveView
   def render(assigns) do
@@ -149,7 +182,9 @@ defmodule OrchestratorWeb.GalleryLive do
       <header class="mb-12 border-b-[3px] border-[#111111] pb-6 flex flex-col md:flex-row md:items-end justify-between">
         <div>
           <h1 class="text-6xl md:text-8xl font-black tracking-tight leading-none">FINE.<br/>SHYT.</h1>
-          <p class="mt-4 text-lg font-light italic text-gray-600">The Archive.</p>
+          <p class="mt-4 text-lg font-light italic text-gray-600">
+            The Archive. <span class="font-sans text-sm not-italic text-gray-400"><%= @total %> photos</span>
+          </p>
         </div>
         <div class="mt-6 md:mt-0 font-sans uppercase tracking-widest text-xs">
           <.link navigate={~p"/"} class="border-b border-[#111111] pb-0.5 hover:text-gray-500 hover:border-gray-500 transition-colors">
@@ -163,10 +198,10 @@ defmodule OrchestratorWeb.GalleryLive do
         <div class="flex-1 relative">
           <input
             type="text"
-            placeholder="search subjects, tags, mood…"
+            placeholder="search subjects, mood…"
             value={@search}
             phx-change="search"
-            phx-debounce="200"
+            phx-debounce="300"
             name="q"
             class="w-full border border-gray-300 bg-transparent px-4 py-2.5 font-sans text-sm focus:outline-none focus:border-[#111111] placeholder-gray-300"
           />
@@ -179,23 +214,19 @@ defmodule OrchestratorWeb.GalleryLive do
           name="sort"
           class="border border-gray-300 bg-[#fcfbf9] px-4 py-2.5 font-sans text-xs uppercase tracking-widest focus:outline-none focus:border-[#111111] cursor-pointer"
         >
-          <option value="newest" selected={@sort == :newest}>Newest</option>
-          <option value="score_desc" selected={@sort == :score_desc}>Score ↓</option>
-          <option value="score_asc" selected={@sort == :score_asc}>Score ↑</option>
+          <option value="newest"      selected={@sort == :newest}>Newest</option>
+          <option value="score_desc"  selected={@sort == :score_desc}>Score ↓</option>
+          <option value="score_asc"   selected={@sort == :score_asc}>Score ↑</option>
           <option value="rating_desc" selected={@sort == :rating_desc}>Rating ↓</option>
         </select>
       </div>
 
       <%!-- Filter Tabs --%>
-      <div class="flex gap-0 mb-10 border-b border-gray-200 overflow-x-auto">
+      <div class="flex gap-0 mb-4 border-b border-gray-200 overflow-x-auto">
         <%= for {label, value} <- [
-          {"All", :all},
-          {"Match ✓", :match},
-          {"No Match ✗", :no_match},
-          {"Rated", :rated},
-          {"Unrated", :unrated}
+          {"All", :all}, {"Match ✓", :match}, {"No Match ✗", :no_match},
+          {"Rated", :rated}, {"Unrated", :unrated}
         ] do %>
-          <% count = length(display_photos(@photos, value, @sort, @search)) %>
           <button
             phx-click="set_filter"
             phx-value-filter={value}
@@ -205,17 +236,48 @@ defmodule OrchestratorWeb.GalleryLive do
               @filter != value && "border-transparent text-gray-400 hover:text-gray-600"
             ]}
           >
-            <%= label %> (<%= count %>)
+            <%= label %>
           </button>
         <% end %>
       </div>
 
+      <%!-- Project filter --%>
+      <%= if @projects != [] do %>
+        <div class="flex items-center gap-2 mb-8 flex-wrap">
+          <span class="font-sans text-[9px] uppercase tracking-widest text-gray-400 shrink-0">Project</span>
+          <button
+            phx-click="set_project_filter"
+            phx-value-project=""
+            class={[
+              "font-sans text-[10px] uppercase tracking-wider px-3 py-1 border transition-colors",
+              is_nil(@project_filter) && "border-[#111111] text-[#111111]",
+              !is_nil(@project_filter) && "border-gray-200 text-gray-400 hover:border-gray-500 hover:text-gray-700"
+            ]}
+          >all</button>
+          <%= for proj <- @projects do %>
+            <button
+              phx-click="set_project_filter"
+              phx-value-project={proj}
+              class={[
+                "font-mono text-[10px] px-3 py-1 border transition-colors",
+                @project_filter == proj && "border-[#111111] text-[#111111]",
+                @project_filter != proj && "border-gray-200 text-gray-400 hover:border-gray-500 hover:text-gray-700"
+              ]}
+            ><%= proj %></button>
+          <% end %>
+        </div>
+      <% end %>
+
+      <%!-- Keyboard hint --%>
+      <p class="mb-4 font-sans text-[9px] uppercase tracking-widest text-gray-300">
+        Click a photo, then: <span class="text-gray-400">1–5</span> rate · <span class="text-gray-400">p</span> pick · <span class="text-gray-400">x</span> reject
+      </p>
+
       <%!-- Gallery Grid --%>
-      <% visible = display_photos(@photos, @filter, @sort, @search) %>
-      <%= if visible == [] do %>
+      <%= if @photos == [] do %>
         <div class="text-center py-24 text-gray-400 font-serif italic text-xl">
           <%= cond do %>
-            <% @photos == [] -> %>
+            <% @total == 0 -> %>
               No photos yet. <.link navigate={~p"/"} class="border-b border-gray-400">Ingest from a directory.</.link>
             <% @search != "" -> %>
               No photos match "<%= @search %>".
@@ -225,9 +287,14 @@ defmodule OrchestratorWeb.GalleryLive do
         </div>
       <% else %>
         <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-          <%= for photo <- visible do %>
+          <%= for photo <- @photos do %>
             <% vibe = Photos.vibe_score(photo, @tag_profile) %>
-            <div class="group relative aspect-square overflow-hidden border border-gray-200 bg-gray-50">
+            <div
+              class="group relative aspect-square overflow-hidden border border-gray-200 bg-gray-50 focus:outline-none focus:ring-2 focus:ring-[#111111] focus:ring-offset-1"
+              tabindex="0"
+              phx-keydown="photo_keydown"
+              phx-value-id={photo.id}
+            >
               <img
                 src={photo.url}
                 alt={photo.subject || "Photo"}
@@ -259,6 +326,11 @@ defmodule OrchestratorWeb.GalleryLive do
                     vibe <%= vibe %>
                   </div>
                 <% end %>
+                <%= if photo.content_type do %>
+                  <div class="bg-[#fcfbf9]/90 border border-gray-300 font-sans text-[9px] uppercase tracking-wider px-2 py-0.5 text-gray-500">
+                    <%= photo.content_type %>
+                  </div>
+                <% end %>
                 <%= if photo.project do %>
                   <div class="bg-[#fcfbf9] border border-gray-400 font-sans text-[10px] uppercase tracking-wider px-2 py-1 text-gray-600 max-w-[80px] truncate">
                     <%= photo.project %>
@@ -269,7 +341,6 @@ defmodule OrchestratorWeb.GalleryLive do
               <%!-- Hover overlay --%>
               <div class="absolute inset-0 bg-[#111111]/80 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity duration-300 flex flex-col justify-end p-4">
 
-                <%!-- Delete button top-left --%>
                 <button
                   phx-click="delete_photo"
                   phx-value-id={photo.id}
@@ -281,12 +352,9 @@ defmodule OrchestratorWeb.GalleryLive do
 
                 <p class="text-[#fcfbf9] font-serif text-sm leading-snug mb-1"><%= photo.subject %></p>
 
-                <%!-- Score slider --%>
                 <div class="flex items-center gap-2 mt-1">
                   <input
-                    type="range"
-                    min="0"
-                    max="100"
+                    type="range" min="0" max="100"
                     value={photo.style_score || 0}
                     phx-change="override_score"
                     phx-debounce="300"
@@ -307,7 +375,6 @@ defmodule OrchestratorWeb.GalleryLive do
                   </div>
                 <% end %>
 
-                <%!-- Tags: deletable + add new --%>
                 <div class="flex flex-wrap gap-1 mt-2">
                   <%= for tag <- photo.suggested_tags do %>
                     <button
@@ -319,19 +386,18 @@ defmodule OrchestratorWeb.GalleryLive do
                       <%= String.downcase(tag) %><span class="opacity-0 group-hover/tag:opacity-100 transition-opacity leading-none">×</span>
                     </button>
                   <% end %>
-                  <form phx-submit="add_tag" class="flex">
-                    <input type="hidden" name="id" value={photo.id} />
-                    <input
-                      type="text"
-                      name="tag"
-                      placeholder="+ tag"
-                      maxlength="30"
-                      class="font-sans text-[10px] uppercase tracking-wider border border-gray-700 border-dashed text-gray-500 bg-transparent px-1.5 py-0.5 w-16 focus:outline-none focus:border-gray-400 focus:text-gray-300 placeholder-gray-700"
-                    />
-                  </form>
+                  <input
+                    type="text"
+                    placeholder="+ tag"
+                    maxlength="30"
+                    phx-keyup="add_tag"
+                    phx-key="Enter"
+                    phx-value-id={photo.id}
+                    name="tag"
+                    class="font-sans text-[10px] uppercase tracking-wider border border-gray-700 border-dashed text-gray-500 bg-transparent px-1.5 py-0.5 w-16 focus:outline-none focus:border-gray-400 focus:text-gray-300 placeholder-gray-700"
+                  />
                 </div>
 
-                <%!-- Star rating + match toggle --%>
                 <div class="flex items-center justify-between mt-3">
                   <div class="flex gap-1">
                     <%= for star <- 1..5 do %>
@@ -360,7 +426,6 @@ defmodule OrchestratorWeb.GalleryLive do
                   </button>
                 </div>
 
-                <%!-- Project assignment --%>
                 <form phx-submit="set_project" class="mt-2 flex gap-1">
                   <input type="hidden" name="_id" value={photo.id} />
                   <input
@@ -370,14 +435,27 @@ defmodule OrchestratorWeb.GalleryLive do
                     placeholder="project..."
                     class="flex-1 bg-transparent border-b border-gray-600 text-gray-300 font-sans text-xs px-1 py-0.5 focus:outline-none focus:border-gray-300 placeholder-gray-600"
                   />
-                  <button type="submit" class="text-gray-500 hover:text-gray-200 font-sans text-xs px-1 uppercase tracking-wider">
-                    set
-                  </button>
+                  <button type="submit" class="text-gray-500 hover:text-gray-200 font-sans text-xs px-1 uppercase tracking-wider">set</button>
                 </form>
               </div>
             </div>
           <% end %>
         </div>
+
+        <%!-- Pagination --%>
+        <%= if @pages > 1 do %>
+          <div class="mt-12 flex items-center justify-center gap-2 font-sans text-xs uppercase tracking-widest">
+            <%= if @page > 1 do %>
+              <button phx-click="page" phx-value-n={@page - 1} class="border border-gray-300 px-4 py-2 hover:border-[#111111] transition-colors">← Prev</button>
+            <% end %>
+            <span class="px-4 py-2 text-gray-400">
+              <%= @page %> / <%= @pages %>
+            </span>
+            <%= if @page < @pages do %>
+              <button phx-click="page" phx-value-n={@page + 1} class="border border-gray-300 px-4 py-2 hover:border-[#111111] transition-colors">Next →</button>
+            <% end %>
+          </div>
+        <% end %>
       <% end %>
 
     </div>

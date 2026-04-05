@@ -9,8 +9,77 @@ defmodule Orchestrator.Photos do
     |> Repo.insert()
   end
 
-  def list_photos do
-    Repo.all(from p in Photo, order_by: [desc: p.inserted_at])
+  @page_size 60
+
+  def list_photos(opts \\ []) do
+    page    = Keyword.get(opts, :page, 1)
+    filter  = Keyword.get(opts, :filter, :all)
+    sort    = Keyword.get(opts, :sort, :newest)
+    search  = Keyword.get(opts, :search, "")
+    project = Keyword.get(opts, :project, nil)
+
+    base =
+      from p in Photo, where: p.curation_status != "rejected"
+
+    base
+    |> apply_filter(filter)
+    |> apply_project_filter(project)
+    |> apply_search(search)
+    |> apply_sort(sort)
+    |> paginate(page)
+    |> Repo.all()
+  end
+
+  def count_photos(opts \\ []) do
+    filter  = Keyword.get(opts, :filter, :all)
+    search  = Keyword.get(opts, :search, "")
+    project = Keyword.get(opts, :project, nil)
+
+    from(p in Photo, where: p.curation_status != "rejected")
+    |> apply_filter(filter)
+    |> apply_project_filter(project)
+    |> apply_search(search)
+    |> Repo.aggregate(:count)
+  end
+
+  def page_size, do: @page_size
+
+  defp apply_filter(q, :all),      do: q
+  defp apply_filter(q, :match),    do: where(q, [p], p.style_match == true)
+  defp apply_filter(q, :no_match), do: where(q, [p], p.style_match == false)
+  defp apply_filter(q, :rated),    do: where(q, [p], not is_nil(p.user_rating))
+  defp apply_filter(q, :unrated),  do: where(q, [p], is_nil(p.user_rating))
+  defp apply_filter(q, _),         do: q
+
+  defp apply_project_filter(q, nil), do: q
+  defp apply_project_filter(q, ""),  do: q
+  defp apply_project_filter(q, p),   do: where(q, [photo], photo.project == ^p)
+
+  def list_projects do
+    Repo.all(
+      from p in Photo,
+        where: not is_nil(p.project) and p.project != "" and p.curation_status != "rejected",
+        select: p.project,
+        distinct: true,
+        order_by: p.project
+    )
+  end
+
+  defp apply_search(q, ""), do: q
+  defp apply_search(q, search) do
+    term = "%#{search}%"
+    where(q, [p], ilike(p.subject, ^term) or ilike(p.artistic_mood, ^term))
+  end
+
+  defp apply_sort(q, :newest),      do: order_by(q, [p], desc: p.inserted_at)
+  defp apply_sort(q, :score_desc),  do: order_by(q, [p], [desc_nulls_last: p.style_score, desc: p.inserted_at])
+  defp apply_sort(q, :score_asc),   do: order_by(q, [p], [asc_nulls_last: p.style_score, desc: p.inserted_at])
+  defp apply_sort(q, :rating_desc), do: order_by(q, [p], [desc_nulls_last: p.user_rating, desc: p.inserted_at])
+  defp apply_sort(q, _),            do: order_by(q, [p], desc: p.inserted_at)
+
+  defp paginate(q, page) do
+    offset = (page - 1) * @page_size
+    q |> limit(@page_size) |> offset(^offset)
   end
 
   def list_style_matches do
@@ -23,11 +92,28 @@ defmodule Orchestrator.Photos do
 
   def shortcode_exists?(_), do: false
 
+  # Returns a MapSet of filename stems (no extension) already in the DB.
+  # Used to deduplicate local ingest batches where source paths are RAW
+  # but stored records have .jpg extensions — matched by stem only.
+  def existing_stems(stems) do
+    Repo.all(
+      from p in Photo,
+        where: fragment("regexp_replace(regexp_replace(file_path, '^.*/', ''), '\\.[^.]+$', '') = ANY(?)", ^stems),
+        select: fragment("regexp_replace(regexp_replace(file_path, '^.*/', ''), '\\.[^.]+$', '')")
+    )
+    |> MapSet.new()
+  end
+
   # Returns a MapSet of urls already in the DB for the given basenames.
   # Used to deduplicate local ingest batches across runs.
   def existing_basenames(basenames) do
-    urls = Enum.map(basenames, &"/uploads/#{&1}")
-    Repo.all(from p in Photo, where: p.url in ^urls, select: p.url)
+    paths = Enum.map(basenames, fn b ->
+      Path.join([:code.priv_dir(:orchestrator), "static", "uploads", b]) |> to_string()
+    end)
+    Repo.all(from p in Photo,
+      where: p.file_path in ^paths,
+      select: p.file_path
+    )
     |> Enum.map(&Path.basename/1)
     |> MapSet.new()
   end
@@ -59,7 +145,38 @@ defmodule Orchestrator.Photos do
   end
 
   def delete_photo(id) do
-    get_photo!(id) |> Repo.delete()
+    photo = get_photo!(id)
+    if photo.file_path && File.exists?(photo.file_path) do
+      File.rm(photo.file_path)
+    end
+    photo
+    |> Photo.changeset(%{curation_status: "rejected", url: nil})
+    |> Repo.update()
+  end
+
+  # Register a file as pending before the AI job runs.
+  # The batch worker calls this so we can skip re-processing on reruns.
+  def create_pending(file_path, basename, source) do
+    %Photo{}
+    |> Photo.changeset(%{
+      file_path: file_path,
+      url: "/uploads/#{basename}",
+      source: source,
+      curation_status: "pending"
+    })
+    |> Repo.insert(on_conflict: :nothing, conflict_target: [:file_path])
+  end
+
+  def mark_curation_status(id, status) do
+    get_photo!(id)
+    |> Photo.changeset(%{curation_status: status})
+    |> Repo.update()
+  end
+
+  def already_processed?(file_path) do
+    Repo.exists?(from p in Photo,
+      where: p.file_path == ^file_path and p.curation_status in ["complete", "rejected"]
+    )
   end
 
   def add_tag(id, tag) do
@@ -113,6 +230,42 @@ defmodule Orchestrator.Photos do
     else
       mean = Enum.sum(scores) / length(scores)
       round((mean - 1) / 4 * 100)  # normalize 1-5 → 0-100
+    end
+  end
+
+  # Generates a suggested style description addendum based on the user's rating history.
+  # Returns nil when there are not enough ratings to draw conclusions.
+  def suggest_style_refinement(base_description \\ "") do
+    profile = tag_affinity_profile()
+
+    if map_size(profile) < 5 do
+      nil
+    else
+      top = profile
+        |> Enum.filter(fn {_, r} -> r >= 4.0 end)
+        |> Enum.sort_by(&elem(&1, 1), :desc)
+        |> Enum.take(8)
+        |> Enum.map(&elem(&1, 0))
+
+      avoid = profile
+        |> Enum.filter(fn {_, r} -> r <= 2.0 end)
+        |> Enum.sort_by(&elem(&1, 1), :asc)
+        |> Enum.take(5)
+        |> Enum.map(&elem(&1, 0))
+
+      if top == [] do
+        nil
+      else
+        affinity = "Based on your ratings, photos with these qualities score well: #{Enum.join(top, ", ")}."
+        avoidance = if avoid != [], do: " Tend to avoid: #{Enum.join(avoid, ", ")}.", else: ""
+        insight = affinity <> avoidance
+
+        if base_description != "" do
+          base_description <> "\n\n[Rating-derived refinement: #{insight}]"
+        else
+          insight
+        end
+      end
     end
   end
 end

@@ -13,6 +13,7 @@ defmodule Orchestrator.Workers.LocalBatchImportWorker do
         } = args
       }) do
     sample = Map.get(args, "sample")
+    project = Map.get(args, "project")
 
     Logger.info("Starting local TIFF ingest from #{dir_path} (sample: #{inspect(sample)})...")
 
@@ -20,36 +21,38 @@ defmodule Orchestrator.Workers.LocalBatchImportWorker do
 
     case Req.post("http://127.0.0.1:8000/api/v1/ingest/local",
            json: body,
-           # Allow up to 10 minutes for large TIFF batches
-           receive_timeout: 600_000
+           # Scan-only now — should return in well under 30s for any directory size
+           receive_timeout: 30_000
          ) do
       {:ok,
        %Req.Response{
          status: 200,
          body: %{"file_paths" => file_paths, "total_found" => total_found}
        }} ->
-        basenames = Enum.map(file_paths, &Path.basename/1)
-        already_done = Orchestrator.Photos.existing_basenames(basenames)
+        # Dedup by stem (without extension) so RAW source paths match existing JPEG records
+        stems = Enum.map(file_paths, fn p -> Path.rootname(Path.basename(p)) end)
+        already_done = Orchestrator.Photos.existing_stems(stems)
 
         new_paths =
           Enum.reject(file_paths, fn path ->
-            MapSet.member?(already_done, Path.basename(path))
+            MapSet.member?(already_done, Path.rootname(Path.basename(path)))
           end)
 
         skipped = length(file_paths) - length(new_paths)
         if skipped > 0, do: Logger.info("Skipping #{skipped} already-processed files.")
-        Logger.info("Converted #{length(file_paths)}/#{total_found} images, queuing #{length(new_paths)} new for AI curation...")
+        Logger.info("Found #{length(file_paths)}/#{total_found} files, queuing #{length(new_paths)} for conversion + curation...")
 
         for file_path <- new_paths do
           ref = make_ref() |> inspect()
 
           %{
-            "file_path" => file_path,
-            "ref" => ref,
+            "file_path"         => file_path,
+            "ref"               => ref,
             "style_description" => style_description,
-            "source" => "local"
+            "source"            => "local",
+            "project"           => project
           }
-          |> Orchestrator.Workers.AiCurationWorker.new()
+          |> Orchestrator.Workers.ConversionWorker.new()
           |> Oban.insert()
         end
 

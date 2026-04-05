@@ -3,6 +3,7 @@ defmodule OrchestratorWeb.CuratorLive do
 
   import Ecto.Query
 
+  alias Orchestrator.Repo
   alias Orchestrator.Workers.LocalBatchImportWorker
 
   @default_style """
@@ -13,16 +14,49 @@ defmodule OrchestratorWeb.CuratorLive do
   def mount(_params, _session, socket) do
     if connected?(socket), do: Phoenix.PubSub.subscribe(Orchestrator.PubSub, "photo_updates")
 
+    # Recover state if we reconnect mid-ingest — count both queues
+    pending = Repo.aggregate(
+      from(j in Oban.Job,
+        where: j.queue in ["ai_jobs", "conversion"] and j.state in ["available", "executing", "retryable"]
+      ),
+      :count
+    )
+
+    # Backfill log from photos curated in the last 30 minutes
+    cutoff = DateTime.utc_now() |> DateTime.add(-30 * 60, :second)
+    recent = Repo.all(
+      from p in Orchestrator.Photos.Photo,
+        where: p.inserted_at >= ^cutoff and p.curation_status == "complete",
+        order_by: [desc: p.inserted_at],
+        limit: 100,
+        select: %{
+          filename: fragment("regexp_replace(?, '^.*/', '')", p.file_path),
+          subject: p.subject,
+          score: p.style_score,
+          match: p.style_match
+        }
+    )
+
+    activity_log = Enum.map(recent, fn r ->
+      %{
+        filename: r.filename || "",
+        subject: r.subject || "—",
+        score: r.score || 0,
+        match: r.match || false
+      }
+    end)
+
     socket =
       socket
-      |> assign(:status, :idle)
+      |> assign(:status, if(pending > 0, do: :ingesting, else: :idle))
       |> assign(:dir_path, "")
       |> assign(:style_description, @default_style)
       |> assign(:sample, 50)
-      |> assign(:import_queued, 0)
+      |> assign(:project, "")
+      |> assign(:import_queued, pending)
       |> assign(:import_processed, 0)
       |> assign(:import_error, nil)
-      |> assign(:activity_log, [])
+      |> assign(:activity_log, activity_log)
 
     {:ok, socket}
   end
@@ -33,16 +67,25 @@ defmodule OrchestratorWeb.CuratorLive do
   end
 
   @impl Phoenix.LiveView
+  def handle_event("browse_directory", _params, socket) do
+    case System.cmd("osascript", ["-e", ~s[POSIX path of (choose folder with prompt "Select a folder to ingest")]], stderr_to_stdout: false) do
+      {path, 0} -> {:noreply, assign(socket, dir_path: String.trim(path, " /\n"))}
+      _         -> {:noreply, socket}
+    end
+  end
+
+  @impl Phoenix.LiveView
   def handle_event("ingest", params, socket) do
     dir_path = params |> Map.get("dir_path", "") |> String.trim()
     style = Map.get(params, "style_description", @default_style)
+    project = params |> Map.get("project", "") |> String.trim()
     sample = case Integer.parse(Map.get(params, "sample", "50")) do
       {n, _} when n > 0 -> n
       _ -> 50
     end
 
     if dir_path != "" do
-      %{"dir_path" => dir_path, "style_description" => style, "sample" => sample}
+      %{"dir_path" => dir_path, "style_description" => style, "sample" => sample, "project" => project}
       |> LocalBatchImportWorker.new()
       |> Oban.insert()
     end
@@ -50,11 +93,20 @@ defmodule OrchestratorWeb.CuratorLive do
     {:noreply, assign(socket,
       status: if(dir_path != "", do: :ingesting, else: :idle),
       dir_path: dir_path,
+      project: project,
       import_error: nil,
       import_queued: 0,
       import_processed: 0,
       activity_log: []
     )}
+  end
+
+  @impl Phoenix.LiveView
+  def handle_event("suggest_refinement", _params, socket) do
+    case Orchestrator.Photos.suggest_style_refinement(socket.assigns.style_description) do
+      nil -> {:noreply, put_flash(socket, :info, "Rate at least 5 photos first to generate a refinement.")}
+      suggestion -> {:noreply, assign(socket, style_description: suggestion)}
+    end
   end
 
   @impl Phoenix.LiveView
@@ -70,7 +122,7 @@ defmodule OrchestratorWeb.CuratorLive do
 
   @impl Phoenix.LiveView
   def handle_info({:import_started, count}, socket) do
-    {:noreply, assign(socket, status: :ingesting, import_queued: count)}
+    {:noreply, assign(socket, status: :ingesting, import_queued: count, import_processed: 0)}
   end
 
   @impl Phoenix.LiveView
@@ -110,17 +162,17 @@ defmodule OrchestratorWeb.CuratorLive do
   @impl Phoenix.LiveView
   def render(assigns) do
     ~H"""
-    <div class="min-h-screen bg-[#0a0a0f] text-[#e8e6e0] font-serif selection:bg-white selection:text-black">
+    <div class="min-h-screen bg-[#fcfbf9] text-[#111111] font-serif selection:bg-[#111111] selection:text-[#fcfbf9]">
 
       <%!-- Header bar --%>
-      <div class="border-b border-white/5 px-8 py-4 flex items-center justify-between">
+      <div class="border-b border-gray-200 px-8 py-4 flex items-center justify-between">
         <div>
-          <span class="font-sans text-xs uppercase tracking-[0.4em] text-white/30">fineshyt</span>
-          <span class="font-sans text-xs text-white/10 ml-3">·</span>
-          <span class="font-sans text-xs uppercase tracking-widest text-white/20 ml-3">archival system</span>
+          <span class="font-sans text-xs uppercase tracking-[0.4em] text-gray-400">fineshyt</span>
+          <span class="font-sans text-xs text-gray-200 ml-3">·</span>
+          <span class="font-sans text-xs uppercase tracking-widest text-gray-300 ml-3">archival system</span>
         </div>
         <div class="flex items-center gap-6">
-          <.link navigate={~p"/gallery"} class="font-sans text-xs uppercase tracking-widest text-white/30 hover:text-white/70 transition-colors">
+          <.link navigate={~p"/gallery"} class="font-sans text-xs uppercase tracking-widest text-gray-400 hover:text-gray-800 transition-colors border-b border-gray-300 hover:border-gray-800 pb-0.5">
             Gallery →
           </.link>
         </div>
@@ -130,10 +182,10 @@ defmodule OrchestratorWeb.CuratorLive do
 
         <%!-- Title --%>
         <div class="mb-16">
-          <h1 class="text-[clamp(3rem,8vw,6rem)] font-black tracking-tight leading-none text-white">
+          <h1 class="text-[clamp(3rem,8vw,6rem)] font-black tracking-tight leading-none text-[#111111]">
             FINE.<br/>SHYT.
           </h1>
-          <p class="mt-4 font-serif italic text-white/30 text-lg">
+          <p class="mt-4 font-serif italic text-gray-400 text-lg">
             Point it at a folder. Let the machine decide.
           </p>
         </div>
@@ -141,13 +193,13 @@ defmodule OrchestratorWeb.CuratorLive do
         <%!-- Main ingest form --%>
         <form phx-submit="ingest" class="mb-10">
 
-          <%!-- Path input — Pixea-style large path bar --%>
+          <%!-- Path input --%>
           <div class="mb-2">
-            <label class="font-sans text-[10px] uppercase tracking-[0.35em] text-white/25 block mb-3">
+            <label class="font-sans text-[10px] uppercase tracking-[0.35em] text-gray-400 block mb-3">
               Directory
             </label>
-            <div class="flex gap-0 border border-white/10 bg-white/3 focus-within:border-white/25 transition-colors">
-              <span class="font-sans text-white/20 text-sm px-4 flex items-center select-none border-r border-white/10">
+            <div class="flex gap-0 border border-gray-300 focus-within:border-[#111111] transition-colors">
+              <span class="font-sans text-gray-300 text-sm px-4 flex items-center select-none border-r border-gray-200">
                 /
               </span>
               <input
@@ -159,18 +211,25 @@ defmodule OrchestratorWeb.CuratorLive do
                 phx-debounce="200"
                 autocomplete="off"
                 spellcheck="false"
-                class="flex-1 bg-transparent px-4 py-4 font-mono text-sm text-white/80 placeholder-white/15 focus:outline-none"
+                class="flex-1 bg-transparent px-4 py-4 font-mono text-sm text-[#111111] placeholder-gray-300 focus:outline-none"
               />
               <%= if @dir_path != "" do %>
                 <button
                   type="button"
                   phx-click="set_path"
                   phx-value-dir_path=""
-                  class="px-4 text-white/20 hover:text-white/50 transition-colors font-sans text-sm"
+                  class="px-4 text-gray-300 hover:text-gray-600 transition-colors font-sans text-sm border-l border-gray-200"
                 >
                   ×
                 </button>
               <% end %>
+              <button
+                type="button"
+                phx-click="browse_directory"
+                class="px-4 py-4 font-sans text-[10px] uppercase tracking-widest text-gray-400 hover:text-[#111111] border-l border-gray-200 hover:bg-gray-50 transition-colors shrink-0"
+              >
+                Browse
+              </button>
             </div>
           </div>
 
@@ -181,7 +240,7 @@ defmodule OrchestratorWeb.CuratorLive do
                 type="button"
                 phx-click="set_path"
                 phx-value-dir_path={path}
-                class="font-mono text-[10px] text-white/20 border border-white/8 px-2.5 py-1 hover:border-white/30 hover:text-white/50 transition-colors"
+                class="font-mono text-[10px] text-gray-400 border border-gray-200 px-2.5 py-1 hover:border-gray-500 hover:text-gray-700 transition-colors"
               >
                 <%= path %>
               </button>
@@ -191,30 +250,53 @@ defmodule OrchestratorWeb.CuratorLive do
           <%!-- Secondary controls --%>
           <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
             <div class="md:col-span-2">
-              <label class="font-sans text-[10px] uppercase tracking-[0.35em] text-white/25 block mb-3">
-                Style Description
-              </label>
+              <div class="flex items-center justify-between mb-3">
+                <label class="font-sans text-[10px] uppercase tracking-[0.35em] text-gray-400">
+                  Style Description
+                </label>
+                <button
+                  type="button"
+                  phx-click="suggest_refinement"
+                  class="font-sans text-[9px] uppercase tracking-widest text-gray-400 border border-gray-200 px-2 py-1 hover:border-gray-500 hover:text-gray-700 transition-colors"
+                >
+                  ← Refine from ratings
+                </button>
+              </div>
               <textarea
                 name="style_description"
                 rows="4"
-                class="w-full bg-white/3 border border-white/10 focus:border-white/25 px-4 py-3 font-sans text-xs text-white/60 placeholder-white/15 focus:outline-none resize-none transition-colors leading-relaxed"
+                class="w-full border border-gray-300 focus:border-[#111111] px-4 py-3 font-sans text-xs text-gray-600 focus:outline-none resize-none transition-colors leading-relaxed bg-transparent"
               ><%= @style_description %></textarea>
             </div>
-            <div>
-              <label class="font-sans text-[10px] uppercase tracking-[0.35em] text-white/25 block mb-3">
-                Sample Size
-              </label>
-              <input
-                type="number"
-                name="sample"
-                value={@sample}
-                min="1"
-                max="500"
-                class="w-full bg-white/3 border border-white/10 focus:border-white/25 px-4 py-4 font-sans text-sm text-white/60 focus:outline-none transition-colors"
-              />
-              <p class="mt-2 font-sans text-[9px] text-white/20 leading-relaxed">
-                Random sample from the directory. Larger sets take longer.
-              </p>
+            <div class="flex flex-col gap-4">
+              <div>
+                <label class="font-sans text-[10px] uppercase tracking-[0.35em] text-gray-400 block mb-3">
+                  Project
+                </label>
+                <input
+                  type="text"
+                  name="project"
+                  value={@project}
+                  placeholder="e.g. 2024-film-roll-01"
+                  class="w-full border border-gray-300 focus:border-[#111111] px-4 py-3 font-mono text-xs text-gray-700 focus:outline-none transition-colors bg-transparent placeholder-gray-300"
+                />
+              </div>
+              <div>
+                <label class="font-sans text-[10px] uppercase tracking-[0.35em] text-gray-400 block mb-3">
+                  Sample Size
+                </label>
+                <input
+                  type="number"
+                  name="sample"
+                  value={@sample}
+                  min="1"
+                  max="500"
+                  class="w-full border border-gray-300 focus:border-[#111111] px-4 py-4 font-sans text-sm text-gray-700 focus:outline-none transition-colors bg-transparent"
+                />
+                <p class="mt-2 font-sans text-[9px] text-gray-400 leading-relaxed">
+                  Random sample from the directory. Larger sets take longer.
+                </p>
+              </div>
             </div>
           </div>
 
@@ -222,19 +304,19 @@ defmodule OrchestratorWeb.CuratorLive do
           <div class="flex items-center justify-between">
             <div>
               <%= if @import_error do %>
-                <p class="font-sans text-xs text-red-400"><%= @import_error %></p>
+                <p class="font-sans text-xs text-red-700"><%= @import_error %></p>
               <% end %>
             </div>
             <%= if @status == :ingesting do %>
               <div class="flex items-center gap-4">
-                <div class="flex items-center gap-2 font-sans text-xs text-white/40">
-                  <span class="w-1.5 h-1.5 bg-white/60 rounded-full animate-ping inline-block"></span>
+                <div class="flex items-center gap-2 font-sans text-xs text-gray-500">
+                  <span class="w-1.5 h-1.5 bg-[#111111] rounded-full animate-ping inline-block"></span>
                   <%= @import_processed %> / <%= @import_queued %> processed
                 </div>
                 <button
                   type="button"
                   phx-click="stop"
-                  class="font-sans text-xs uppercase tracking-widest text-red-400 border border-red-800 px-4 py-2 hover:border-red-500 transition-colors"
+                  class="font-sans text-xs uppercase tracking-widest text-red-700 border border-red-300 px-4 py-2 hover:border-red-700 transition-colors"
                 >
                   Stop
                 </button>
@@ -243,7 +325,7 @@ defmodule OrchestratorWeb.CuratorLive do
               <button
                 type="submit"
                 disabled={@dir_path == "" or @status == :ingesting}
-                class="font-sans text-xs uppercase tracking-[0.3em] bg-white text-black px-10 py-3.5 hover:bg-white/90 transition-colors disabled:opacity-20 disabled:cursor-not-allowed"
+                class="font-sans text-xs uppercase tracking-[0.3em] bg-[#111111] text-[#fcfbf9] px-10 py-3.5 hover:bg-gray-800 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
               >
                 <%= if @status == :done, do: "Ingest Again →", else: "Ingest →" %>
               </button>
@@ -253,32 +335,32 @@ defmodule OrchestratorWeb.CuratorLive do
 
         <%!-- Activity log --%>
         <%= if @activity_log != [] do %>
-          <div class="border border-white/8">
-            <div class="flex items-center justify-between px-4 py-2.5 border-b border-white/8">
-              <span class="font-sans text-[10px] uppercase tracking-widest text-white/25">
+          <div class="border border-gray-200">
+            <div class="flex items-center justify-between px-4 py-2.5 border-b border-gray-200 bg-gray-50">
+              <span class="font-sans text-[10px] uppercase tracking-widest text-gray-500">
                 <%= if @status == :done, do: "Done — #{@import_processed} curated", else: "Processing..." %>
               </span>
-              <button phx-click="clear_log" class="font-sans text-[10px] text-white/20 hover:text-white/50 uppercase tracking-widest transition-colors">
+              <button phx-click="clear_log" class="font-sans text-[10px] text-gray-400 hover:text-gray-700 uppercase tracking-widest transition-colors">
                 Clear
               </button>
             </div>
-            <div class="divide-y divide-white/4 max-h-80 overflow-y-auto">
+            <div class="divide-y divide-gray-100 max-h-80 overflow-y-auto">
               <%= for entry <- @activity_log do %>
                 <div class="flex items-center gap-3 px-4 py-2 font-mono text-xs">
-                  <span class={["w-3 shrink-0", entry.match && "text-emerald-400", !entry.match && "text-white/15"]}>
+                  <span class={["w-3 shrink-0", entry.match && "text-[#111111]", !entry.match && "text-gray-300"]}>
                     <%= if entry.match, do: "✓", else: "—" %>
                   </span>
-                  <span class="w-52 shrink-0 text-white/25 truncate"><%= entry.filename %></span>
-                  <span class="flex-1 text-white/40 truncate italic"><%= entry.subject %></span>
+                  <span class="w-52 shrink-0 text-gray-400 truncate"><%= entry.filename %></span>
+                  <span class="flex-1 text-gray-500 truncate italic"><%= entry.subject %></span>
                   <%
                     score = entry.score
                     score_class = cond do
-                      score >= 80 -> "text-emerald-400"
-                      score >= 50 -> "text-yellow-400"
-                      true        -> "text-white/25"
+                      score >= 80 -> "text-[#111111] font-bold"
+                      score >= 50 -> "text-gray-600"
+                      true        -> "text-gray-300"
                     end
                   %>
-                  <span class={["shrink-0 font-bold tabular-nums w-8 text-right", score_class]}>
+                  <span class={["shrink-0 tabular-nums w-8 text-right", score_class]}>
                     <%= score %>
                   </span>
                 </div>
@@ -289,12 +371,12 @@ defmodule OrchestratorWeb.CuratorLive do
 
         <%!-- Empty state links --%>
         <%= if @activity_log == [] and @status == :idle do %>
-          <div class="mt-24 flex items-center gap-8 text-white/15">
-            <div class="flex-1 h-px bg-white/5"></div>
-            <.link navigate={~p"/gallery"} class="font-sans text-[10px] uppercase tracking-widest hover:text-white/40 transition-colors">
+          <div class="mt-24 flex items-center gap-8 text-gray-300">
+            <div class="flex-1 h-px bg-gray-200"></div>
+            <.link navigate={~p"/gallery"} class="font-sans text-[10px] uppercase tracking-widest hover:text-gray-600 transition-colors">
               View Archive →
             </.link>
-            <div class="flex-1 h-px bg-white/5"></div>
+            <div class="flex-1 h-px bg-gray-200"></div>
           </div>
         <% end %>
 

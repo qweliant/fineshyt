@@ -62,8 +62,12 @@ config :phoenix, :json_library, Jason
 
 config :orchestrator, Oban,
   engine: Oban.Engines.Basic,
-  # Strict concurrency of 1 to protect your local RAM/AI limits
-  queues: [ai_jobs: 1],
+  queues: [
+    # 4 concurrent RAW→JPEG conversions (~150MB RAM each, safe on 16GB)
+    conversion: 4,
+    # Strictly 1 LLM call at a time — Ollama serializes anyway
+    ai_jobs: 1
+  ],
   repo: Orchestrator.Repo
 
 # Import environment specific config. This must remain at the bottom

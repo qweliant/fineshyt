@@ -2,6 +2,7 @@ import base64
 import os
 import random
 from pathlib import Path
+from typing import Literal
 
 import instructor
 from dotenv import load_dotenv
@@ -27,15 +28,25 @@ app = FastAPI(title="Fineshyt Photo Curation API")
 
 
 class PhotoMetadata(BaseModel):
-    subject: str = Field(description="The primary subject of the photo.")
-    is_macro: bool = Field(
-        description="True if the photo appears to be a macro or extreme close-up shot."
+    subject: str = Field(description="The primary subject of the photo. Be specific — describe what is actually depicted.")
+    content_type: Literal["portrait", "street", "family", "landscape", "still_life", "architecture", "abstract", "other"] = Field(
+        description=(
+            "The primary content category. Choose exactly one: "
+            "'portrait' = single person, headshot, or environmental portrait; "
+            "'street' = candid urban/public life, people in city environments; "
+            "'family' = groups of people, gatherings, events, snapshots; "
+            "'landscape' = outdoor scenery, nature, no dominant human subjects; "
+            "'still_life' = objects, food, close-up of non-living things; "
+            "'architecture' = buildings, interiors, urban structures; "
+            "'abstract' = non-representational, heavy manipulation, or texture-focused; "
+            "'other' = anything that doesn't fit the above."
+        )
     )
     lighting_critique: str = Field(
         description="A brief, one-sentence critique of the lighting and contrast."
     )
     artistic_mood: str = Field(description="The emotional tone of the photo.")
-    suggested_tags: list[str] = Field(description="5 to 7 specific tags for a portfolio database.")
+    suggested_tags: list[str] = Field(description="5 to 7 specific tags describing technique, mood, or subject for a portfolio database. Do not include generic terms like 'photography' or 'photo'.")
     style_match: bool = Field(
         description="True if the photo matches the provided style description. False if no style description was given."
     )
@@ -55,6 +66,15 @@ class LocalIngestRequest(BaseModel):
 class LocalIngestResponse(BaseModel):
     file_paths: list[str]
     total_found: int
+
+
+class ConvertRequest(BaseModel):
+    file_path: str
+
+
+class ConvertResponse(BaseModel):
+    jpeg_path: str
+
 
 
 @app.post("/api/v1/curate", response_model=PhotoMetadata, tags=["Agent Workflow"])
@@ -89,7 +109,13 @@ if the photo genuinely fits the described aesthetic. Set style_score (0-100) and
                     "content": [
                         {
                             "type": "text",
-                            "text": f"You are an expert photo curator. Analyze this photograph and extract the metadata.\n\n{style_prompt}",
+                            "text": (
+                                "You are an expert photo curator. Analyze this photograph and extract the metadata. "
+                                "Be accurate about content_type — most photos are of people (portrait, family, street). "
+                                "Only use 'still_life' for photos where objects are the clear, intentional subject with no people present. "
+                                "Only use 'abstract' for photos that are genuinely non-representational.\n\n"
+                                f"{style_prompt}"
+                            ),
                         },
                         {
                             "type": "image_url",
@@ -155,10 +181,8 @@ def _unique_output_path(uploads_dir: Path, stem: str) -> Path:
 
 @app.post("/api/v1/ingest/local", response_model=LocalIngestResponse, tags=["Ingestion"])
 def ingest_local(request: LocalIngestRequest):
-    """Walk a local directory, find all supported image files (JPEG, TIFF, PNG, WebP,
-    camera RAW, etc.), optionally random-sample N, convert to JPEG (1440px long edge,
-    q=82), and save to the static uploads directory.
-    Runs synchronously (FastAPI threadpool) — safe for large batches."""
+    """Walk a local directory, find all supported image files, optionally random-sample N,
+    and return their source paths. No conversion — that happens per-job in the worker."""
     source_dir = Path(request.dir_path)
     if not source_dir.is_dir():
         raise HTTPException(status_code=400, detail=f"Directory not found: {request.dir_path}")
@@ -181,19 +205,27 @@ def ingest_local(request: LocalIngestRequest):
     if request.sample is not None and request.sample < total_found:
         image_files = random.sample(image_files, request.sample)
 
-    uploads_dir = Path(STATIC_UPLOADS_DIR)
-    uploads_dir.mkdir(parents=True, exist_ok=True)
+    return LocalIngestResponse(
+        file_paths=[str(p) for p in image_files],
+        total_found=total_found,
+    )
 
-    file_paths = []
-    for img_path in image_files:
-        try:
-            img = _open_as_pil(img_path)
-            img = _resize_to_long_edge(img, 1440)
-            out_path = _unique_output_path(uploads_dir, img_path.stem)
-            img.save(out_path, "JPEG", quality=82, optimize=True)
-            file_paths.append(str(out_path))
-        except Exception as e:
-            print(f"[ingest] Skipped {img_path.name}: {e}")
-            continue
 
-    return LocalIngestResponse(file_paths=file_paths, total_found=total_found)
+@app.post("/api/v1/convert", response_model=ConvertResponse, tags=["Ingestion"])
+def convert_file(request: ConvertRequest):
+    """Convert a single source file (RAW or JPEG/TIFF/etc.) to a resized JPEG
+    and save it to STATIC_UPLOADS_DIR. Called once per file by ConversionWorker."""
+    path = Path(request.file_path)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail=f"File not found: {request.file_path}")
+
+    try:
+        img = _open_as_pil(path)
+        img = _resize_to_long_edge(img, 1440)
+        uploads_dir = Path(STATIC_UPLOADS_DIR)
+        uploads_dir.mkdir(parents=True, exist_ok=True)
+        out = _unique_output_path(uploads_dir, path.stem)
+        img.save(out, "JPEG", quality=82, optimize=True)
+        return ConvertResponse(jpeg_path=str(out))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Conversion failed: {e}")
