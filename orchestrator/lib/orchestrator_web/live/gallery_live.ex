@@ -60,6 +60,7 @@ defmodule OrchestratorWeb.GalleryLive do
       "no_match" -> :no_match
       "rated"    -> :rated
       "unrated"  -> :unrated
+      "failed"   -> :failed
       _          -> :all
     end
     {:noreply, reload(socket, filter: atom)}
@@ -159,6 +160,43 @@ defmodule OrchestratorWeb.GalleryLive do
       |> load_photos()}
   end
 
+  @impl Phoenix.LiveView
+  def handle_event("retry_photo", %{"id" => id}, socket) do
+    case Photos.retry_failed(String.to_integer(id)) do
+      {:ok, %{file_path: fp, source: source, project: project}} ->
+        ref = System.unique_integer([:positive]) |> to_string()
+        Orchestrator.Workers.AiCurationWorker.new(%{
+          "file_path" => fp,
+          "ref" => ref,
+          "source" => source,
+          "project" => project,
+          "style_description" => ""
+        })
+        |> Oban.insert()
+        {:noreply, socket |> put_flash(:info, "Re-queued for curation.") |> load_photos()}
+      _ ->
+        {:noreply, put_flash(socket, :error, "Could not retry.")}
+    end
+  end
+
+  @impl Phoenix.LiveView
+  def handle_event("retry_all_failed", _params, socket) do
+    failed = Photos.list_photos(filter: :failed, page: 1)
+    Enum.each(failed, fn photo ->
+      ref = System.unique_integer([:positive]) |> to_string()
+      Photos.retry_failed(photo.id)
+      Orchestrator.Workers.AiCurationWorker.new(%{
+        "file_path" => photo.file_path,
+        "ref" => ref,
+        "source" => photo.source || "local",
+        "project" => photo.project,
+        "style_description" => ""
+      })
+      |> Oban.insert()
+    end)
+    {:noreply, socket |> put_flash(:info, "Re-queued #{length(failed)} failed photos.") |> load_photos()}
+  end
+
   # ── pubsub ────────────────────────────────────────────────────────────────
 
   @impl Phoenix.LiveView
@@ -167,6 +205,11 @@ defmodule OrchestratorWeb.GalleryLive do
       |> assign(:tag_profile, Photos.tag_affinity_profile())
       |> assign(:projects, Photos.list_projects())
       |> load_photos()}
+  end
+
+  def handle_info({:curation_failed, _ref, _basename, _reason}, socket) do
+    # Reload so failed tab count stays fresh
+    {:noreply, load_photos(socket)}
   end
 
   def handle_info(_unhandled, socket), do: {:noreply, socket}
@@ -186,7 +229,10 @@ defmodule OrchestratorWeb.GalleryLive do
             The Archive. <span class="font-sans text-sm not-italic text-gray-400"><%= @total %> photos</span>
           </p>
         </div>
-        <div class="mt-6 md:mt-0 font-sans uppercase tracking-widest text-xs">
+        <div class="mt-6 md:mt-0 font-sans uppercase tracking-widest text-xs flex gap-6">
+          <.link navigate={~p"/projects"} class="border-b border-gray-400 pb-0.5 hover:text-gray-500 hover:border-gray-500 transition-colors">
+            Projects
+          </.link>
           <.link navigate={~p"/"} class="border-b border-[#111111] pb-0.5 hover:text-gray-500 hover:border-gray-500 transition-colors">
             ← Ingest
           </.link>
@@ -225,21 +271,39 @@ defmodule OrchestratorWeb.GalleryLive do
       <div class="flex gap-0 mb-4 border-b border-gray-200 overflow-x-auto">
         <%= for {label, value} <- [
           {"All", :all}, {"Match ✓", :match}, {"No Match ✗", :no_match},
-          {"Rated", :rated}, {"Unrated", :unrated}
+          {"Rated", :rated}, {"Unrated", :unrated}, {"Failed", :failed}
         ] do %>
           <button
             phx-click="set_filter"
             phx-value-filter={value}
             class={[
               "font-sans uppercase tracking-widest text-xs px-5 py-3 border-b-2 transition-colors whitespace-nowrap shrink-0",
-              @filter == value && "border-[#111111] text-[#111111]",
-              @filter != value && "border-transparent text-gray-400 hover:text-gray-600"
+              @filter == value && value == :failed && "border-red-600 text-red-600",
+              @filter == value && value != :failed && "border-[#111111] text-[#111111]",
+              @filter != value && value == :failed && "border-transparent text-red-300 hover:text-red-500",
+              @filter != value && value != :failed && "border-transparent text-gray-400 hover:text-gray-600"
             ]}
           >
             <%= label %>
           </button>
         <% end %>
       </div>
+
+      <%!-- Failed tab actions --%>
+      <%= if @filter == :failed and @total > 0 do %>
+        <div class="flex items-center gap-4 mb-6 p-3 border border-red-200 bg-red-50/50">
+          <p class="font-sans text-xs text-red-600 flex-1">
+            <%= @total %> photo<%= if @total != 1, do: "s" %> failed AI curation (timeout or service error).
+          </p>
+          <button
+            phx-click="retry_all_failed"
+            data-confirm="Re-queue all #{@total} failed photos?"
+            class="font-sans text-[10px] uppercase tracking-widest text-red-700 border border-red-300 px-3 py-1.5 hover:border-red-600 transition-colors shrink-0"
+          >
+            Retry All
+          </button>
+        </div>
+      <% end %>
 
       <%!-- Project filter --%>
       <%= if @projects != [] do %>
@@ -295,11 +359,18 @@ defmodule OrchestratorWeb.GalleryLive do
               phx-keydown="photo_keydown"
               phx-value-id={photo.id}
             >
-              <img
-                src={photo.url}
-                alt={photo.subject || "Photo"}
-                class="object-cover w-full h-full transition-transform duration-500 group-hover:scale-105"
-              />
+              <%= if photo.url do %>
+                <img
+                  src={photo.url}
+                  alt={photo.subject || "Photo"}
+                  class="object-cover w-full h-full transition-transform duration-500 group-hover:scale-105"
+                />
+              <% else %>
+                <div class="w-full h-full flex flex-col items-center justify-center gap-2 bg-gray-100">
+                  <span class="text-red-400 font-sans text-lg">✗</span>
+                  <span class="font-mono text-[9px] text-gray-400 text-center px-2 leading-snug truncate w-full text-center"><%= Path.basename(photo.file_path || "") %></span>
+                </div>
+              <% end %>
 
               <%!-- Top badges --%>
               <div class="absolute top-2 right-2 flex flex-col items-end gap-1">
@@ -338,7 +409,31 @@ defmodule OrchestratorWeb.GalleryLive do
                 <% end %>
               </div>
 
-              <%!-- Hover overlay --%>
+              <%!-- Hover overlay — failed variant --%>
+              <%= if photo.curation_status == "failed" do %>
+                <div class="absolute inset-0 bg-[#111111]/85 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity duration-300 flex flex-col justify-center items-center gap-3 p-4">
+                  <p class="font-sans text-[10px] uppercase tracking-widest text-red-400 text-center">Curation failed</p>
+                  <%= if photo.failure_reason && photo.failure_reason != "" do %>
+                    <p class="font-mono text-[9px] text-gray-400 text-center leading-snug px-2 truncate w-full"><%= photo.failure_reason %></p>
+                  <% end %>
+                  <button
+                    phx-click="retry_photo"
+                    phx-value-id={photo.id}
+                    class="font-sans text-[10px] uppercase tracking-widest text-[#fcfbf9] border border-gray-500 hover:border-white px-4 py-2 transition-colors"
+                  >
+                    Retry
+                  </button>
+                  <button
+                    phx-click="delete_photo"
+                    phx-value-id={photo.id}
+                    data-confirm="Remove this photo?"
+                    class="font-sans text-[9px] uppercase tracking-widest text-gray-600 hover:text-red-400 transition-colors"
+                  >
+                    discard
+                  </button>
+                </div>
+              <% else %>
+              <%!-- Hover overlay — normal variant --%>
               <div class="absolute inset-0 bg-[#111111]/80 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity duration-300 flex flex-col justify-end p-4">
 
                 <button
@@ -438,6 +533,7 @@ defmodule OrchestratorWeb.GalleryLive do
                   <button type="submit" class="text-gray-500 hover:text-gray-200 font-sans text-xs px-1 uppercase tracking-wider">set</button>
                 </form>
               </div>
+              <% end %>
             </div>
           <% end %>
         </div>

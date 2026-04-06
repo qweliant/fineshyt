@@ -20,6 +20,7 @@ defmodule Orchestrator.Photos.Photo do
     field :user_rating, :integer
     field :project, :string
     field :curation_status, :string, default: "complete"
+    field :failure_reason, :string
 
     timestamps()
   end
@@ -30,7 +31,7 @@ defmodule Orchestrator.Photos.Photo do
       :file_path, :url, :source, :instagram_shortcode,
       :style_match, :style_score, :style_reason,
       :subject, :artistic_mood, :lighting_critique, :content_type, :suggested_tags,
-      :user_rating, :project, :curation_status
+      :user_rating, :project, :curation_status, :failure_reason
     ])
     |> validate_inclusion(:user_rating, 1..5, message: "must be between 1 and 5")
     |> validate_required([:file_path])

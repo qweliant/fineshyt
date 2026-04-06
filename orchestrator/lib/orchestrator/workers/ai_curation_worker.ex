@@ -19,11 +19,12 @@ defmodule Orchestrator.Workers.AiCurationWorker do
     project = Map.get(args, "project")
     basename = Path.basename(file_path)
 
+    uploads_dir = Path.join([:code.priv_dir(:orchestrator), "static", "uploads"])
+    dest = Path.join(uploads_dir, basename)
+
     result =
       try do
-        uploads_dir = Path.join([:code.priv_dir(:orchestrator), "static", "uploads"])
         File.mkdir_p!(uploads_dir)
-        dest = Path.join(uploads_dir, basename)
         if file_path != dest, do: File.cp!(file_path, dest)
 
         if Photos.already_processed?(dest) do
@@ -46,6 +47,7 @@ defmodule Orchestrator.Workers.AiCurationWorker do
                  receive_timeout: 60_000
                ) do
             {:ok, %Req.Response{status: 200, body: metadata}} ->
+              Photos.delete_failed_if_exists(dest)
               Photos.create_photo(%{
                 file_path: dest,
                 url: "/uploads/#{basename}",
@@ -86,14 +88,31 @@ defmodule Orchestrator.Workers.AiCurationWorker do
           {:error, Exception.message(e)}
       end
 
-    if result != :ok, do: maybe_broadcast_failure(ref, job)
+    if result != :ok, do: maybe_broadcast_failure(ref, job, dest, basename, source, project, result)
     result
   end
 
-  defp maybe_broadcast_failure(ref, %Oban.Job{attempt: attempt, max_attempts: max}) do
-    if attempt >= max do
-      Logger.info("All attempts exhausted, broadcasting failure for ref #{ref}")
-      Phoenix.PubSub.broadcast(Orchestrator.PubSub, "photo_updates", {:curation_failed, ref, nil})
+  defp maybe_broadcast_failure(ref, %Oban.Job{attempt: attempt, max_attempts: max}, dest, basename, source, project, result) do
+    reason = case result do
+      {:error, r} -> r
+      _ -> "unknown error"
     end
+
+    if attempt >= max do
+      Logger.info("All attempts exhausted for #{basename}, persisting failure.")
+      Photos.create_failed(%{
+        file_path: dest,
+        url: "/uploads/#{basename}",
+        source: source,
+        project: project,
+        failure_reason: reason
+      })
+    end
+
+    Phoenix.PubSub.broadcast(
+      Orchestrator.PubSub,
+      "photo_updates",
+      {:curation_failed, ref, basename, reason}
+    )
   end
 end

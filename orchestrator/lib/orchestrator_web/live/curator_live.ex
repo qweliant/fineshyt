@@ -55,6 +55,7 @@ defmodule OrchestratorWeb.CuratorLive do
       |> assign(:project, "")
       |> assign(:import_queued, pending)
       |> assign(:import_processed, 0)
+      |> assign(:import_failed_count, 0)
       |> assign(:import_error, nil)
       |> assign(:activity_log, activity_log)
 
@@ -97,6 +98,7 @@ defmodule OrchestratorWeb.CuratorLive do
       import_error: nil,
       import_queued: 0,
       import_processed: 0,
+      import_failed_count: 0,
       activity_log: []
     )}
   end
@@ -149,7 +151,27 @@ defmodule OrchestratorWeb.CuratorLive do
   end
 
   @impl Phoenix.LiveView
-  def handle_info({:curation_failed, _ref, _reason}, socket) do
+  def handle_info({:curation_failed, _ref, basename, reason}, socket) do
+    processed = socket.assigns.import_processed + 1
+    failed_count = socket.assigns.import_failed_count + 1
+    done = processed >= socket.assigns.import_queued and socket.assigns.import_queued > 0
+    entry = %{
+      filename: basename || "unknown",
+      subject: reason || "curation failed",
+      score: 0,
+      match: false,
+      status: :failed
+    }
+    log = [entry | socket.assigns.activity_log] |> Enum.take(100)
+    {:noreply, socket
+      |> assign(:activity_log, log)
+      |> assign(:import_processed, processed)
+      |> assign(:import_failed_count, failed_count)
+      |> assign(:status, if(done, do: :done, else: :ingesting))}
+  end
+
+  @impl Phoenix.LiveView
+  def handle_info({:curation_skipped, _ref, _basename}, socket) do
     processed = socket.assigns.import_processed + 1
     done = processed >= socket.assigns.import_queued and socket.assigns.import_queued > 0
     {:noreply, socket
@@ -172,6 +194,9 @@ defmodule OrchestratorWeb.CuratorLive do
           <span class="font-sans text-xs uppercase tracking-widest text-gray-300 ml-3">archival system</span>
         </div>
         <div class="flex items-center gap-6">
+          <.link navigate={~p"/projects"} class="font-sans text-xs uppercase tracking-widest text-gray-400 hover:text-gray-800 transition-colors border-b border-gray-300 hover:border-gray-800 pb-0.5">
+            Projects
+          </.link>
           <.link navigate={~p"/gallery"} class="font-sans text-xs uppercase tracking-widest text-gray-400 hover:text-gray-800 transition-colors border-b border-gray-300 hover:border-gray-800 pb-0.5">
             Gallery →
           </.link>
@@ -338,7 +363,14 @@ defmodule OrchestratorWeb.CuratorLive do
           <div class="border border-gray-200">
             <div class="flex items-center justify-between px-4 py-2.5 border-b border-gray-200 bg-gray-50">
               <span class="font-sans text-[10px] uppercase tracking-widest text-gray-500">
-                <%= if @status == :done, do: "Done — #{@import_processed} curated", else: "Processing..." %>
+                <%= cond do %>
+                  <% @status == :done and @import_failed_count > 0 -> %>
+                    Done — <%= @import_processed - @import_failed_count %> curated · <span class="text-red-500"><%= @import_failed_count %> failed</span>
+                  <% @status == :done -> %>
+                    Done — <%= @import_processed %> curated
+                  <% true -> %>
+                    Processing...
+                <% end %>
               </span>
               <button phx-click="clear_log" class="font-sans text-[10px] text-gray-400 hover:text-gray-700 uppercase tracking-widest transition-colors">
                 Clear
@@ -346,24 +378,33 @@ defmodule OrchestratorWeb.CuratorLive do
             </div>
             <div class="divide-y divide-gray-100 max-h-80 overflow-y-auto">
               <%= for entry <- @activity_log do %>
-                <div class="flex items-center gap-3 px-4 py-2 font-mono text-xs">
-                  <span class={["w-3 shrink-0", entry.match && "text-[#111111]", !entry.match && "text-gray-300"]}>
-                    <%= if entry.match, do: "✓", else: "—" %>
-                  </span>
-                  <span class="w-52 shrink-0 text-gray-400 truncate"><%= entry.filename %></span>
-                  <span class="flex-1 text-gray-500 truncate italic"><%= entry.subject %></span>
-                  <%
-                    score = entry.score
-                    score_class = cond do
-                      score >= 80 -> "text-[#111111] font-bold"
-                      score >= 50 -> "text-gray-600"
-                      true        -> "text-gray-300"
-                    end
-                  %>
-                  <span class={["shrink-0 tabular-nums w-8 text-right", score_class]}>
-                    <%= score %>
-                  </span>
-                </div>
+                <%= if Map.get(entry, :status) == :failed do %>
+                  <div class="flex items-center gap-3 px-4 py-2 font-mono text-xs bg-red-50/50">
+                    <span class="w-3 shrink-0 text-red-400">✗</span>
+                    <span class="w-52 shrink-0 text-red-400 truncate"><%= entry.filename %></span>
+                    <span class="flex-1 text-red-300 truncate italic"><%= entry.subject %></span>
+                    <span class="shrink-0 font-sans text-[9px] uppercase tracking-wider text-red-300">failed</span>
+                  </div>
+                <% else %>
+                  <div class="flex items-center gap-3 px-4 py-2 font-mono text-xs">
+                    <span class={["w-3 shrink-0", entry.match && "text-[#111111]", !entry.match && "text-gray-300"]}>
+                      <%= if entry.match, do: "✓", else: "—" %>
+                    </span>
+                    <span class="w-52 shrink-0 text-gray-400 truncate"><%= entry.filename %></span>
+                    <span class="flex-1 text-gray-500 truncate italic"><%= entry.subject %></span>
+                    <%
+                      score = entry.score
+                      score_class = cond do
+                        score >= 80 -> "text-[#111111] font-bold"
+                        score >= 50 -> "text-gray-600"
+                        true        -> "text-gray-300"
+                      end
+                    %>
+                    <span class={["shrink-0 tabular-nums w-8 text-right", score_class]}>
+                      <%= score %>
+                    </span>
+                  </div>
+                <% end %>
               <% end %>
             </div>
           </div>

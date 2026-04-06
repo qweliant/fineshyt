@@ -18,10 +18,7 @@ defmodule Orchestrator.Photos do
     search  = Keyword.get(opts, :search, "")
     project = Keyword.get(opts, :project, nil)
 
-    base =
-      from p in Photo, where: p.curation_status != "rejected"
-
-    base
+    base_query(filter)
     |> apply_filter(filter)
     |> apply_project_filter(project)
     |> apply_search(search)
@@ -35,7 +32,7 @@ defmodule Orchestrator.Photos do
     search  = Keyword.get(opts, :search, "")
     project = Keyword.get(opts, :project, nil)
 
-    from(p in Photo, where: p.curation_status != "rejected")
+    base_query(filter)
     |> apply_filter(filter)
     |> apply_project_filter(project)
     |> apply_search(search)
@@ -44,7 +41,11 @@ defmodule Orchestrator.Photos do
 
   def page_size, do: @page_size
 
+  defp base_query(:failed), do: from(p in Photo, where: p.curation_status == "failed")
+  defp base_query(_), do: from(p in Photo, where: p.curation_status not in ["rejected", "failed", "pending"])
+
   defp apply_filter(q, :all),      do: q
+  defp apply_filter(q, :failed),   do: q
   defp apply_filter(q, :match),    do: where(q, [p], p.style_match == true)
   defp apply_filter(q, :no_match), do: where(q, [p], p.style_match == false)
   defp apply_filter(q, :rated),    do: where(q, [p], not is_nil(p.user_rating))
@@ -98,7 +99,8 @@ defmodule Orchestrator.Photos do
   def existing_stems(stems) do
     Repo.all(
       from p in Photo,
-        where: fragment("regexp_replace(regexp_replace(file_path, '^.*/', ''), '\\.[^.]+$', '') = ANY(?)", ^stems),
+        where: fragment("regexp_replace(regexp_replace(file_path, '^.*/', ''), '\\.[^.]+$', '') = ANY(?)", ^stems)
+          and p.curation_status not in ["failed"],
         select: fragment("regexp_replace(regexp_replace(file_path, '^.*/', ''), '\\.[^.]+$', '')")
     )
     |> MapSet.new()
@@ -111,7 +113,7 @@ defmodule Orchestrator.Photos do
       Path.join([:code.priv_dir(:orchestrator), "static", "uploads", b]) |> to_string()
     end)
     Repo.all(from p in Photo,
-      where: p.file_path in ^paths,
+      where: p.file_path in ^paths and p.curation_status not in ["failed"],
       select: p.file_path
     )
     |> Enum.map(&Path.basename/1)
@@ -177,6 +179,53 @@ defmodule Orchestrator.Photos do
     Repo.exists?(from p in Photo,
       where: p.file_path == ^file_path and p.curation_status in ["complete", "rejected"]
     )
+  end
+
+  # Persist a permanently-failed curation so the user can see and retry it.
+  def create_failed(attrs) do
+    %Photo{}
+    |> Photo.changeset(Map.put(attrs, :curation_status, "failed"))
+    |> Repo.insert(
+      on_conflict: [set: [failure_reason: attrs[:failure_reason] || attrs["failure_reason"], curation_status: "failed", updated_at: DateTime.utc_now()]],
+      conflict_target: [:file_path]
+    )
+  end
+
+  # Before a successful insert, wipe any prior failed record for the same path.
+  def delete_failed_if_exists(file_path) do
+    Repo.delete_all(from p in Photo, where: p.file_path == ^file_path and p.curation_status == "failed")
+  end
+
+  # Delete the failed record and return its attrs so the caller can re-queue.
+  def retry_failed(id) do
+    photo = get_photo!(id)
+    {:ok, _} = Repo.delete(photo)
+    {:ok, %{file_path: photo.file_path, source: photo.source || "local", project: photo.project}}
+  end
+
+  # Returns [{name, count, cover_url}] for every named project.
+  def list_projects_with_covers do
+    counts =
+      Repo.all(
+        from p in Photo,
+          where: not is_nil(p.project) and p.project != "" and p.curation_status not in ["rejected", "failed"],
+          group_by: p.project,
+          select: {p.project, count(p.id)},
+          order_by: p.project
+      )
+
+    Enum.map(counts, fn {name, count} ->
+      cover =
+        Repo.one(
+          from p in Photo,
+            where: p.project == ^name and not is_nil(p.url) and p.curation_status == "complete",
+            order_by: [desc_nulls_last: p.style_score, desc: p.inserted_at],
+            limit: 1,
+            select: p.url
+        )
+
+      %{name: name, count: count, cover_url: cover}
+    end)
   end
 
   def add_tag(id, tag) do
