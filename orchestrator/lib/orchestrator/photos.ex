@@ -287,7 +287,7 @@ defmodule Orchestrator.Photos do
   def suggest_style_refinement(base_description \\ "") do
     profile = tag_affinity_profile()
 
-    if map_size(profile) < 5 do
+    if map_size(profile) < 3 do
       nil
     else
       top = profile
