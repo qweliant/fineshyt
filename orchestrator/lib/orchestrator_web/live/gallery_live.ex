@@ -16,6 +16,8 @@ defmodule OrchestratorWeb.GalleryLive do
       |> assign(:project_filter, nil)
       |> assign(:projects, Photos.list_projects())
       |> assign(:tag_profile, Photos.tag_affinity_profile())
+      |> assign(:selected, MapSet.new())
+      |> assign(:bulk_project, "")
       |> load_photos()
 
     {:ok, socket}
@@ -56,14 +58,16 @@ defmodule OrchestratorWeb.GalleryLive do
   @impl Phoenix.LiveView
   def handle_event("set_filter", %{"filter" => filter}, socket) do
     atom = case filter do
-      "match"    -> :match
-      "no_match" -> :no_match
-      "rated"    -> :rated
-      "unrated"  -> :unrated
-      "failed"   -> :failed
-      _          -> :all
+      "match"        -> :match
+      "no_match"     -> :no_match
+      "rated"        -> :rated
+      "unrated"      -> :unrated
+      "failed"       -> :failed
+      "rejected"     -> :rejected
+      "for_projects" -> :for_projects
+      _              -> :all
     end
-    {:noreply, reload(socket, filter: atom)}
+    {:noreply, socket |> assign(:selected, MapSet.new()) |> reload(filter: atom)}
   end
 
   @impl Phoenix.LiveView
@@ -99,8 +103,10 @@ defmodule OrchestratorWeb.GalleryLive do
         Photos.rate_photo(photo_id, 5)
         {:noreply, socket |> assign(:tag_profile, Photos.tag_affinity_profile()) |> load_photos()}
       "x" ->
-        Photos.delete_photo(photo_id)
+        Photos.reject_photo(photo_id)
         {:noreply, socket |> assign(:tag_profile, Photos.tag_affinity_profile()) |> load_photos()}
+      "m" ->
+        handle_event("toggle_select", %{"id" => id}, socket)
       _ ->
         {:noreply, socket}
     end
@@ -197,6 +203,99 @@ defmodule OrchestratorWeb.GalleryLive do
     {:noreply, socket |> put_flash(:info, "Re-queued #{length(failed)} failed photos.") |> load_photos()}
   end
 
+  # ── multi-select & bulk ───────────────────────────────────────────────────
+
+  @impl Phoenix.LiveView
+  def handle_event("toggle_select", %{"id" => id}, socket) do
+    id = String.to_integer(id)
+    selected = socket.assigns.selected
+
+    selected =
+      if MapSet.member?(selected, id),
+        do: MapSet.delete(selected, id),
+        else: MapSet.put(selected, id)
+
+    {:noreply, assign(socket, :selected, selected)}
+  end
+
+  def handle_event("select_all", _, socket) do
+    ids = Enum.map(socket.assigns.photos, & &1.id) |> MapSet.new()
+    {:noreply, assign(socket, :selected, ids)}
+  end
+
+  def handle_event("clear_selection", _, socket) do
+    {:noreply, assign(socket, :selected, MapSet.new())}
+  end
+
+  def handle_event("bulk_project_input", %{"value" => v}, socket) do
+    {:noreply, assign(socket, :bulk_project, v)}
+  end
+
+  def handle_event("bulk_assign_project", %{"name" => name}, socket) do
+    ids = MapSet.to_list(socket.assigns.selected)
+
+    if ids == [] do
+      {:noreply, socket}
+    else
+      {:ok, n} = Photos.bulk_set_project(ids, name)
+
+      {:noreply,
+       socket
+       |> assign(:selected, MapSet.new())
+       |> assign(:bulk_project, "")
+       |> assign(:projects, Photos.list_projects())
+       |> put_flash(:info, "Assigned #{n} photo#{if n == 1, do: "", else: "s"} to #{name}.")
+       |> load_photos()}
+    end
+  end
+
+  def handle_event("bulk_assign_input", _, socket) do
+    name = String.trim(socket.assigns.bulk_project)
+    if name == "", do: {:noreply, socket}, else: handle_event("bulk_assign_project", %{"name" => name}, socket)
+  end
+
+  def handle_event("bulk_reject", _, socket) do
+    ids = MapSet.to_list(socket.assigns.selected)
+
+    if ids == [] do
+      {:noreply, socket}
+    else
+      {:ok, n} = Photos.bulk_reject(ids)
+
+      {:noreply,
+       socket
+       |> assign(:selected, MapSet.new())
+       |> put_flash(:info, "Rejected #{n} photo#{if n == 1, do: "", else: "s"}.")
+       |> load_photos()}
+    end
+  end
+
+  def handle_event("empty_trash", _, socket) do
+    {deleted, missing} = Photos.empty_trash()
+
+    msg =
+      "Trash emptied: #{deleted} row#{if deleted == 1, do: "", else: "s"} removed" <>
+        if missing > 0, do: " (#{missing} file#{if missing == 1, do: "", else: "s"} were already gone)", else: ""
+
+    {:noreply,
+     socket
+     |> put_flash(:info, msg)
+     |> load_photos()}
+  end
+
+  def handle_event("restore_photo", %{"id" => id}, socket) do
+    case Photos.restore_photo(String.to_integer(id)) do
+      {:ok, _} ->
+        {:noreply, socket |> put_flash(:info, "Restored.") |> load_photos()}
+
+      {:error, :file_missing} ->
+        {:noreply, put_flash(socket, :error, "Cannot restore — file is gone from disk.")}
+
+      _ ->
+        {:noreply, socket}
+    end
+  end
+
   # ── pubsub ────────────────────────────────────────────────────────────────
 
   @impl Phoenix.LiveView
@@ -230,10 +329,13 @@ defmodule OrchestratorWeb.GalleryLive do
           </p>
         </div>
         <div class="mt-6 md:mt-0 font-sans uppercase tracking-widest text-xs flex gap-6">
+          <.link navigate={~p"/review"} class="border-b border-[#111111] pb-0.5 hover:text-gray-500 hover:border-gray-500 transition-colors">
+            Review →
+          </.link>
           <.link navigate={~p"/projects"} class="border-b border-gray-400 pb-0.5 hover:text-gray-500 hover:border-gray-500 transition-colors">
             Projects
           </.link>
-          <.link navigate={~p"/"} class="border-b border-[#111111] pb-0.5 hover:text-gray-500 hover:border-gray-500 transition-colors">
+          <.link navigate={~p"/"} class="border-b border-gray-400 pb-0.5 hover:text-gray-500 hover:border-gray-500 transition-colors">
             ← Ingest
           </.link>
         </div>
@@ -270,24 +372,43 @@ defmodule OrchestratorWeb.GalleryLive do
       <%!-- Filter Tabs --%>
       <div class="flex gap-0 mb-4 border-b border-gray-200 overflow-x-auto">
         <%= for {label, value} <- [
-          {"All", :all}, {"Match ✓", :match}, {"No Match ✗", :no_match},
-          {"Rated", :rated}, {"Unrated", :unrated}, {"Failed", :failed}
+          {"All", :all},
+          {"For Projects", :for_projects},
+          {"Match ✓", :match}, {"No Match ✗", :no_match},
+          {"Rated", :rated}, {"Unrated", :unrated},
+          {"Rejected", :rejected}, {"Failed", :failed}
         ] do %>
           <button
             phx-click="set_filter"
             phx-value-filter={value}
             class={[
               "font-sans uppercase tracking-widest text-xs px-5 py-3 border-b-2 transition-colors whitespace-nowrap shrink-0",
-              @filter == value && value == :failed && "border-red-600 text-red-600",
-              @filter == value && value != :failed && "border-[#111111] text-[#111111]",
-              @filter != value && value == :failed && "border-transparent text-red-300 hover:text-red-500",
-              @filter != value && value != :failed && "border-transparent text-gray-400 hover:text-gray-600"
+              @filter == value and value in [:failed, :rejected] && "border-red-600 text-red-600",
+              @filter == value and value not in [:failed, :rejected] && "border-[#111111] text-[#111111]",
+              @filter != value and value in [:failed, :rejected] && "border-transparent text-red-300 hover:text-red-500",
+              @filter != value and value not in [:failed, :rejected] && "border-transparent text-gray-400 hover:text-gray-600"
             ]}
           >
             <%= label %>
           </button>
         <% end %>
       </div>
+
+      <%!-- Rejected tab actions --%>
+      <%= if @filter == :rejected and @total > 0 do %>
+        <div class="flex items-center gap-4 mb-6 p-3 border border-red-200 bg-red-50/50">
+          <p class="font-sans text-xs text-red-600 flex-1">
+            <%= @total %> photo<%= if @total != 1, do: "s" %> in trash. Click <span class="font-bold">restore</span> to bring one back, or <span class="font-bold">empty trash</span> to hard-delete the files.
+          </p>
+          <button
+            phx-click="empty_trash"
+            data-confirm={"Hard-delete all #{@total} rejected photos? This removes the files from disk."}
+            class="font-sans text-[10px] uppercase tracking-widest text-red-700 border border-red-300 px-3 py-1.5 hover:border-red-600 transition-colors shrink-0"
+          >
+            Empty Trash
+          </button>
+        </div>
+      <% end %>
 
       <%!-- Failed tab actions --%>
       <%= if @filter == :failed and @total > 0 do %>
@@ -332,9 +453,55 @@ defmodule OrchestratorWeb.GalleryLive do
         </div>
       <% end %>
 
+      <%!-- Selection toolbar (sticky-feeling, only when there's a selection) --%>
+      <%= if MapSet.size(@selected) > 0 do %>
+        <div class="sticky top-2 z-10 mb-4 flex flex-col md:flex-row md:items-center gap-3 p-3 border-2 border-[#111111] bg-[#fcfbf9] shadow-sm">
+          <p class="font-sans text-xs uppercase tracking-widest text-[#111111] shrink-0">
+            <%= MapSet.size(@selected) %> selected
+          </p>
+
+          <div class="flex items-center gap-1 flex-wrap">
+            <%= for proj <- @projects do %>
+              <button
+                phx-click="bulk_assign_project"
+                phx-value-name={proj}
+                class="font-mono text-[10px] px-2 py-1 border border-gray-300 text-gray-700 hover:border-[#111111] hover:text-[#111111] transition-colors"
+              ><%= proj %></button>
+            <% end %>
+          </div>
+
+          <form phx-submit="bulk_assign_input" class="flex gap-1 flex-1 min-w-[180px]">
+            <input
+              type="text"
+              name="value"
+              value={@bulk_project}
+              phx-change="bulk_project_input"
+              phx-debounce="200"
+              placeholder="new project name…"
+              class="flex-1 bg-transparent border border-gray-300 focus:border-[#111111] px-2 py-1 font-mono text-xs text-[#111111] placeholder-gray-400 focus:outline-none"
+            />
+            <button type="submit" class="font-sans text-[10px] uppercase tracking-widest text-gray-700 border border-gray-300 hover:border-[#111111] hover:text-[#111111] px-2 py-1 transition-colors">Assign</button>
+          </form>
+
+          <button
+            phx-click="bulk_reject"
+            data-confirm={"Reject #{MapSet.size(@selected)} photos? (reversible)"}
+            class="font-sans text-[10px] uppercase tracking-widest text-red-700 border border-red-300 hover:border-red-600 px-3 py-1 transition-colors shrink-0"
+          >Reject</button>
+          <button
+            phx-click="select_all"
+            class="font-sans text-[10px] uppercase tracking-widest text-gray-500 border border-gray-300 hover:border-gray-700 hover:text-gray-700 px-3 py-1 transition-colors shrink-0"
+          >Select page</button>
+          <button
+            phx-click="clear_selection"
+            class="font-sans text-[10px] uppercase tracking-widest text-gray-500 hover:text-[#111111] transition-colors shrink-0"
+          >Clear</button>
+        </div>
+      <% end %>
+
       <%!-- Keyboard hint --%>
       <p class="mb-4 font-sans text-[9px] uppercase tracking-widest text-gray-300">
-        Click a photo, then: <span class="text-gray-400">1–5</span> rate · <span class="text-gray-400">p</span> pick · <span class="text-gray-400">x</span> reject
+        Click a photo, then: <span class="text-gray-400">1–5</span> rate · <span class="text-gray-400">p</span> pick · <span class="text-gray-400">x</span> reject · <span class="text-gray-400">m</span> select · or use <.link navigate={~p"/review"} class="text-gray-500 underline">Review</.link> for single-image culling
       </p>
 
       <%!-- Gallery Grid --%>
@@ -353,12 +520,28 @@ defmodule OrchestratorWeb.GalleryLive do
         <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
           <%= for photo <- @photos do %>
             <% vibe = Photos.vibe_score(photo, @tag_profile) %>
+            <% selected? = MapSet.member?(@selected, photo.id) %>
             <div
-              class="group relative aspect-square overflow-hidden border border-gray-200 bg-gray-50 focus:outline-none focus:ring-2 focus:ring-[#111111] focus:ring-offset-1"
+              class={[
+                "group relative aspect-square overflow-hidden border bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-1",
+                selected? && "border-[#111111] ring-2 ring-[#111111]",
+                !selected? && "border-gray-200 focus:ring-[#111111]"
+              ]}
               tabindex="0"
               phx-keydown="photo_keydown"
               phx-value-id={photo.id}
             >
+              <%!-- Selection checkbox (bottom-left, out of the way of hover overlay's delete + top-right badges) --%>
+              <button
+                phx-click="toggle_select"
+                phx-value-id={photo.id}
+                title="select (m)"
+                class={[
+                  "absolute bottom-2 left-2 z-20 w-6 h-6 flex items-center justify-center font-sans text-sm font-bold transition-all",
+                  selected? && "bg-[#111111] text-[#fcfbf9] border-2 border-[#111111]",
+                  !selected? && "bg-[#fcfbf9]/90 text-transparent border-2 border-gray-300 opacity-0 group-hover:opacity-100 hover:border-[#111111] hover:text-gray-500"
+                ]}
+              >✓</button>
               <%= if photo.url do %>
                 <img
                   src={photo.url}
@@ -410,7 +593,8 @@ defmodule OrchestratorWeb.GalleryLive do
               </div>
 
               <%!-- Hover overlay — failed variant --%>
-              <%= if photo.curation_status == "failed" do %>
+              <%= cond do %>
+                <% photo.curation_status == "failed" -> %>
                 <div class="absolute inset-0 bg-[#111111]/85 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity duration-300 flex flex-col justify-center items-center gap-3 p-4">
                   <p class="font-sans text-[10px] uppercase tracking-widest text-red-400 text-center">Curation failed</p>
                   <%= if photo.failure_reason && photo.failure_reason != "" do %>
@@ -432,7 +616,29 @@ defmodule OrchestratorWeb.GalleryLive do
                     discard
                   </button>
                 </div>
-              <% else %>
+
+                <% photo.curation_status == "rejected" -> %>
+                <div class="absolute inset-0 bg-[#111111]/85 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity duration-300 flex flex-col justify-center items-center gap-3 p-4">
+                  <p class="font-sans text-[10px] uppercase tracking-widest text-red-400 text-center">Rejected</p>
+                  <p class="font-mono text-[9px] text-gray-500 text-center leading-snug px-2 truncate w-full"><%= Path.basename(photo.file_path || "") %></p>
+                  <button
+                    phx-click="restore_photo"
+                    phx-value-id={photo.id}
+                    class="font-sans text-[10px] uppercase tracking-widest text-[#fcfbf9] border border-gray-500 hover:border-white px-4 py-2 transition-colors"
+                  >
+                    Restore
+                  </button>
+                  <button
+                    phx-click="delete_photo"
+                    phx-value-id={photo.id}
+                    data-confirm="Hard-delete this photo (file + row)?"
+                    class="font-sans text-[9px] uppercase tracking-widest text-gray-600 hover:text-red-400 transition-colors"
+                  >
+                    delete forever
+                  </button>
+                </div>
+
+                <% true -> %>
               <%!-- Hover overlay — normal variant --%>
               <div class="absolute inset-0 bg-[#111111]/80 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity duration-300 flex flex-col justify-end p-4">
 

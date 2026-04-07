@@ -197,6 +197,9 @@ defmodule OrchestratorWeb.CuratorLive do
           <.link navigate={~p"/projects"} class="font-sans text-xs uppercase tracking-widest text-gray-400 hover:text-gray-800 transition-colors border-b border-gray-300 hover:border-gray-800 pb-0.5">
             Projects
           </.link>
+          <.link navigate={~p"/review"} class="font-sans text-xs uppercase tracking-widest text-gray-400 hover:text-gray-800 transition-colors border-b border-gray-300 hover:border-gray-800 pb-0.5">
+            Review
+          </.link>
           <.link navigate={~p"/gallery"} class="font-sans text-xs uppercase tracking-widest text-gray-400 hover:text-gray-800 transition-colors border-b border-gray-300 hover:border-gray-800 pb-0.5">
             Gallery →
           </.link>

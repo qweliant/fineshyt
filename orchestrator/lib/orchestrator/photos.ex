@@ -41,15 +41,18 @@ defmodule Orchestrator.Photos do
 
   def page_size, do: @page_size
 
-  defp base_query(:failed), do: from(p in Photo, where: p.curation_status == "failed")
-  defp base_query(_), do: from(p in Photo, where: p.curation_status not in ["rejected", "failed", "pending"])
+  defp base_query(:failed),   do: from(p in Photo, where: p.curation_status == "failed")
+  defp base_query(:rejected), do: from(p in Photo, where: p.curation_status == "rejected")
+  defp base_query(_),         do: from(p in Photo, where: p.curation_status not in ["rejected", "failed", "pending"])
 
   defp apply_filter(q, :all),      do: q
   defp apply_filter(q, :failed),   do: q
+  defp apply_filter(q, :rejected), do: q
   defp apply_filter(q, :match),    do: where(q, [p], p.style_match == true)
   defp apply_filter(q, :no_match), do: where(q, [p], p.style_match == false)
   defp apply_filter(q, :rated),    do: where(q, [p], not is_nil(p.user_rating))
   defp apply_filter(q, :unrated),  do: where(q, [p], is_nil(p.user_rating))
+  defp apply_filter(q, :for_projects), do: where(q, [p], not is_nil(p.user_rating) and p.user_rating >= 4 and (is_nil(p.project) or p.project == ""))
   defp apply_filter(q, _),         do: q
 
   defp apply_project_filter(q, nil), do: q
@@ -146,6 +149,10 @@ defmodule Orchestrator.Photos do
     photo |> Photo.changeset(%{suggested_tags: new_tags}) |> Repo.update()
   end
 
+  @doc """
+  Hard delete: removes the file from disk AND tombstones the row to "rejected"
+  with `url: nil`. Used by the gallery's explicit delete button.
+  """
   def delete_photo(id) do
     photo = get_photo!(id)
     if photo.file_path && File.exists?(photo.file_path) do
@@ -154,6 +161,148 @@ defmodule Orchestrator.Photos do
     photo
     |> Photo.changeset(%{curation_status: "rejected", url: nil})
     |> Repo.update()
+  end
+
+  @doc """
+  Soft reject: marks the row as "rejected" but leaves the file on disk so the
+  decision is reversible. Used by the loupe-view cull workflow ("x" key).
+  """
+  def reject_photo(id) do
+    get_photo!(id)
+    |> Photo.changeset(%{curation_status: "rejected"})
+    |> Repo.update()
+  end
+
+  @doc """
+  Restore a soft-rejected photo back to "complete". Only works when the file
+  is still on disk (i.e. it was rejected via `reject_photo/1`, not
+  `delete_photo/1`).
+  """
+  def restore_photo(id) do
+    photo = get_photo!(id)
+
+    cond do
+      photo.curation_status != "rejected" ->
+        {:error, :not_rejected}
+
+      is_nil(photo.file_path) or not File.exists?(photo.file_path) ->
+        {:error, :file_missing}
+
+      true ->
+        photo
+        |> Photo.changeset(%{curation_status: "complete"})
+        |> Repo.update()
+    end
+  end
+
+  @doc """
+  Empty trash: hard-delete every soft-rejected photo (file + row gone).
+  Returns `{deleted_count, missing_count}`.
+  """
+  def empty_trash do
+    rejected =
+      Repo.all(from p in Photo, where: p.curation_status == "rejected")
+
+    {deleted, missing} =
+      Enum.reduce(rejected, {0, 0}, fn photo, {d, m} ->
+        cond do
+          is_nil(photo.file_path) ->
+            Repo.delete(photo)
+            {d + 1, m + 1}
+
+          File.exists?(photo.file_path) ->
+            File.rm(photo.file_path)
+            Repo.delete(photo)
+            {d + 1, m}
+
+          true ->
+            Repo.delete(photo)
+            {d + 1, m + 1}
+        end
+      end)
+
+    {deleted, missing}
+  end
+
+  @doc """
+  Bulk-set the project name for many photos at once. Empty string clears
+  the project. Returns `{:ok, n_updated}`.
+  """
+  def bulk_set_project(ids, project) when is_list(ids) do
+    project = if is_binary(project), do: String.trim(project), else: ""
+    project = if project == "", do: nil, else: project
+
+    {n, _} =
+      Repo.update_all(
+        from(p in Photo, where: p.id in ^ids),
+        set: [project: project, updated_at: NaiveDateTime.utc_now() |> NaiveDateTime.truncate(:second)]
+      )
+
+    {:ok, n}
+  end
+
+  @doc "Bulk soft-reject many photos."
+  def bulk_reject(ids) when is_list(ids) do
+    {n, _} =
+      Repo.update_all(
+        from(p in Photo, where: p.id in ^ids),
+        set: [curation_status: "rejected", updated_at: NaiveDateTime.utc_now() |> NaiveDateTime.truncate(:second)]
+      )
+
+    {:ok, n}
+  end
+
+  @doc """
+  Cull queue: photos that have been successfully curated but the user has not
+  yet rated or rejected. Oldest first (FIFO) so the queue drains predictably.
+  Returns full Photo structs.
+  """
+  def list_cull_queue(opts \\ []) do
+    limit = Keyword.get(opts, :limit, 500)
+
+    Repo.all(
+      from p in Photo,
+        where: p.curation_status == "complete" and is_nil(p.user_rating),
+        order_by: [asc: p.inserted_at, asc: p.id],
+        limit: ^limit
+    )
+  end
+
+  @doc """
+  Rate queue: photos already given a rating, sorted ascending so the user
+  re-examines borderline 1★/2★ shots first. Used in the loupe view's "rate"
+  mode.
+  """
+  def list_rate_queue(opts \\ []) do
+    limit = Keyword.get(opts, :limit, 500)
+
+    Repo.all(
+      from p in Photo,
+        where: p.curation_status == "complete" and not is_nil(p.user_rating),
+        order_by: [asc: p.user_rating, desc: p.inserted_at],
+        limit: ^limit
+    )
+  end
+
+  @doc "Count of unrated photos awaiting cull. Cheap query for UI badges."
+  def count_pending_cull do
+    Repo.aggregate(
+      from(p in Photo, where: p.curation_status == "complete" and is_nil(p.user_rating)),
+      :count
+    )
+  end
+
+  @doc "Count of rated photos."
+  def count_rated do
+    Repo.aggregate(
+      from(p in Photo, where: p.curation_status == "complete" and not is_nil(p.user_rating)),
+      :count
+    )
+  end
+
+  @doc "Count of soft-rejected (trash) photos."
+  def count_rejected do
+    Repo.aggregate(from(p in Photo, where: p.curation_status == "rejected"), :count)
   end
 
   # Register a file as pending before the AI job runs.

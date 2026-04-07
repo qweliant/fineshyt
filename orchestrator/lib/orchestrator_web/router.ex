@@ -20,6 +20,8 @@ defmodule OrchestratorWeb.Router do
     live "/", CuratorLive
     live "/gallery", GalleryLive
     live "/projects", ProjectsLive
+    live "/review", ReviewLive
+    live "/logs", LogsLive
   end
 
   # Other scopes may use custom stacks.

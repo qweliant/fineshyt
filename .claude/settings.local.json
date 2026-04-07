@@ -10,7 +10,8 @@
       "Bash(mix deps.get)",
       "WebFetch(domain:instaloader.github.io)",
       "WebSearch",
-      "WebFetch(domain:github.com)"
+      "WebFetch(domain:github.com)",
+      "Bash(echo \"exit=$?\")"
     ]
   }
 }
