@@ -1,15 +1,23 @@
 import base64
+import logging
 import os
 import random
+import traceback
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import instructor
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from openai import AsyncOpenAI
+from openai import APIError, AsyncOpenAI
 from PIL import Image
 from pydantic import BaseModel, Field
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+logger = logging.getLogger("fineshyt.ai_worker")
 
 load_dotenv()
 
@@ -129,7 +137,65 @@ if the photo genuinely fits the described aesthetic. Set style_score (0-100) and
         return metadata
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"AI Processing failed: {str(e)}")
+        raise HTTPException(
+            status_code=_status_for(e),
+            detail=_error_detail("curate", e, filename=file.filename),
+        )
+
+
+def _status_for(exc: Exception) -> int:
+    """Map upstream errors to a meaningful HTTP status.
+
+    Ollama uses standard HTTP codes (see https://docs.ollama.com/api/errors):
+    400 invalid request, 404 model not found, 413 payload too large,
+    429 rate limited, 499 client closed, 500 server error, 503 unavailable.
+    Surface those through instead of collapsing everything to 500.
+    """
+    if isinstance(exc, APIError):
+        status = getattr(exc, "status_code", None)
+        if isinstance(status, int) and 400 <= status < 600:
+            return status
+    return 500
+
+
+def _error_detail(op: str, exc: Exception, **context: Any) -> dict[str, Any]:
+    """Build a structured error payload AND log the full traceback to stderr.
+
+    The returned dict is what FastAPI sends as JSON `detail`. The Elixir side
+    can read it back and log it, instead of just seeing a bare status code.
+    """
+    exc_type = type(exc).__name__
+    message = str(exc) or exc_type
+
+    upstream: dict[str, Any] = {}
+    if isinstance(exc, APIError):
+        # openai.APIError has .status_code, .code, .message, .body, .request
+        upstream["status_code"] = getattr(exc, "status_code", None)
+        upstream["code"] = getattr(exc, "code", None)
+        upstream["message"] = getattr(exc, "message", None)
+        body = getattr(exc, "body", None)
+        if body is not None:
+            upstream["body"] = body
+
+    payload: dict[str, Any] = {
+        "op": op,
+        "error_type": exc_type,
+        "message": message,
+        "context": context,
+    }
+    if upstream:
+        payload["upstream"] = upstream
+
+    logger.error(
+        "operation=%s failed: %s: %s | context=%s | upstream=%s\n%s",
+        op,
+        exc_type,
+        message,
+        context,
+        upstream or None,
+        traceback.format_exc(),
+    )
+    return payload
 
 
 # Formats Pillow can open natively
@@ -228,4 +294,7 @@ def convert_file(request: ConvertRequest):
         img.save(out, "JPEG", quality=82, optimize=True)
         return ConvertResponse(jpeg_path=str(out))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Conversion failed: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=_error_detail("convert", e, file_path=str(path)),
+        )

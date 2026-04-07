@@ -5,8 +5,12 @@ defmodule Orchestrator.Workers.ConversionWorker do
 
   require Logger
 
+  alias Orchestrator.ErrorLog
+
+  @worker_name "ConversionWorker"
+
   @impl Oban.Worker
-  def perform(%Oban.Job{args: %{"file_path" => file_path} = args}) do
+  def perform(%Oban.Job{args: %{"file_path" => file_path} = args} = job) do
     ref               = Map.get(args, "ref", inspect(make_ref()))
     style_description = Map.get(args, "style_description", "")
     source            = Map.get(args, "source", "local")
@@ -36,12 +40,26 @@ defmodule Orchestrator.Workers.ConversionWorker do
 
       {:ok, %Req.Response{status: status, body: body}} ->
         detail = get_in(body, ["detail"]) || "status #{status}"
-        Logger.error("Conversion failed for #{Path.basename(file_path)}: #{detail}")
-        {:error, detail}
+        Logger.error("Conversion failed for #{Path.basename(file_path)}: #{inspect(detail)}")
+        record_error(job, Path.basename(file_path), "API #{status}: #{inspect(detail)}", status: status, detail: body)
+        {:error, inspect(detail)}
 
       {:error, reason} ->
         Logger.error("Could not reach convert API: #{inspect(reason)}")
+        record_error(job, Path.basename(file_path), "Transport: #{inspect(reason)}", detail: %{transport: inspect(reason)})
         {:error, inspect(reason)}
     end
+  end
+
+  defp record_error(%Oban.Job{attempt: attempt, max_attempts: max}, basename, reason, opts) do
+    ErrorLog.record(%{
+      worker: @worker_name,
+      file: basename,
+      reason: reason,
+      status: Keyword.get(opts, :status),
+      detail: Keyword.get(opts, :detail),
+      attempt: attempt,
+      max: max
+    })
   end
 end

@@ -5,7 +5,9 @@ defmodule Orchestrator.Workers.AiCurationWorker do
 
   require Logger
 
-  alias Orchestrator.Photos
+  alias Orchestrator.{ErrorLog, Photos}
+
+  @worker_name "AiCurationWorker"
 
   @impl Oban.Worker
   def perform(%Oban.Job{
@@ -44,7 +46,7 @@ defmodule Orchestrator.Workers.AiCurationWorker do
 
           case Req.post("http://127.0.0.1:8000/api/v1/curate",
                  form_multipart: form_fields,
-                 receive_timeout: 60_000
+                 receive_timeout: 300_000
                ) do
             {:ok, %Req.Response{status: 200, body: metadata}} ->
               Photos.delete_failed_if_exists(dest)
@@ -73,23 +75,68 @@ defmodule Orchestrator.Workers.AiCurationWorker do
               )
               :ok
 
-            {:ok, %Req.Response{status: status}} ->
-              Logger.error("Python API failed with status: #{status}")
-              {:error, "API returned status #{status}"}
+            {:ok, %Req.Response{status: status, body: body}} ->
+              detail = format_api_error(body)
+              Logger.error(
+                "Python API failed for #{basename} with status #{status}: #{detail}"
+              )
+              record_error(job, basename, "API #{status}: #{detail}", status: status, detail: body)
+              {:error, "API #{status}: #{detail}"}
 
             {:error, reason} ->
-              Logger.error("Failed to connect to AI service: #{inspect(reason)}")
+              Logger.error(
+                "Failed to reach AI service for #{basename}: #{inspect(reason)}"
+              )
+              record_error(job, basename, "Transport: #{inspect(reason)}", detail: %{transport: inspect(reason)})
               {:error, inspect(reason)}
           end
         end
       rescue
         e ->
-          Logger.error("AI curation raised an exception: #{Exception.message(e)}")
-          {:error, Exception.message(e)}
+          msg = Exception.message(e)
+          Logger.error("AI curation raised an exception: #{msg}")
+          record_error(job, basename, "Exception: #{msg}", detail: %{exception: inspect(e), stacktrace: Exception.format_stacktrace(__STACKTRACE__)})
+          {:error, msg}
       end
 
     if result != :ok, do: maybe_broadcast_failure(ref, job, dest, basename, source, project, result)
     result
+  end
+
+  # Pulls the most useful piece out of the structured `detail` payload that
+  # ai_worker/src/main.py now returns. Falls back to inspect/2 for anything
+  # unexpected so we never lose information.
+  defp format_api_error(%{"detail" => detail}), do: format_api_error(detail)
+
+  defp format_api_error(%{"error_type" => type, "message" => msg} = payload) do
+    upstream =
+      case payload do
+        %{"upstream" => %{"status_code" => sc, "message" => um}} when not is_nil(sc) ->
+          " (upstream #{sc}: #{um})"
+
+        %{"upstream" => %{"message" => um}} when is_binary(um) ->
+          " (upstream: #{um})"
+
+        _ ->
+          ""
+      end
+
+    "#{type}: #{msg}#{upstream}"
+  end
+
+  defp format_api_error(detail) when is_binary(detail), do: detail
+  defp format_api_error(other), do: inspect(other)
+
+  defp record_error(%Oban.Job{attempt: attempt, max_attempts: max}, basename, reason, opts) do
+    ErrorLog.record(%{
+      worker: @worker_name,
+      file: basename,
+      reason: reason,
+      status: Keyword.get(opts, :status),
+      detail: Keyword.get(opts, :detail),
+      attempt: attempt,
+      max: max
+    })
   end
 
   defp maybe_broadcast_failure(ref, %Oban.Job{attempt: attempt, max_attempts: max}, dest, basename, source, project, result) do
