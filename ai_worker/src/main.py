@@ -1,3 +1,52 @@
+"""Fineshyt AI worker — FastAPI service for photo curation and conversion.
+
+This service is the Python half of the fineshyt photo pipeline. It runs
+locally (default port 8000) and is called by the Elixir orchestrator's
+Oban workers (`Orchestrator.Workers.AiCurationWorker` and
+`Orchestrator.Workers.ConversionWorker`).
+
+Endpoints
+---------
+* ``POST /api/v1/curate`` — accept an image upload and an optional style
+  description, ask LLaVA (via Ollama via the `instructor` structured-output
+  wrapper) to extract metadata, and return it as a `PhotoMetadata` JSON.
+* ``POST /api/v1/ingest/local`` — walk a directory, return every supported
+  image path (optionally random-sampled). No file mutation.
+* ``POST /api/v1/convert`` — open a single source file (RAW or otherwise),
+  resize to a 1440px long edge, save as quality-82 JPEG into
+  ``STATIC_UPLOADS_DIR``, and return the new path.
+
+Structured error contract
+-------------------------
+Every endpoint funnels failures through ``_error_detail`` so that
+``HTTPException.detail`` is always a JSON object with the shape::
+
+    {
+      "op": "curate" | "convert",
+      "error_type": "<Python exception class name>",
+      "message": "<str(exc)>",
+      "context": {...},
+      "upstream": {"status_code": int, "code": str, "message": str, "body": ...}
+    }
+
+The Elixir worker parses this in ``format_api_error/1`` so the user sees
+a real reason in the gallery and the ``/logs`` page instead of a bare
+500. ``_status_for`` similarly maps ``openai.APIError`` upstream codes
+through (404 model not found, 413 payload too large, 429 rate limited,
+503 unavailable, etc. — see https://docs.ollama.com/api/errors).
+
+Configuration
+-------------
+Read from environment via ``python-dotenv``:
+
+* ``LLM_BASE_URL`` — default ``http://localhost:11434/v1/`` (Ollama)
+* ``LLM_API_KEY`` — default ``"ollama"`` (Ollama ignores it but openai
+  client requires a non-empty value)
+* ``LLM_MODEL`` — default ``"llava"``
+* ``STATIC_UPLOADS_DIR`` — must match the orchestrator's
+  ``priv/static/uploads/`` so the LiveView can serve the converted JPEGs
+"""
+
 import base64
 import logging
 import os
@@ -90,6 +139,37 @@ async def curate_photo(
     file: UploadFile = File(...),
     style_description: str = Form(""),
 ):
+    """Curate a single photo via LLaVA and return structured metadata.
+
+    Encodes the upload as base64, builds a multimodal prompt (with an
+    optional style-match instruction when ``style_description`` is given),
+    and asks the LLM to fill out a ``PhotoMetadata`` schema via
+    ``instructor``. ``instructor`` retries up to 3 times to coerce a valid
+    response, but does not protect against upstream connection errors.
+
+    Args:
+        file: Multipart upload. ``file.content_type`` must start with
+            ``image/`` or the request is rejected with HTTP 400.
+        style_description: Optional photographer style. When non-empty,
+            the LLM is asked to set ``style_match``, ``style_score``, and
+            ``style_reason`` against this description; when empty, those
+            three fields are explicitly set to false / 0 / "".
+
+    Returns:
+        PhotoMetadata: subject, content_type, lighting_critique,
+        artistic_mood, suggested_tags, style_match, style_score,
+        style_reason.
+
+    Raises:
+        HTTPException: 400 if the upload is not an image. Otherwise the
+        upstream status from ``_status_for`` (often 404, 429, 500, 503),
+        with ``detail`` set to the structured payload from
+        ``_error_detail``.
+
+    Example:
+        ``curl -F file=@photo.jpg -F style_description='moody, cinematic' \\
+            http://127.0.0.1:8000/api/v1/curate``
+    """
     if not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="File must be an image.")
 
@@ -144,12 +224,25 @@ if the photo genuinely fits the described aesthetic. Set style_score (0-100) and
 
 
 def _status_for(exc: Exception) -> int:
-    """Map upstream errors to a meaningful HTTP status.
+    """Map an exception to a meaningful HTTP status code.
 
-    Ollama uses standard HTTP codes (see https://docs.ollama.com/api/errors):
-    400 invalid request, 404 model not found, 413 payload too large,
-    429 rate limited, 499 client closed, 500 server error, 503 unavailable.
-    Surface those through instead of collapsing everything to 500.
+    Unwraps ``openai.APIError`` (and subclasses) so that an upstream
+    Ollama error code reaches the Elixir caller intact instead of being
+    collapsed to a generic 500. Ollama follows standard HTTP semantics
+    (see https://docs.ollama.com/api/errors): 400 invalid request, 404
+    model not found, 413 payload too large, 429 rate limited, 499 client
+    closed, 500 server error, 503 unavailable.
+
+    Args:
+        exc: Any exception. Non-APIError instances always return 500.
+
+    Returns:
+        int: An HTTP status code in the 400–599 range.
+
+    Example:
+        >>> from openai import APIError
+        >>> _status_for(ValueError("oops"))
+        500
     """
     if isinstance(exc, APIError):
         status = getattr(exc, "status_code", None)
@@ -159,10 +252,33 @@ def _status_for(exc: Exception) -> int:
 
 
 def _error_detail(op: str, exc: Exception, **context: Any) -> dict[str, Any]:
-    """Build a structured error payload AND log the full traceback to stderr.
+    """Build a structured error payload and log the full traceback.
 
-    The returned dict is what FastAPI sends as JSON `detail`. The Elixir side
-    can read it back and log it, instead of just seeing a bare status code.
+    The returned dict is what FastAPI ultimately serializes as JSON
+    ``detail`` on an ``HTTPException``. The Elixir side parses this in
+    ``Orchestrator.Workers.AiCurationWorker.format_api_error/1`` so the
+    user sees a real reason in the gallery and the ``/logs`` page instead
+    of a bare HTTP status. As a side effect, the full traceback plus the
+    structured fields are logged via the stdlib logger.
+
+    Args:
+        op: Short operation identifier, e.g. ``"curate"`` or
+            ``"convert"``. Surfaces in logs and the response body so the
+            Elixir side can route the failure to the right error category.
+        exc: The exception that triggered the failure. Subclasses of
+            ``openai.APIError`` are unwrapped to expose ``status_code``,
+            ``code``, ``message``, and ``body`` under ``upstream``.
+        **context: Arbitrary additional fields to attach (e.g.
+            ``filename=file.filename``, ``file_path=str(path)``).
+
+    Returns:
+        dict: Always contains ``op``, ``error_type``, ``message``, and
+        ``context``. When ``exc`` is an ``APIError``, also includes
+        ``upstream`` with the unwrapped fields.
+
+    Example:
+        >>> _error_detail("curate", ValueError("bad"), filename="a.jpg")
+        {'op': 'curate', 'error_type': 'ValueError', 'message': 'bad', 'context': {'filename': 'a.jpg'}}
     """
     exc_type = type(exc).__name__
     message = str(exc) or exc_type
@@ -215,7 +331,7 @@ except ImportError:
 
 
 def _open_as_pil(path: Path) -> Image.Image:
-    """Open any supported image file and return an RGB PIL Image."""
+    """Open any supported image (RAW or PIL-native) and return an RGB ``PIL.Image``."""
     ext = path.suffix.lower()
     if ext in _RAW_EXTS:
         if not _RAWPY_AVAILABLE:
@@ -228,6 +344,7 @@ def _open_as_pil(path: Path) -> Image.Image:
 
 
 def _resize_to_long_edge(img: Image.Image, long_edge: int) -> Image.Image:
+    """Resize ``img`` so its longer edge equals ``long_edge``, preserving aspect ratio."""
     w, h = img.size
     if max(w, h) <= long_edge:
         return img
@@ -237,6 +354,7 @@ def _resize_to_long_edge(img: Image.Image, long_edge: int) -> Image.Image:
 
 
 def _unique_output_path(uploads_dir: Path, stem: str) -> Path:
+    """Return a non-colliding ``<stem>.jpg`` path inside ``uploads_dir``, suffixing ``_N`` on collision."""
     out = uploads_dir / f"{stem}.jpg"
     counter = 1
     while out.exists():
@@ -247,8 +365,29 @@ def _unique_output_path(uploads_dir: Path, stem: str) -> Path:
 
 @app.post("/api/v1/ingest/local", response_model=LocalIngestResponse, tags=["Ingestion"])
 def ingest_local(request: LocalIngestRequest):
-    """Walk a local directory, find all supported image files, optionally random-sample N,
-    and return their source paths. No conversion — that happens per-job in the worker."""
+    """Walk a local directory and return paths to every supported image file.
+
+    Recursively scans ``request.dir_path``, filters out hidden files
+    (including macOS ``._`` resource forks) and unsupported extensions,
+    and optionally takes a random sample. Pure read — no conversion or
+    DB writes happen here. The orchestrator's batch ingest path uses this
+    to discover which files to enqueue for ``ConversionWorker``.
+
+    Args:
+        request: ``LocalIngestRequest`` with:
+            * ``dir_path``: absolute directory to scan.
+            * ``sample``: optional positive int. When set and smaller than
+              the total found, randomly samples this many paths.
+
+    Returns:
+        LocalIngestResponse: ``file_paths`` (the chosen subset) and
+        ``total_found`` (the unfiltered count, for the UI to show how
+        many were sampled out of how many).
+
+    Raises:
+        HTTPException: 400 if ``dir_path`` is not a directory; 404 if no
+        supported image files are found under it.
+    """
     source_dir = Path(request.dir_path)
     if not source_dir.is_dir():
         raise HTTPException(status_code=400, detail=f"Directory not found: {request.dir_path}")
@@ -279,8 +418,26 @@ def ingest_local(request: LocalIngestRequest):
 
 @app.post("/api/v1/convert", response_model=ConvertResponse, tags=["Ingestion"])
 def convert_file(request: ConvertRequest):
-    """Convert a single source file (RAW or JPEG/TIFF/etc.) to a resized JPEG
-    and save it to STATIC_UPLOADS_DIR. Called once per file by ConversionWorker."""
+    """Convert a single source file to a resized JPEG and write it to disk.
+
+    Opens ``request.file_path`` (RAW via rawpy or JPEG/TIFF/PNG/etc. via
+    Pillow), resizes so the long edge is 1440px, encodes as quality-82
+    JPEG, and saves into ``STATIC_UPLOADS_DIR`` under a non-colliding
+    ``<stem>.jpg`` filename. Called once per source file by the Elixir
+    ``ConversionWorker``.
+
+    Args:
+        request: ``ConvertRequest`` with:
+            * ``file_path``: absolute path to the source image.
+
+    Returns:
+        ConvertResponse: ``jpeg_path`` — absolute path to the new JPEG.
+
+    Raises:
+        HTTPException: 404 if ``file_path`` does not exist as a file;
+        500 with structured ``_error_detail`` payload on any conversion
+        failure (rawpy errors, Pillow errors, disk errors, etc.).
+    """
     path = Path(request.file_path)
     if not path.is_file():
         raise HTTPException(status_code=404, detail=f"File not found: {request.file_path}")

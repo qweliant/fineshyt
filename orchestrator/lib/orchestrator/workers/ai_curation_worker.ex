@@ -1,4 +1,49 @@
 defmodule Orchestrator.Workers.AiCurationWorker do
+  @moduledoc """
+  Oban worker that hands a single image to the Python AI service for
+  curation, persists the resulting metadata, and broadcasts the outcome.
+
+  ## Queue and concurrency
+
+  Runs on the `:ai_jobs` queue with `max_attempts: 3`. The queue is
+  configured with concurrency 1 in `config.exs` so only one image is in
+  flight at a time — the local Ollama instance has limited RAM and parallel
+  curation requests would thrash. The companion `ConversionWorker` runs in
+  parallel since RAW conversion is purely CPU.
+
+  ## Flow
+
+    1. Copy the source file into `priv/static/uploads/` (skipped when the
+       source already lives there).
+    2. Short-circuit if `Orchestrator.Photos.already_processed?/1` says
+       this file is already complete or rejected.
+    3. POST the image to `http://127.0.0.1:8000/api/v1/curate` with a
+       generous 5-minute receive timeout (LLaVA on M3 with tight RAM
+       routinely exceeds 60s).
+    4. On HTTP 200, persist the photo via `Photos.create_photo/1` and
+       broadcast `{:curation_complete, ref, metadata, basename}` on
+       `"photo_updates"`.
+    5. On any non-200, transport error, or unexpected exception: structured
+       detail is parsed via `format_api_error/1`, recorded to
+       `Orchestrator.ErrorLog`, and surfaced via `{:curation_failed, ...}`.
+       After Oban exhausts all attempts, `Photos.create_failed/1` writes a
+       persistent failure tombstone the gallery can show.
+
+  ## Job args
+
+    * `"file_path"` (required) — absolute path to source file
+    * `"ref"` (required) — opaque reference echoed back in PubSub messages
+    * `"style_description"` (optional) — passed through to the AI worker
+    * `"source"` (optional, default `"upload"`)
+    * `"instagram_shortcode"` (optional)
+    * `"project"` (optional)
+
+  ## Return values (visible to Oban)
+
+    * `:ok` — success or skipped
+    * `{:error, reason}` — surfaced to Oban so it can retry
+  """
+
   use Oban.Worker,
     queue: :ai_jobs,
     max_attempts: 3
@@ -9,6 +54,25 @@ defmodule Orchestrator.Workers.AiCurationWorker do
 
   @worker_name "AiCurationWorker"
 
+  @doc """
+  Oban entry point. Curate a single image and persist its metadata.
+
+  See the module doc for full flow. This function is the only public API
+  on the worker — Oban dispatches all jobs through it.
+
+  ## Parameters
+
+    * `job` — `%Oban.Job{}`. `job.args` must include `"file_path"` and
+      `"ref"`; see module doc for the optional fields.
+
+  ## Returns
+
+    * `:ok` — curation succeeded *or* the file was already processed.
+    * `{:error, reason}` — surfaced to Oban for retry handling. After the
+      final attempt the worker also writes a failed-photo row and emits
+      `{:curation_failed, ref, basename, reason}` on the `"photo_updates"`
+      PubSub topic.
+  """
   @impl Oban.Worker
   def perform(%Oban.Job{
         args: %{"file_path" => file_path, "ref" => ref} = args

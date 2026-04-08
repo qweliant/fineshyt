@@ -1,21 +1,61 @@
 defmodule OrchestratorWeb.ReviewLive do
   @moduledoc """
-  Loupe view — single image, keyboard-driven, photographer-style culling.
+  Loupe view — single image, keyboard-driven, photographer-style culling
+  and rating workflow at `/review`.
 
-  Two modes:
+  Modeled on Adobe Lightroom's loupe view: one image fills the screen,
+  keys decide its fate, the cursor advances. Two distinct passes are
+  expressed as URL-controllable modes:
+
     * `:cull` — only photos with no rating yet, oldest first. Pass 1.
-    * `:rate` — rated photos sorted by rating ascending (re-examine borderlines). Pass 2.
+    * `:rate` — rated photos sorted by rating ascending so borderline
+      1★/2★ shots get re-examined first. Pass 2.
 
-  The queue is loaded once on mount and held in assigns. Each decision
-  advances `index` and patches that photo's row in the queue so the UI stays
-  consistent if the user navigates back. When the queue empties, an "all
-  done" state is shown.
+  ## State
+
+    * `:queue` — list of `%Photo{}` loaded once on mount via
+      `Photos.list_cull_queue/1` or `Photos.list_rate_queue/1`.
+    * `:index` — 0-based pointer into the queue.
+    * `:mode` — `:cull` | `:rate`.
+    * `:projects` — string list for the project chip selector.
+    * `:project_input` — buffered text for the new-project input.
+    * `:cull_count`, `:rated_count` — header badges.
+    * `:tag_profile` — affinity map from `Photos.tag_affinity_profile/0`.
+    * `:show_help` — boolean toggling the help overlay.
+    * `:flash_msg` — transient string ("★ 5", "rejected", ...).
+
+  Each decision patches that photo's row in the queue in place so the UI
+  stays consistent if the user navigates back. Rejection is the exception:
+  the rejected entry is *removed* from the queue so the cursor lands on
+  the next photo without an extra keystroke. When the queue empties an
+  "all done" state is shown.
+
+  ## Keyboard
+
+  See the help overlay (toggle with `?`) for the full list. Most-used:
+  `←/→` navigate, `1`–`5` rate-and-advance, `p` pick (★5), `x` reject,
+  `u`/`0` clear rating, `space` advance.
   """
 
   use OrchestratorWeb, :live_view
 
   alias Orchestrator.Photos
 
+  @doc """
+  LiveView mount. Reads `mode` from URL params, loads the matching queue,
+  primes the side panel data (projects, counts, tag profile) and resets
+  the cursor.
+
+  ## Parameters
+
+    * `params` — URL params; `"mode"` may be `"cull"` (default) or `"rate"`.
+    * `_session` — unused.
+    * `socket` — the LiveView socket.
+
+  ## Returns
+
+    * `{:ok, socket}` with all assigns populated.
+  """
   @impl Phoenix.LiveView
   def mount(params, _session, socket) do
     mode = parse_mode(params["mode"])
@@ -48,6 +88,52 @@ defmodule OrchestratorWeb.ReviewLive do
 
   # ── keyboard ──────────────────────────────────────────────────────────────
 
+  @doc """
+  Dispatch every event raised by the loupe view.
+
+  Bound through `phx-window-keydown="key"` (the `"key"` event), `phx-click`
+  on the side panel and overlay buttons, and `phx-submit` on the
+  new-project form.
+
+  ## Events
+
+    * `"key"` — keyboard input. Recognized:
+      `ArrowLeft` / `ArrowRight` / `Space` (navigate),
+      `1`–`5` (rate in place),
+      `p` / `P` (pick: rate ★5 in place),
+      `u` / `U` / `0` (clear rating),
+      `x` / `X` (soft-reject and remove from queue — advances cursor),
+      `?` (toggle help),
+      `Escape` (close help). Unrecognized keys are ignored.
+
+    * `"nav"` — `%{"dir" => "next" | "prev"}`. Click zones on left/right
+      of the image.
+
+    * `"rate"` — `%{"value" => "1".."5"}`. Star strip click; rates in
+      place without advancing so the highlight is visible. Empty values
+      are ignored (defensive — see `parse_rating/1`).
+
+    * `"reject"` — bottom-bar reject button (mirror of `x`).
+
+    * `"unrate"` — bottom-bar clear button.
+
+    * `"toggle_help"` / `"set_mode"` — header buttons.
+      `"set_mode"` reloads the queue for the new mode and resets index to 0.
+
+    * `"project_input"` — change event on the new-project input field.
+
+    * `"set_project"` — `%{"name" => name}`. Project chip click; assigns
+      that name to the current photo and refreshes the project list.
+
+    * `"clear_project"` — bottom-bar clear-project button.
+
+    * `"save_project_input"` — form submit; equivalent to `set_project`
+      with the buffered input value.
+
+  ## Returns
+
+    * `{:noreply, socket}` — every clause; the view never replies.
+  """
   @impl Phoenix.LiveView
   def handle_event("key", %{"key" => key}, socket) do
     case key do
@@ -55,10 +141,10 @@ defmodule OrchestratorWeb.ReviewLive do
       "ArrowLeft"  -> {:noreply, advance(socket, -1)}
       " "          -> {:noreply, advance(socket, +1)}
       k when k in ~w(x X) -> {:noreply, reject_current(socket)}
-      k when k in ~w(p P) -> {:noreply, socket |> rate_current(5) |> advance(+1)}
+      k when k in ~w(p P) -> {:noreply, rate_current(socket, 5)}
       k when k in ~w(u U 0) -> {:noreply, unrate_current(socket)}
       k when k in ~w(1 2 3 4 5) ->
-        {:noreply, socket |> rate_current(String.to_integer(k)) |> advance(+1)}
+        {:noreply, rate_current(socket, String.to_integer(k))}
       "?"          -> {:noreply, assign(socket, :show_help, !socket.assigns.show_help)}
       "Escape"     -> {:noreply, assign(socket, :show_help, false)}
       _            -> {:noreply, socket}
@@ -69,7 +155,10 @@ defmodule OrchestratorWeb.ReviewLive do
   def handle_event("nav", %{"dir" => "prev"}, socket), do: {:noreply, advance(socket, -1)}
 
   def handle_event("rate", %{"value" => v}, socket) do
-    {:noreply, socket |> rate_current(String.to_integer(v)) |> advance(+1)}
+    case parse_rating(v) do
+      nil -> {:noreply, socket}
+      n -> {:noreply, rate_current(socket, n)}
+    end
   end
 
   def handle_event("reject", _, socket), do: {:noreply, reject_current(socket)}
@@ -125,6 +214,15 @@ defmodule OrchestratorWeb.ReviewLive do
   end
 
   # ── decision helpers ──────────────────────────────────────────────────────
+
+  defp parse_rating(v) when is_integer(v) and v in 1..5, do: v
+  defp parse_rating(v) when is_binary(v) do
+    case Integer.parse(v) do
+      {n, ""} when n in 1..5 -> n
+      _ -> nil
+    end
+  end
+  defp parse_rating(_), do: nil
 
   defp rate_current(socket, value) do
     case current(socket.assigns) do
@@ -194,6 +292,22 @@ defmodule OrchestratorWeb.ReviewLive do
 
   # ── render ────────────────────────────────────────────────────────────────
 
+  @doc """
+  Render the loupe view template.
+
+  Dark theme (`bg-[#0f0f0f] text-[#fcfbf9]`), three regions: header bar
+  with mode tabs and counts, the centerpiece image with click zones and
+  star strip, and the metadata side panel (subject / mood / lighting /
+  tags / project assignment). Help overlay is conditional on `@show_help`.
+
+  ## Parameters
+
+    * `assigns` — the LiveView assigns map.
+
+  ## Returns
+
+    * `Phoenix.LiveView.Rendered.t()` — the HEEx template.
+  """
   @impl Phoenix.LiveView
   def render(assigns) do
     ~H"""
@@ -436,8 +550,8 @@ defmodule OrchestratorWeb.ReviewLive do
               <tbody class="space-y-1">
                 <tr><td class="text-gray-500 pr-6">← →</td><td>previous / next</td></tr>
                 <tr><td class="text-gray-500 pr-6">space</td><td>next</td></tr>
-                <tr><td class="text-gray-500 pr-6">1–5</td><td>rate, advance</td></tr>
-                <tr><td class="text-gray-500 pr-6">p</td><td>pick (= ★★★★★), advance</td></tr>
+                <tr><td class="text-gray-500 pr-6">1–5</td><td>rate</td></tr>
+                <tr><td class="text-gray-500 pr-6">p</td><td>pick (= ★★★★★)</td></tr>
                 <tr><td class="text-gray-500 pr-6">u, 0</td><td>clear rating</td></tr>
                 <tr><td class="text-gray-500 pr-6">x</td><td>reject (soft, reversible)</td></tr>
                 <tr><td class="text-gray-500 pr-6">?</td><td>show / hide this</td></tr>

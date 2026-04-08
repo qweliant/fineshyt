@@ -1,8 +1,47 @@
 defmodule OrchestratorWeb.LogsLive do
+  @moduledoc """
+  Dev-only error log viewer at `/logs`.
+
+  Subscribes to the `Orchestrator.ErrorLog` PubSub topic so worker
+  failures appear in real time without polling, and backfills the page on
+  mount with the latest 500 rows from the `error_logs` table.
+
+  ## State
+
+    * `:entries` — list of `%Orchestrator.ErrorLog{}`, newest first,
+      capped at 500 in memory regardless of how many sit in the DB.
+    * `:total` — running count of all rows ever recorded since last clear.
+    * `:expanded` — `MapSet` of error ids currently expanded to show
+      pretty-printed JSON detail.
+    * `:worker_filter` — `:all`, `:ai`, or `:conversion`.
+
+  ## PubSub messages handled
+
+    * `{:error_logged, entry}` — new error: prepend and trim to 500.
+    * `:error_log_cleared` — wipe the in-memory list.
+
+  Intended strictly for development; the route is not protected and the
+  detail payload may contain stack traces and request bodies.
+  """
+
   use OrchestratorWeb, :live_view
 
   alias Orchestrator.ErrorLog
 
+  @doc """
+  LiveView mount. Subscribes to the ErrorLog PubSub topic and backfills
+  the latest 500 rows.
+
+  ## Parameters
+
+    * `_params`, `_session` — unused.
+    * `socket` — the LiveView socket.
+
+  ## Returns
+
+    * `{:ok, socket}` with `:entries`, `:total`, `:expanded`, and
+      `:worker_filter` populated.
+  """
   @impl Phoenix.LiveView
   def mount(_params, _session, socket) do
     if connected?(socket), do: Phoenix.PubSub.subscribe(Orchestrator.PubSub, ErrorLog.topic())
@@ -15,6 +54,22 @@ defmodule OrchestratorWeb.LogsLive do
      |> assign(:worker_filter, :all)}
   end
 
+  @doc """
+  Handle PubSub messages from `Orchestrator.ErrorLog`.
+
+  ## Messages
+
+    * `{:error_logged, %ErrorLog{}}` — a new error was recorded.
+      Prepended to `:entries` and the in-memory list is trimmed to 500;
+      `:total` increments by one.
+    * `:error_log_cleared` — the user clicked Clear (or `ErrorLog.clear/0`
+      ran). Wipes `:entries`, `:total`, and `:expanded`.
+    * Anything else — ignored.
+
+  ## Returns
+
+    * `{:noreply, socket}`
+  """
   @impl Phoenix.LiveView
   def handle_info({:error_logged, entry}, socket) do
     entries = [entry | socket.assigns.entries] |> Enum.take(500)
@@ -27,6 +82,22 @@ defmodule OrchestratorWeb.LogsLive do
 
   def handle_info(_, socket), do: {:noreply, socket}
 
+  @doc """
+  Dispatch UI events from the logs page.
+
+  ## Events
+
+    * `"clear"` — header Clear button. Calls `ErrorLog.clear/0`; the
+      resulting PubSub broadcast then wipes the local state.
+    * `"toggle"` — `%{"id" => id}`. Click on a row to expand or collapse
+      its detail block.
+    * `"filter"` — `%{"worker" => name}`. Switch between All / AI Curation
+      / Conversion tabs. Unknown worker names fall through to `:all`.
+
+  ## Returns
+
+    * `{:noreply, socket}`
+  """
   @impl Phoenix.LiveView
   def handle_event("clear", _params, socket) do
     ErrorLog.clear()
@@ -78,6 +149,22 @@ defmodule OrchestratorWeb.LogsLive do
   defp status_class(s) when s >= 400, do: "text-amber-700 border-amber-400"
   defp status_class(_), do: "text-gray-500 border-gray-300"
 
+  @doc """
+  Render the error log table.
+
+  Light theme matching the gallery's serif aesthetic. Header shows the
+  total count and worker filter tabs; rows are color-coded by HTTP status
+  via `status_class/1` (4xx amber, 5xx red); expanded rows pretty-print
+  the JSON `detail` payload.
+
+  ## Parameters
+
+    * `assigns` — the LiveView assigns map.
+
+  ## Returns
+
+    * `Phoenix.LiveView.Rendered.t()`
+  """
   @impl Phoenix.LiveView
   def render(assigns) do
     ~H"""

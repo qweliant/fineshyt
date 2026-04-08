@@ -1,8 +1,59 @@
 defmodule OrchestratorWeb.GalleryLive do
+  @moduledoc """
+  Gallery grid view at `/gallery` — the multi-photo workhorse alongside
+  the single-photo `OrchestratorWeb.ReviewLive`.
+
+  Renders a paginated, filterable, sortable, optionally project-scoped
+  grid of curated photos. Supports per-photo overrides (rating, score,
+  match flag, tag editing, project assignment) and multi-select bulk
+  operations (assign project, soft-reject, empty trash, restore).
+
+  ## State
+
+    * `:filter` — `:all`, `:match`, `:no_match`, `:rated`, `:unrated`,
+      `:for_projects`, `:failed`, `:rejected`
+    * `:sort` — `:newest`, `:score_desc`, `:score_asc`, `:rating_desc`
+    * `:search` — substring filter on subject + mood
+    * `:page` — current 1-indexed page
+    * `:project_filter` — project name to scope to, or `nil`
+    * `:projects` — string list for the project chip selectors
+    * `:tag_profile` — affinity map from `Photos.tag_affinity_profile/0`
+    * `:selected` — `MapSet` of selected photo ids for bulk ops
+    * `:bulk_project` — buffered text for the bulk new-project input
+    * `:photos`, `:total`, `:pages` — current page slice and pagination
+      metadata, refreshed by `load_photos/1`
+
+  ## PubSub
+
+  Subscribes to `"photo_updates"` so the grid refreshes when the AI
+  curation worker reports `:curation_complete` or `:curation_failed`.
+
+  ## Soft-delete vs hard-delete
+
+  The `x` keyboard shortcut and the bulk Reject button use
+  `Photos.reject_photo/1` (soft, reversible). The per-photo "delete forever"
+  button uses `Photos.delete_photo/1` (hard, file removed). The Rejected
+  filter tab plus its Empty Trash button is the only way to hard-delete
+  many photos at once.
+  """
+
   use OrchestratorWeb, :live_view
 
   alias Orchestrator.Photos
 
+  @doc """
+  LiveView mount. Subscribes to `"photo_updates"` and primes every assign
+  with empty/default values, then loads the first page.
+
+  ## Parameters
+
+    * `_params`, `_session` — unused.
+    * `socket` — the LiveView socket.
+
+  ## Returns
+
+    * `{:ok, socket}` with a fully populated assigns map.
+  """
   @impl Phoenix.LiveView
   def mount(_params, _session, socket) do
     if connected?(socket), do: Phoenix.PubSub.subscribe(Orchestrator.PubSub, "photo_updates")
@@ -55,6 +106,61 @@ defmodule OrchestratorWeb.GalleryLive do
 
   # ── events ────────────────────────────────────────────────────────────────
 
+  @doc """
+  Dispatch every event raised by the gallery.
+
+  ## Filtering & sorting
+
+    * `"set_filter"` — `%{"filter" => name}`. Filter tab click. Resets
+      `:selected` and reloads from page 1.
+    * `"set_sort"` — `%{"sort" => name}`. Sort dropdown.
+    * `"search"` — `%{"q" => string}`. Search box submit.
+    * `"set_project_filter"` — `%{"project" => name}`. Project chip in
+      the header (empty string clears).
+    * `"page"` — `%{"n" => n}`. Pagination button.
+
+  ## Per-photo actions
+
+    * `"photo_keydown"` — `%{"id" => id, "key" => key}`. Keyboard while
+      a photo card is focused: `1`–`5` rate, `p` pick (★5), `x`
+      soft-reject, `m` toggle multi-select.
+    * `"override_score"` — `%{"id" => id, "score" => score}`. Inline edit
+      of `style_score`.
+    * `"toggle_match"` — `%{"id" => id}`. Flip the `style_match` boolean.
+    * `"rate"` — `%{"id" => id, "rating" => rating}`. Star strip click.
+    * `"delete_tag"` — `%{"id" => id, "tag" => tag}`. Remove tag chip.
+    * `"add_tag"` — `%{"id" => id, "value" => tag}`. New tag input submit.
+    * `"set_project"` — `%{"_id" => id, "project" => project}`. Project
+      assignment input on a single photo.
+    * `"delete_photo"` — `%{"id" => id}`. Hard delete (file removed).
+    * `"restore_photo"` — `%{"id" => id}`. Reverse a soft-reject from the
+      Rejected tab.
+
+  ## Failed photo recovery
+
+    * `"retry_photo"` — `%{"id" => id}`. Re-queue a single failed photo.
+    * `"retry_all_failed"` — re-queue every photo on the Failed tab.
+
+  ## Multi-select
+
+    * `"toggle_select"` — `%{"id" => id}`. Checkbox click.
+    * `"select_all"` — select every photo on the current page.
+    * `"clear_selection"` — clear `:selected`.
+
+  ## Bulk operations
+
+    * `"bulk_project_input"` — `%{"value" => v}`. Buffered text input.
+    * `"bulk_assign_project"` — `%{"name" => name}`. Project chip click
+      in the bulk toolbar.
+    * `"bulk_assign_input"` — bulk new-project form submit.
+    * `"bulk_reject"` — soft-reject every photo in `:selected`.
+    * `"empty_trash"` — hard-delete every soft-rejected photo. Only
+      enabled on the Rejected tab.
+
+  ## Returns
+
+    * `{:noreply, socket}`
+  """
   @impl Phoenix.LiveView
   def handle_event("set_filter", %{"filter" => filter}, socket) do
     atom = case filter do
@@ -298,6 +404,22 @@ defmodule OrchestratorWeb.GalleryLive do
 
   # ── pubsub ────────────────────────────────────────────────────────────────
 
+  @doc """
+  Handle PubSub messages from `"photo_updates"`.
+
+  ## Messages
+
+    * `{:curation_complete, ref, metadata, basename}` — a photo finished
+      curating. Refreshes the projects list, the tag affinity profile,
+      and the current page.
+    * `{:curation_failed, ref, basename, reason}` — Oban exhausted
+      retries. Reloads the page so the Failed tab count stays fresh.
+    * Anything else — ignored.
+
+  ## Returns
+
+    * `{:noreply, socket}`
+  """
   @impl Phoenix.LiveView
   def handle_info({:curation_complete, _ref, _metadata, _basename}, socket) do
     {:noreply, socket
@@ -315,6 +437,24 @@ defmodule OrchestratorWeb.GalleryLive do
 
   # ── render ────────────────────────────────────────────────────────────────
 
+  @doc """
+  Render the gallery grid.
+
+  Light theme matching the FINE.SHYT serif aesthetic. Header carries the
+  filter tabs, sort dropdown, search box, and project chip selector. The
+  grid renders one card per `@photos` entry with hover overlays branching
+  three ways via `cond` — failed (red), rejected (with restore + delete
+  forever), or normal (with rate / project / tag controls). The bulk
+  action toolbar is only visible when `MapSet.size(@selected) > 0`.
+
+  ## Parameters
+
+    * `assigns` — the LiveView assigns map.
+
+  ## Returns
+
+    * `Phoenix.LiveView.Rendered.t()`
+  """
   @impl Phoenix.LiveView
   def render(assigns) do
     ~H"""

@@ -36,12 +36,59 @@ defmodule Orchestrator.ErrorLog do
 
   # ── public API ────────────────────────────────────────────────────────────
 
+  @doc """
+  Return the PubSub topic name that `record/1` and `clear/0` broadcast on.
+
+  LiveViews use this in their `mount/3` to subscribe — keeping the topic
+  string centralized here means there is exactly one place to change it.
+
+  ## Returns
+
+    * `String.t()` — currently `"error_log"`.
+
+  ## Examples
+
+      iex> Orchestrator.ErrorLog.topic()
+      "error_log"
+  """
   def topic, do: @topic
 
   @doc """
-  Insert a new error entry and broadcast it. Accepts a plain map; missing
-  fields are stored as nil. Returns the inserted struct or `:error` (failures
-  here are swallowed so worker error reporting can never itself crash a job).
+  Insert a new error entry into the `error_logs` table and broadcast it on
+  PubSub so any subscribed LiveView updates in real time.
+
+  Failures inside this function are swallowed by design: a worker that is
+  *already* failing must never crash a second time just because error
+  reporting hit a transient DB hiccup. Both insert errors and unexpected
+  exceptions log a warning and return `:error`.
+
+  ## Parameters
+
+    * `attrs` — a map (atom or string keys are both accepted) with any of:
+      * `:worker` — short identifier, e.g. `"AiCurationWorker"`
+      * `:file` — file path or basename the failure relates to
+      * `:reason` — short human reason; defaults to `"(no reason)"` if missing
+      * `:status` — HTTP-style status integer when applicable
+      * `:attempt`, `:max` (or `:max_attempts`) — Oban retry counters
+      * `:detail` — arbitrary map (lands in a JSONB column); non-map values
+        are wrapped via `inspect/1` so the data is never lost.
+
+  ## Returns
+
+    * `%Orchestrator.ErrorLog{}` — the inserted row, on success.
+    * `:error` — on insert failure or rescued exception (warning logged).
+
+  ## Examples
+
+      Orchestrator.ErrorLog.record(%{
+        worker: "AiCurationWorker",
+        file: "DSC_0001.jpg",
+        reason: "Python API failed",
+        status: 500,
+        attempt: 3,
+        max: 3,
+        detail: %{"error_type" => "APIConnectionError"}
+      })
   """
   def record(attrs) when is_map(attrs) do
     do_record(build_params(attrs))
@@ -85,7 +132,26 @@ defmodule Orchestrator.ErrorLog do
     :error
   end
 
-  @doc "Return the most recent entries, newest first. Defaults to 200."
+  @doc """
+  Fetch the most recent error entries, newest first.
+
+  Used by `OrchestratorWeb.LogsLive` on mount to backfill the page before
+  PubSub takes over for live updates.
+
+  ## Parameters
+
+    * `limit` — maximum number of rows to return. Defaults to `200`.
+
+  ## Returns
+
+    * `[%Orchestrator.ErrorLog{}]` — list of rows, newest first, ordered by
+      `inserted_at` then `id` descending. Empty list if the table is empty.
+
+  ## Examples
+
+      Orchestrator.ErrorLog.list()      # latest 200
+      Orchestrator.ErrorLog.list(500)   # latest 500
+  """
   def list(limit \\ @default_limit) when is_integer(limit) and limit > 0 do
     from(e in ErrorLog,
       order_by: [desc: e.inserted_at, desc: e.id],
@@ -94,12 +160,40 @@ defmodule Orchestrator.ErrorLog do
     |> Repo.all()
   end
 
-  @doc "Return the total number of error rows in the table."
+  @doc """
+  Return the total number of error rows currently in the table.
+
+  Cheap aggregate query — used by the LogsLive header to show a running
+  total alongside the visible page.
+
+  ## Returns
+
+    * `non_neg_integer()` — total count of rows in `error_logs`.
+
+  ## Examples
+
+      iex> Orchestrator.ErrorLog.count()
+      0
+  """
   def count do
     Repo.aggregate(ErrorLog, :count, :id)
   end
 
-  @doc "Delete all rows and broadcast a clear event."
+  @doc """
+  Delete every row from the `error_logs` table and broadcast a clear event
+  so any subscribed LiveView wipes its in-memory list.
+
+  Destructive — there is no soft-delete here. Intended for the dev "Clear"
+  button on `/logs`.
+
+  ## Returns
+
+    * `:ok` — always.
+
+  ## Examples
+
+      Orchestrator.ErrorLog.clear()
+  """
   def clear do
     Repo.delete_all(ErrorLog)
     Phoenix.PubSub.broadcast(Orchestrator.PubSub, @topic, :error_log_cleared)
