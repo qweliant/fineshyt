@@ -9,11 +9,12 @@ defmodule Orchestrator.Workers.BatchImportWorker do
 
   @impl Oban.Worker
   def perform(%Oban.Job{
-        args: %{
-          "source" => "instagram",
-          "username" => username,
-          "style_description" => style_description
-        } = args
+        args:
+          %{
+            "source" => "instagram",
+            "username" => username,
+            "style_description" => style_description
+          } = args
       }) do
     max_posts = Map.get(args, "max_posts", 50)
 
@@ -23,7 +24,8 @@ defmodule Orchestrator.Workers.BatchImportWorker do
            json: %{username: username, max_posts: max_posts},
            receive_timeout: 300_000
          ) do
-      {:ok, %Req.Response{status: 200, body: %{"file_paths" => file_paths, "shortcodes" => shortcodes}}} ->
+      {:ok,
+       %Req.Response{status: 200, body: %{"file_paths" => file_paths, "shortcodes" => shortcodes}}} ->
         new_items =
           Enum.zip(file_paths, shortcodes)
           |> Enum.reject(fn {_path, shortcode} -> Photos.shortcode_exists?(shortcode) end)
@@ -54,7 +56,10 @@ defmodule Orchestrator.Workers.BatchImportWorker do
         :ok
 
       {:ok, %Req.Response{status: 429, body: body}} ->
-        detail = get_in(body, ["detail"]) || "Instagram is rate-limiting requests. Wait a few minutes and try again."
+        detail =
+          get_in(body, ["detail"]) ||
+            "Instagram is rate-limiting requests. Wait a few minutes and try again."
+
         Logger.warning("Instagram rate-limited: #{detail}")
         Phoenix.PubSub.broadcast(Orchestrator.PubSub, "photo_updates", {:import_failed, detail})
         # Snooze the Oban job so it retries automatically in 5 minutes
