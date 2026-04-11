@@ -5,6 +5,12 @@ defmodule Orchestrator.Workers.LocalBatchImportWorker do
 
   require Logger
 
+  # Formats Pillow can open natively in the ai_worker
+  @pillow_exts ~w(.tif .tiff .jpg .jpeg .png .webp .bmp .tga .psd)
+  # Camera RAW formats handled by rawpy in the ai_worker
+  @raw_exts ~w(.cr2 .cr3 .nef .arw .dng .raf .orf .rw2 .pef .srw .x3f .3fr .erf .mef .mos .nrw .raw)
+  @all_exts MapSet.new(@pillow_exts ++ @raw_exts)
+
   @impl Oban.Worker
   def perform(%Oban.Job{
         args: %{
@@ -15,66 +21,101 @@ defmodule Orchestrator.Workers.LocalBatchImportWorker do
     sample = Map.get(args, "sample")
     project = Map.get(args, "project")
 
-    Logger.info("Starting local TIFF ingest from #{dir_path} (sample: #{inspect(sample)})...")
+    Logger.info("Starting local ingest from #{dir_path} (sample: #{inspect(sample)})...")
 
-    body = %{dir_path: dir_path, sample: sample}
+    with {:ok, file_paths} <- scan_directory(dir_path) do
+      total_found = length(file_paths)
 
-    case Req.post("http://127.0.0.1:8000/api/v1/ingest/local",
-           json: body,
-           # Scan-only now — should return in well under 30s for any directory size
-           receive_timeout: 30_000
-         ) do
-      {:ok,
-       %Req.Response{
-         status: 200,
-         body: %{"file_paths" => file_paths, "total_found" => total_found}
-       }} ->
-        # Dedup by stem (without extension) so RAW source paths match existing JPEG records
-        stems = Enum.map(file_paths, fn p -> Path.rootname(Path.basename(p)) end)
-        already_done = Orchestrator.Photos.existing_stems(stems)
-
-        new_paths =
-          Enum.reject(file_paths, fn path ->
-            MapSet.member?(already_done, Path.rootname(Path.basename(path)))
-          end)
-
-        skipped = length(file_paths) - length(new_paths)
-        if skipped > 0, do: Logger.info("Skipping #{skipped} already-processed files.")
-        Logger.info("Found #{length(file_paths)}/#{total_found} files, queuing #{length(new_paths)} for conversion + curation...")
-
-        for file_path <- new_paths do
-          ref = make_ref() |> inspect()
-
-          %{
-            "file_path"         => file_path,
-            "ref"               => ref,
-            "style_description" => style_description,
-            "source"            => "local",
-            "project"           => project
-          }
-          |> Orchestrator.Workers.ConversionWorker.new()
-          |> Oban.insert()
+      sampled =
+        case sample do
+          n when is_integer(n) and n > 0 and n < total_found -> Enum.take_random(file_paths, n)
+          _ -> file_paths
         end
 
-        Phoenix.PubSub.broadcast(
-          Orchestrator.PubSub,
-          "photo_updates",
-          {:import_started, length(new_paths)}
-        )
+      stems = Enum.map(sampled, fn p -> Path.rootname(Path.basename(p)) end)
+      already_done = Orchestrator.Photos.existing_stems(stems)
 
-        :ok
+      new_paths =
+        Enum.reject(sampled, fn path ->
+          MapSet.member?(already_done, Path.rootname(Path.basename(path)))
+        end)
 
-      {:ok, %Req.Response{status: status, body: body}} ->
-        detail = get_in(body, ["detail"]) || "status #{status}"
-        Logger.error("Local ingest failed (#{status}): #{detail}")
-        Phoenix.PubSub.broadcast(Orchestrator.PubSub, "photo_updates", {:import_failed, detail})
-        {:error, detail}
+      skipped = length(sampled) - length(new_paths)
+      if skipped > 0, do: Logger.info("Skipping #{skipped} already-processed files.")
 
-      {:error, reason} ->
-        detail = "Could not reach AI worker — is it running? (#{inspect(reason)})"
-        Logger.error(detail)
+      Logger.info(
+        "Found #{length(sampled)}/#{total_found} files, queuing #{length(new_paths)} for conversion + curation..."
+      )
+
+      for file_path <- new_paths do
+        ref = make_ref() |> inspect()
+
+        %{
+          "file_path"         => file_path,
+          "ref"               => ref,
+          "style_description" => style_description,
+          "source"            => "local",
+          "project"           => project
+        }
+        |> Orchestrator.Workers.ConversionWorker.new()
+        |> Oban.insert()
+      end
+
+      Phoenix.PubSub.broadcast(
+        Orchestrator.PubSub,
+        "photo_updates",
+        {:import_started, length(new_paths)}
+      )
+
+      :ok
+    else
+      {:error, detail} ->
+        Logger.error("Local ingest failed: #{detail}")
         Phoenix.PubSub.broadcast(Orchestrator.PubSub, "photo_updates", {:import_failed, detail})
         {:error, detail}
     end
+  end
+
+  defp scan_directory(dir_path) do
+    cond do
+      not File.dir?(dir_path) ->
+        {:error, "Directory not found: #{dir_path}"}
+
+      true ->
+        files = walk(dir_path)
+
+        if files == [] do
+          {:error, "No supported image files found in #{dir_path}"}
+        else
+          {:ok, files}
+        end
+    end
+  end
+
+  defp walk(dir) do
+    case File.ls(dir) do
+      {:ok, entries} ->
+        Enum.flat_map(entries, fn entry ->
+          # Skip dotfiles (incl. macOS ._sidecar resource forks)
+          if String.starts_with?(entry, ".") do
+            []
+          else
+            path = Path.join(dir, entry)
+
+            cond do
+              File.dir?(path) -> walk(path)
+              File.regular?(path) and supported?(path) -> [path]
+              true -> []
+            end
+          end
+        end)
+
+      {:error, _} ->
+        []
+    end
+  end
+
+  defp supported?(path) do
+    MapSet.member?(@all_exts, path |> Path.extname() |> String.downcase())
   end
 end

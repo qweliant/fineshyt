@@ -10,8 +10,6 @@ Endpoints
 * ``POST /api/v1/curate`` — accept an image upload and an optional style
   description, ask LLaVA (via Ollama via the `instructor` structured-output
   wrapper) to extract metadata, and return it as a `PhotoMetadata` JSON.
-* ``POST /api/v1/ingest/local`` — walk a directory, return every supported
-  image path (optionally random-sampled). No file mutation.
 * ``POST /api/v1/convert`` — open a single source file (RAW or otherwise),
   resize to a 1440px long edge, save as quality-82 JPEG into
   ``STATIC_UPLOADS_DIR``, and return the new path.
@@ -50,7 +48,6 @@ Read from environment via ``python-dotenv``:
 import base64
 import logging
 import os
-import random
 import traceback
 from pathlib import Path
 from typing import Any, Literal
@@ -113,16 +110,6 @@ class PhotoMetadata(BaseModel):
     style_reason: str = Field(
         description="One sentence explaining the style match decision. Empty string if no style description was given."
     )
-
-
-class LocalIngestRequest(BaseModel):
-    dir_path: str
-    sample: int | None = None
-
-
-class LocalIngestResponse(BaseModel):
-    file_paths: list[str]
-    total_found: int
 
 
 class ConvertRequest(BaseModel):
@@ -314,13 +301,9 @@ def _error_detail(op: str, exc: Exception, **context: Any) -> dict[str, Any]:
     return payload
 
 
-# Formats Pillow can open natively
-_PILLOW_EXTS = {".tif", ".tiff", ".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tga", ".psd"}
-
-# Camera RAW formats — handled by rawpy if available
+# Camera RAW formats — handled by rawpy if available. Non-RAW formats fall
+# through to Pillow's native openers.
 _RAW_EXTS = {".cr2", ".cr3", ".nef", ".arw", ".dng", ".raf", ".orf", ".rw2", ".pef", ".srw", ".x3f", ".3fr", ".erf", ".mef", ".mos", ".nrw", ".raw"}
-
-_ALL_EXTS = _PILLOW_EXTS | _RAW_EXTS
 
 try:
     import rawpy
@@ -361,59 +344,6 @@ def _unique_output_path(uploads_dir: Path, stem: str) -> Path:
         out = uploads_dir / f"{stem}_{counter}.jpg"
         counter += 1
     return out
-
-
-@app.post("/api/v1/ingest/local", response_model=LocalIngestResponse, tags=["Ingestion"])
-def ingest_local(request: LocalIngestRequest):
-    """Walk a local directory and return paths to every supported image file.
-
-    Recursively scans ``request.dir_path``, filters out hidden files
-    (including macOS ``._`` resource forks) and unsupported extensions,
-    and optionally takes a random sample. Pure read — no conversion or
-    DB writes happen here. The orchestrator's batch ingest path uses this
-    to discover which files to enqueue for ``ConversionWorker``.
-
-    Args:
-        request: ``LocalIngestRequest`` with:
-            * ``dir_path``: absolute directory to scan.
-            * ``sample``: optional positive int. When set and smaller than
-              the total found, randomly samples this many paths.
-
-    Returns:
-        LocalIngestResponse: ``file_paths`` (the chosen subset) and
-        ``total_found`` (the unfiltered count, for the UI to show how
-        many were sampled out of how many).
-
-    Raises:
-        HTTPException: 400 if ``dir_path`` is not a directory; 404 if no
-        supported image files are found under it.
-    """
-    source_dir = Path(request.dir_path)
-    if not source_dir.is_dir():
-        raise HTTPException(status_code=400, detail=f"Directory not found: {request.dir_path}")
-
-    image_files = [
-        p for p in source_dir.rglob("*")
-        if p.is_file()
-        and not p.name.startswith(".")  # skip macOS ._sidecar and hidden files
-        and p.suffix.lower() in _ALL_EXTS
-    ]
-
-    if not image_files:
-        raise HTTPException(
-            status_code=404,
-            detail=f"No supported image files found in {request.dir_path}"
-        )
-
-    total_found = len(image_files)
-
-    if request.sample is not None and request.sample < total_found:
-        image_files = random.sample(image_files, request.sample)
-
-    return LocalIngestResponse(
-        file_paths=[str(p) for p in image_files],
-        total_found=total_found,
-    )
 
 
 @app.post("/api/v1/convert", response_model=ConvertResponse, tags=["Ingestion"])

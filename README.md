@@ -95,6 +95,92 @@ make dev
 - Gallery + single upload: [localhost:4000](http://localhost:4000)
 - AI worker API docs: [localhost:8000/docs](http://localhost:8000/docs)
 
+## Future work
+
+Features that would complement what's already here. Each needs research before implementation.
+
+**CLIP embeddings + pgvector search** — The current gallery search is substring matching on subject and mood. CLIP embeddings would unlock natural language retrieval: "find moody portraits with side lighting," "photos like this one but sharper," "find the selects I'd probably post." pgvector plugs into the existing Postgres instance — no new infrastructure. CLIP inference runs in the ai_worker alongside the existing vision LLM calls.
+
+**Technical quality scoring** — `style_score` measures aesthetic fit against your description. It says nothing about whether the photo is technically sound. Heuristic scoring for sharpness, exposure, noise, and motion blur using Pillow and numpy (both already in the worker's deps) would give a separate axis for culling. A sharp but off-brand photo and a perfectly-on-brand but blurry photo shouldn't score the same.
+
+**Perceptual duplicate detection** — Deduplication today is filename-stem based: if `DSC_0042.tiff` and `DSC_0042.jpg` both exist, only one gets ingested. That misses actual visual duplicates across different filenames — re-exports, crops, edits. Perceptual hashing or embedding cosine distance would catch those.
+
+**Preference learning / feedback loop** — User ratings (1–5 stars) exist but are write-only. They don't feed back into how future photos get scored. A reranker trained on your rating history would let `style_score` drift toward your actual taste over time instead of relying solely on the text description. This is the "gets smarter as you use it" piece.
+
+**Burst / sequence best-pick** — Use EXIF timestamps and visual similarity to detect burst sequences, then auto-pick the sharpest frame. Lower priority if you mostly shoot deliberate single frames, high priority for event or action shoots.
+
+---
+
+<details>
+<summary>Prompt: generate architecture diagram</summary>
+
+Use this with any LLM or diagramming tool to generate a visual of the current and proposed architecture.
+
+```
+I have a photo curation system called Fine.Shyt with two services:
+
+CURRENT ARCHITECTURE:
+
+1. Orchestrator (Elixir/Phoenix LiveView + Oban + PostgreSQL)
+   - Web UI (LiveView): Curator page, Gallery grid, Loupe/Review view, Projects page, Error Logs
+   - Job Queue (Oban) with 4 worker types:
+     - LocalBatchImportWorker: scans directories via AI worker's /ingest/local endpoint, deduplicates by filename stem, enqueues ConversionWorker jobs
+     - ConversionWorker (concurrency 4): sends files to AI worker's /convert endpoint, enqueues AiCurationWorker jobs
+     - AiCurationWorker (concurrency 1): sends JPEGs to AI worker's /curate endpoint, persists metadata to DB, broadcasts results via PubSub
+     - BatchImportWorker: Instagram import (optional)
+   - PubSub: real-time broadcast of curation results to all connected LiveView clients
+   - PostgreSQL: photos table (file_path, url, style_match, style_score, style_reason, subject, content_type, lighting_critique, artistic_mood, suggested_tags, user_rating, project, curation_status), error_logs table
+   - Export task (mix fineshyt.export): copies approved photos + writes photos.json manifest
+
+2. AI Worker (Python/FastAPI + Instructor + OpenAI SDK)
+   - POST /api/v1/ingest/local: recursive directory walk, returns file paths
+   - POST /api/v1/convert: RAW/TIFF/PNG/WebP → JPEG (1440px long edge, quality 82) using rawpy + Pillow
+   - POST /api/v1/curate: sends image + style description to vision LLM, returns structured PhotoMetadata via Instructor (subject, content_type, lighting_critique, artistic_mood, suggested_tags, style_match, style_score, style_reason)
+   - Supports Ollama (local), Claude, HuggingFace as LLM backends via env vars
+
+Data flow: User → Curator UI → LocalBatchImportWorker → /ingest/local → ConversionWorker → /convert → AiCurationWorker → /curate → DB → PubSub → Gallery/Review UI. User rates photos in Gallery/Review. Export task reads DB and copies files.
+
+PROPOSED ADDITIONS (show these as new components integrated into the existing architecture):
+
+1. CLIP Embedding Service (in AI Worker)
+   - New endpoint: POST /api/v1/embed — takes a JPEG, returns CLIP embedding vector
+   - Called after conversion, before or alongside curation
+   - Embeddings stored in PostgreSQL via pgvector extension (new vector column on photos table)
+
+2. Semantic Search (in Orchestrator)
+   - New search mode in Gallery/Review UI: natural language query → CLIP text embedding → pgvector cosine similarity search
+   - "Find similar" button on any photo → nearest neighbors by embedding distance
+
+3. Technical Quality Scoring (in AI Worker)
+   - New endpoint: POST /api/v1/quality — takes a JPEG, returns heuristic scores for sharpness, exposure, noise, motion blur (0-100 each)
+   - Uses Pillow + numpy, no ML model needed
+   - New columns on photos table: sharpness_score, exposure_score, noise_score, blur_score
+   - Shown in Gallery/Review UI alongside style_score
+
+4. Perceptual Duplicate Detection (in AI Worker + Orchestrator)
+   - Computed from CLIP embeddings or perceptual hash during ingestion
+   - New endpoint or logic: find photos within cosine distance threshold
+   - Duplicate cluster view in UI for manual resolution
+
+5. Preference Reranker (new service or in AI Worker)
+   - Trains on user_rating history to learn personal taste
+   - Re-scores unrated photos based on learned preferences
+   - Feedback loop: rate photos → retrain → re-rank → surface better candidates
+
+6. Burst Detection + Best-Pick (in AI Worker + Orchestrator)
+   - EXIF timestamp clustering to detect burst sequences
+   - Within each burst: pick frame with highest sharpness_score
+   - UI: show burst groups, highlight suggested pick, allow override
+
+Generate two diagrams:
+1. Current architecture showing the two services, their internal components, data flow between them, and the database
+2. Proposed architecture showing all current components plus the new additions, with new components visually distinguished (different color or dashed borders)
+
+Use a clean, minimal style. Label all connections with the HTTP endpoints or data types flowing between components.
+```
+
+</details>
+
 ## Author
 
 Qwelian Tanner — [qwelian.com](https://www.qwelian.com)
