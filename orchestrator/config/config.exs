@@ -11,6 +11,10 @@ config :orchestrator,
   ecto_repos: [Orchestrator.Repo],
   generators: [timestamp_type: :utc_datetime]
 
+# Register the pgvector extension with Postgrex so `%Pgvector{}` round-trips
+# through the `clip_embedding vector(768)` column on the photos table.
+config :orchestrator, Orchestrator.Repo, types: Orchestrator.PostgresTypes
+
 # Configure the endpoint
 config :orchestrator, OrchestratorWeb.Endpoint,
   url: [host: "localhost"],
@@ -66,7 +70,13 @@ config :orchestrator, Oban,
     # 4 concurrent RAW→JPEG conversions (~150MB RAM each, safe on 16GB)
     conversion: 4,
     # Strictly 1 LLM call at a time — Ollama serializes anyway
-    ai_jobs: 1
+    ai_jobs: 1,
+    # CLIP image embeddings. One model in RAM; small concurrency avoids
+    # thrashing CPU against Ollama inference on the same box.
+    embedding: 2,
+    # Preference model training / scoring. One job at a time — pickled
+    # model on disk, no point racing retrains.
+    preference: 1
   ],
   repo: Orchestrator.Repo
 

@@ -62,7 +62,7 @@ defmodule Orchestrator.Workers.ConversionWorker do
            # rawpy on a large RAW file can take up to 60s
            receive_timeout: 60_000
          ) do
-      {:ok, %Req.Response{status: 200, body: %{"jpeg_path" => jpeg_path}}} ->
+      {:ok, %Req.Response{status: 200, body: %{"jpeg_path" => jpeg_path} = body}} ->
         Logger.info("Converted #{Path.basename(file_path)} → #{Path.basename(jpeg_path)}")
 
         %{
@@ -70,7 +70,10 @@ defmodule Orchestrator.Workers.ConversionWorker do
           "ref" => ref,
           "style_description" => style_description,
           "source" => source,
-          "project" => project
+          "project" => project,
+          "technical_score" => body["technical_score"],
+          "sharpness_score" => body["sharpness_score"],
+          "exposure_score" => body["exposure_score"]
         }
         |> Orchestrator.Workers.AiCurationWorker.new()
         |> Oban.insert()

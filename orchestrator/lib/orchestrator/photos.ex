@@ -84,7 +84,7 @@ defmodule Orchestrator.Photos do
       * `:filter` — one of `:all`, `:match`, `:no_match`, `:rated`,
         `:unrated`, `:for_projects`, `:failed`, `:rejected` (default `:all`)
       * `:sort` — one of `:newest`, `:score_desc`, `:score_asc`,
-        `:rating_desc` (default `:newest`)
+        `:rating_desc`, `:preference_desc` (default `:newest`)
       * `:search` — substring matched against `subject` and `artistic_mood`
       * `:project` — restrict to photos with this project name
 
@@ -208,11 +208,12 @@ defmodule Orchestrator.Photos do
     where(q, [p], ilike(p.subject, ^term) or ilike(p.artistic_mood, ^term))
   end
 
-  defp apply_sort(q, :newest),      do: order_by(q, [p], desc: p.inserted_at)
-  defp apply_sort(q, :score_desc),  do: order_by(q, [p], [desc_nulls_last: p.style_score, desc: p.inserted_at])
-  defp apply_sort(q, :score_asc),   do: order_by(q, [p], [asc_nulls_last: p.style_score, desc: p.inserted_at])
-  defp apply_sort(q, :rating_desc), do: order_by(q, [p], [desc_nulls_last: p.user_rating, desc: p.inserted_at])
-  defp apply_sort(q, _),            do: order_by(q, [p], desc: p.inserted_at)
+  defp apply_sort(q, :newest),          do: order_by(q, [p], desc: p.inserted_at)
+  defp apply_sort(q, :score_desc),      do: order_by(q, [p], [desc_nulls_last: p.style_score, desc: p.inserted_at])
+  defp apply_sort(q, :score_asc),       do: order_by(q, [p], [asc_nulls_last: p.style_score, desc: p.inserted_at])
+  defp apply_sort(q, :rating_desc),     do: order_by(q, [p], [desc_nulls_last: p.user_rating, desc: p.inserted_at])
+  defp apply_sort(q, :preference_desc), do: order_by(q, [p], [desc_nulls_last: p.preference_score, desc: p.inserted_at])
+  defp apply_sort(q, _),                do: order_by(q, [p], desc: p.inserted_at)
 
   defp paginate(q, page) do
     offset = (page - 1) * @page_size
@@ -400,6 +401,109 @@ defmodule Orchestrator.Photos do
     get_photo!(id)
     |> Photo.changeset(attrs)
     |> Repo.update()
+  end
+
+  @doc """
+  Return every photo that has both a star rating and a CLIP embedding.
+
+  This is the training set for the preference model: the
+  `PreferenceTrainWorker` ships these to the AI worker's
+  `/api/v1/preference/train` endpoint, which fits a Ridge regression on
+  `{embedding → rating}`. Only "complete" photos are included — rejected
+  and failed rows are excluded from the signal.
+
+  ## Returns
+
+    * `[{id, clip_embedding, user_rating}]` — a list of tuples, where
+      `clip_embedding` is a `%Pgvector{}` you can `Pgvector.to_list/1` to
+      marshal into JSON.
+  """
+  def list_rated_with_embeddings do
+    Repo.all(
+      from p in Photo,
+        where:
+          not is_nil(p.user_rating) and not is_nil(p.clip_embedding) and
+            p.curation_status == "complete",
+        select: {p.id, p.clip_embedding, p.user_rating}
+    )
+  end
+
+  @doc """
+  Return photos whose `preference_score` is stale relative to the current
+  model version.
+
+  A row is stale when it has an embedding but either has never been scored
+  (`preference_model_version IS NULL`) or was scored by an older model.
+  Used by the `PreferenceTrainWorker` to backfill after each retrain.
+
+  ## Parameters
+
+    * `current_version` — the latest model version integer; rows at or
+      above this version are considered fresh.
+    * `limit` — maximum number of rows to return (default 500, matches
+      the backfill batch size).
+
+  ## Returns
+
+    * `[{id, clip_embedding}]`
+  """
+  def list_photos_needing_preference_score(current_version, limit \\ 500) do
+    Repo.all(
+      from p in Photo,
+        where:
+          not is_nil(p.clip_embedding) and p.curation_status == "complete" and
+            (is_nil(p.preference_model_version) or p.preference_model_version < ^current_version),
+        select: {p.id, p.clip_embedding},
+        limit: ^limit
+    )
+  end
+
+  @doc """
+  Batch-update `preference_score` + `preference_model_version` on many photos
+  in a single transaction.
+
+  Deliberately narrower than `override_curation/2` because the
+  `PreferenceTrainWorker` runs this in tight loops over hundreds of rows and
+  each call only touches two columns. Uses `update_all/3` keyed by id.
+
+  ## Parameters
+
+    * `updates` — list of `{id, score, version}` tuples.
+
+  ## Returns
+
+    * `:ok` — always. Errors bubble up as Ecto exceptions.
+  """
+  def update_preference_scores(updates) when is_list(updates) do
+    Repo.transaction(fn ->
+      Enum.each(updates, fn {id, score, version} ->
+        from(p in Photo, where: p.id == ^id)
+        |> Repo.update_all(
+          set: [preference_score: score, preference_model_version: version]
+        )
+      end)
+    end)
+
+    :ok
+  end
+
+  @doc """
+  IDs of photos that still need a CLIP embedding.
+
+  Used by the `fineshyt.embed_backfill` mix task to enqueue one
+  `EmbeddingWorker` per row after the initial migration lands.
+
+  ## Returns
+
+    * `[integer]` — every "complete" photo id with `clip_embedding IS NULL`.
+  """
+  def list_photos_needing_embedding do
+    Repo.all(
+      from p in Photo,
+        where: is_nil(p.clip_embedding) and p.curation_status == "complete",
+        select: p.id,
+        order_by: [asc: p.id]
+    )
   end
 
   @doc """

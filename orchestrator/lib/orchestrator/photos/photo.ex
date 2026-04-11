@@ -15,6 +15,20 @@ defmodule Orchestrator.Photos.Photo do
       * `style_score` — 0–100 confidence integer
       * `style_reason` — free-form explanation
 
+    * **Technical quality** (computed by the Python converter on the full-res image)
+      * `technical_score` — 0–100 weighted blend (0.7 sharpness + 0.3 exposure)
+      * `sharpness_score` — variance-of-Laplacian, normalized 0–100
+      * `exposure_score` — histogram clipping penalty, 0–100
+
+    * **Preference learning** (CLIP embedding + Ridge linear probe)
+      * `clip_embedding` — 768-dim CLIP image embedding (`ViT-L-14`),
+        populated by `Orchestrator.Workers.EmbeddingWorker`
+      * `preference_score` — 0–100 personalized score from the Ridge model
+        fit on the user's star ratings
+      * `preference_model_version` — integer version of the Ridge model that
+        produced the current `preference_score`; stale rows are re-scored
+        on the next retrain
+
     * **Content metadata** (set by the AI worker)
       * `subject`, `artistic_mood`, `lighting_critique`, `content_type`
       * `suggested_tags` — list of strings (defaults to `[]`)
@@ -49,6 +63,14 @@ defmodule Orchestrator.Photos.Photo do
     field :style_match, :boolean
     field :style_score, :integer
     field :style_reason, :string
+
+    field :technical_score, :integer
+    field :sharpness_score, :integer
+    field :exposure_score, :integer
+
+    field :clip_embedding, Pgvector.Ecto.Vector
+    field :preference_score, :integer
+    field :preference_model_version, :integer
 
     field :subject, :string
     field :artistic_mood, :string
@@ -90,6 +112,8 @@ defmodule Orchestrator.Photos.Photo do
     |> cast(attrs, [
       :file_path, :url, :source, :instagram_shortcode,
       :style_match, :style_score, :style_reason,
+      :technical_score, :sharpness_score, :exposure_score,
+      :clip_embedding, :preference_score, :preference_model_version,
       :subject, :artistic_mood, :lighting_critique, :content_type, :suggested_tags,
       :user_rating, :project, :curation_status, :failure_reason
     ])

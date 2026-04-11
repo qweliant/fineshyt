@@ -229,10 +229,21 @@ defmodule OrchestratorWeb.ReviewLive do
       nil -> socket
       photo ->
         case Photos.rate_photo(photo.id, value) do
-          {:ok, updated} -> socket |> patch_current(updated) |> flash_for("★ #{value}")
-          _ -> socket
+          {:ok, updated} ->
+            trigger_preference_retrain()
+            socket |> patch_current(updated) |> flash_for("★ #{value}")
+
+          _ ->
+            socket
         end
     end
+  end
+
+  # Debounced retrain — Oban unique job collapses a burst of ratings into
+  # a single PreferenceTrainWorker run within any 5-minute window.
+  defp trigger_preference_retrain do
+    Orchestrator.Workers.PreferenceTrainWorker.new(%{trigger: "rating_change"})
+    |> Oban.insert()
   end
 
   defp unrate_current(socket) do

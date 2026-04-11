@@ -83,6 +83,9 @@ defmodule Orchestrator.Workers.AiCurationWorker do
     source = Map.get(args, "source", "upload")
     instagram_shortcode = Map.get(args, "instagram_shortcode")
     project = Map.get(args, "project")
+    technical_score = Map.get(args, "technical_score")
+    sharpness_score = Map.get(args, "sharpness_score")
+    exposure_score = Map.get(args, "exposure_score")
     basename = Path.basename(file_path)
 
     uploads_dir = Path.join([:code.priv_dir(:orchestrator), "static", "uploads"])
@@ -114,22 +117,38 @@ defmodule Orchestrator.Workers.AiCurationWorker do
                ) do
             {:ok, %Req.Response{status: 200, body: metadata}} ->
               Photos.delete_failed_if_exists(dest)
-              Photos.create_photo(%{
-                file_path: dest,
-                url: "/uploads/#{basename}",
-                source: source,
-                instagram_shortcode: instagram_shortcode,
-                project: project,
-                style_match: metadata["style_match"],
-                style_score: metadata["style_score"],
-                style_reason: metadata["style_reason"],
-                subject: metadata["subject"],
-                artistic_mood: metadata["artistic_mood"],
-                lighting_critique: metadata["lighting_critique"],
-                content_type: metadata["content_type"],
-                suggested_tags: metadata["suggested_tags"],
-                curation_status: "complete"
-              })
+
+              insert_result =
+                Photos.create_photo(%{
+                  file_path: dest,
+                  url: "/uploads/#{basename}",
+                  source: source,
+                  instagram_shortcode: instagram_shortcode,
+                  project: project,
+                  style_match: metadata["style_match"],
+                  style_score: metadata["style_score"],
+                  style_reason: metadata["style_reason"],
+                  technical_score: technical_score,
+                  sharpness_score: sharpness_score,
+                  exposure_score: exposure_score,
+                  subject: metadata["subject"],
+                  artistic_mood: metadata["artistic_mood"],
+                  lighting_critique: metadata["lighting_critique"],
+                  content_type: metadata["content_type"],
+                  suggested_tags: metadata["suggested_tags"],
+                  curation_status: "complete"
+                })
+
+              # Kick off CLIP embedding in the background. Embedding failures
+              # are non-fatal for curation — the photo is already usable.
+              case insert_result do
+                {:ok, %{id: photo_id}} ->
+                  Orchestrator.Workers.EmbeddingWorker.new(%{photo_id: photo_id})
+                  |> Oban.insert()
+
+                _ ->
+                  :noop
+              end
 
               Logger.info("AI Curation successful for #{basename}!")
               Phoenix.PubSub.broadcast(

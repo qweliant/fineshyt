@@ -1,6 +1,10 @@
 services:
   db:
-    image: postgres:15-alpine
+    # pgvector/pgvector:pg15 is the drop-in for postgres:15 with the `vector`
+    # extension preinstalled — required by the CLIP embedding column on the
+    # photos table. pgdata volume carries over cleanly since the underlying
+    # Postgres version is unchanged.
+    image: pgvector/pgvector:pg15
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres_password

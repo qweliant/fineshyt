@@ -12,7 +12,8 @@ defmodule OrchestratorWeb.GalleryLive do
 
     * `:filter` — `:all`, `:match`, `:no_match`, `:rated`, `:unrated`,
       `:for_projects`, `:failed`, `:rejected`
-    * `:sort` — `:newest`, `:score_desc`, `:score_asc`, `:rating_desc`
+    * `:sort` — `:newest`, `:score_desc`, `:score_asc`, `:rating_desc`,
+      `:preference_desc`
     * `:search` — substring filter on subject + mood
     * `:page` — current 1-indexed page
     * `:project_filter` — project name to scope to, or `nil`
@@ -104,6 +105,14 @@ defmodule OrchestratorWeb.GalleryLive do
     |> load_photos()
   end
 
+  # Enqueue a preference-model retrain. Oban's `unique` constraint on the
+  # worker collapses a burst of rating keypresses into a single retrain
+  # within a 5-minute window, so calling this on every star press is cheap.
+  defp trigger_preference_retrain do
+    Orchestrator.Workers.PreferenceTrainWorker.new(%{trigger: "rating_change"})
+    |> Oban.insert()
+  end
+
   # ── events ────────────────────────────────────────────────────────────────
 
   @doc """
@@ -179,10 +188,11 @@ defmodule OrchestratorWeb.GalleryLive do
   @impl Phoenix.LiveView
   def handle_event("set_sort", %{"sort" => sort}, socket) do
     atom = case sort do
-      "score_desc"  -> :score_desc
-      "score_asc"   -> :score_asc
-      "rating_desc" -> :rating_desc
-      _             -> :newest
+      "score_desc"      -> :score_desc
+      "score_asc"       -> :score_asc
+      "rating_desc"     -> :rating_desc
+      "preference_desc" -> :preference_desc
+      _                 -> :newest
     end
     {:noreply, reload(socket, sort: atom)}
   end
@@ -204,9 +214,11 @@ defmodule OrchestratorWeb.GalleryLive do
     case key do
       k when k in ["1", "2", "3", "4", "5"] ->
         Photos.rate_photo(photo_id, String.to_integer(k))
+        trigger_preference_retrain()
         {:noreply, socket |> assign(:tag_profile, Photos.tag_affinity_profile()) |> load_photos()}
       "p" ->
         Photos.rate_photo(photo_id, 5)
+        trigger_preference_retrain()
         {:noreply, socket |> assign(:tag_profile, Photos.tag_affinity_profile()) |> load_photos()}
       "x" ->
         Photos.reject_photo(photo_id)
@@ -240,6 +252,7 @@ defmodule OrchestratorWeb.GalleryLive do
   @impl Phoenix.LiveView
   def handle_event("rate", %{"id" => id, "rating" => rating_str}, socket) do
     Photos.rate_photo(String.to_integer(id), String.to_integer(rating_str))
+    trigger_preference_retrain()
     {:noreply, socket |> assign(:tag_profile, Photos.tag_affinity_profile()) |> load_photos()}
   end
 
@@ -428,6 +441,10 @@ defmodule OrchestratorWeb.GalleryLive do
       |> load_photos()}
   end
 
+  def handle_info({:preference_scores_updated, _version}, socket) do
+    {:noreply, load_photos(socket)}
+  end
+
   def handle_info({:curation_failed, _ref, _basename, _reason}, socket) do
     # Reload so failed tab count stays fresh
     {:noreply, load_photos(socket)}
@@ -483,30 +500,31 @@ defmodule OrchestratorWeb.GalleryLive do
 
       <%!-- Search + Sort bar --%>
       <div class="flex flex-col sm:flex-row gap-4 mb-8">
-        <div class="flex-1 relative">
+        <form phx-change="search" class="flex-1 relative">
           <input
             type="text"
             placeholder="search subjects, mood…"
             value={@search}
-            phx-change="search"
             phx-debounce="300"
             name="q"
             class="w-full border border-gray-300 bg-transparent px-4 py-2.5 font-sans text-sm focus:outline-none focus:border-[#111111] placeholder-gray-300"
           />
           <%= if @search != "" do %>
-            <button phx-click="search" phx-value-q="" class="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-700 font-sans text-sm">×</button>
+            <button type="button" phx-click="search" phx-value-q="" class="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-700 font-sans text-sm">×</button>
           <% end %>
-        </div>
-        <select
-          phx-change="set_sort"
-          name="sort"
-          class="border border-gray-300 bg-[#fcfbf9] px-4 py-2.5 font-sans text-xs uppercase tracking-widest focus:outline-none focus:border-[#111111] cursor-pointer"
-        >
-          <option value="newest"      selected={@sort == :newest}>Newest</option>
-          <option value="score_desc"  selected={@sort == :score_desc}>Score ↓</option>
-          <option value="score_asc"   selected={@sort == :score_asc}>Score ↑</option>
-          <option value="rating_desc" selected={@sort == :rating_desc}>Rating ↓</option>
-        </select>
+        </form>
+        <form phx-change="set_sort">
+          <select
+            name="sort"
+            class="border border-gray-300 bg-[#fcfbf9] px-4 py-2.5 font-sans text-xs uppercase tracking-widest focus:outline-none focus:border-[#111111] cursor-pointer"
+          >
+            <option value="newest"           selected={@sort == :newest}>Newest</option>
+            <option value="score_desc"       selected={@sort == :score_desc}>Score ↓</option>
+            <option value="score_asc"        selected={@sort == :score_asc}>Score ↑</option>
+            <option value="rating_desc"      selected={@sort == :rating_desc}>Rating ↓</option>
+            <option value="preference_desc"  selected={@sort == :preference_desc}>Preference ↓</option>
+          </select>
+        </form>
       </div>
 
       <%!-- Filter Tabs --%>
@@ -713,6 +731,36 @@ defmodule OrchestratorWeb.GalleryLive do
                      end %>
                   <div class={["font-sans text-[9px] uppercase tracking-wider px-2 py-0.5 border font-bold", conf_class]}>
                     <%= conf_label %> · <%= conf %>
+                  </div>
+                <% end %>
+                <%= if photo.technical_score != nil do %>
+                  <% tech = photo.technical_score
+                     {tech_label, tech_class} = cond do
+                       tech >= 75 -> {"sharp", "bg-sky-900/80 text-sky-300 border-sky-700"}
+                       tech >= 50 -> {"ok",    "bg-slate-800/80 text-slate-300 border-slate-600"}
+                       true       -> {"soft",  "bg-red-900/80 text-red-300 border-red-700"}
+                     end
+                     tech_title =
+                       "sharpness #{photo.sharpness_score || "?"} · exposure #{photo.exposure_score || "?"}" %>
+                  <div
+                    title={tech_title}
+                    class={["font-sans text-[9px] uppercase tracking-wider px-2 py-0.5 border font-bold", tech_class]}
+                  >
+                    <%= tech_label %> · <%= tech %>
+                  </div>
+                <% end %>
+                <%= if photo.preference_score != nil do %>
+                  <% pref = photo.preference_score
+                     {pref_label, pref_class} = cond do
+                       pref >= 75 -> {"taste", "bg-fuchsia-900/80 text-fuchsia-200 border-fuchsia-700"}
+                       pref >= 50 -> {"maybe", "bg-purple-900/80 text-purple-200 border-purple-700"}
+                       true       -> {"meh",   "bg-gray-800/80 text-gray-300 border-gray-600"}
+                     end %>
+                  <div
+                    title={"preference model v#{photo.preference_model_version || "?"}"}
+                    class={["font-sans text-[9px] uppercase tracking-wider px-2 py-0.5 border font-bold", pref_class]}
+                  >
+                    <%= pref_label %> · <%= pref %>
                   </div>
                 <% end %>
                 <%= if vibe do %>
