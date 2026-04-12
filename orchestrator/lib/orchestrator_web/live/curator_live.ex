@@ -214,7 +214,7 @@ defmodule OrchestratorWeb.CuratorLive do
             FINE.<br/>SHYT.
           </h1>
           <p class="mt-4 font-serif italic text-gray-400 text-lg">
-            Point it at a folder. Let the machine decide.
+            An algorithmic study of composition, light, and medium. Fine shyt if you will.
           </p>
         </div>
 

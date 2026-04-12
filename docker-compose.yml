@@ -1,3 +1,7 @@
+# ⚠ WARNING: `docker compose down -v` DESTROYS the pgdata volume and all
+# database contents (photos, embeddings, scores). Use `docker compose down`
+# (without -v) to stop services safely. Back up first: ./scripts/backup.sh
+
 services:
   db:
     # pgvector/pgvector:pg15 is the drop-in for postgres:15 with the `vector`

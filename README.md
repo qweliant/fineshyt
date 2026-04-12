@@ -10,7 +10,13 @@ It's also an excuse to get back into ML. The last time I did anything in this sp
 
 You give it a style description in plain english. Something like "high grain, soft focus, B&W, mood: solitary." You point it at a directory on your hard drive — I've got about a TB of TIFFs on an external drive that had never been properly sorted — and it randomly samples N files, converts whatever it finds down to workable JPEGs, runs each one through a vision LLM, and the LLM decides: does this fit the vibe or not.
 
-Results go into a gallery. You can filter by match, no match, or everything. Each photo gets a score and a one-sentence explanation. The whole thing updates in real-time while the jobs run. No refreshing, no polling, just Phoenix doing what Phoenix does.
+Results go into a gallery. You can filter by match, no match, or everything. Each photo gets a style score and a one-sentence explanation. The whole thing updates in real-time while the jobs run. No refreshing, no polling, just Phoenix doing what Phoenix does.
+
+As you rate photos (1-5 stars), the system learns your taste. A CLIP embedding is computed for every photo, and a Ridge regression model trained on your ratings produces a separate `preference_score` that drifts toward what you actually like — not just what the text description says you should like. The two scores are independent: `style_score` is the LLM's read on your written aesthetic, `preference_score` is what your rating history says you actually reach for.
+
+Technical quality scoring runs during conversion — sharpness (variance-of-Laplacian) and exposure (histogram clipping) are computed on the full-resolution source before it gets downsized, so you can sort and filter by IQ independent of style.
+
+Burst detection groups visually similar photos taken within seconds of each other (CLIP cosine similarity + EXIF timestamps), highlights the sharpest frame, and lets you keep-best-reject-rest in one click.
 
 After you've rated enough photos you start to see clusters. You assign project names manually in the gallery. Then you export the approved ones to your blog.
 
@@ -20,11 +26,22 @@ Single image curation still works too, at `/`. Drop a photo, get a museum placar
 
 Two services, intentionally decoupled.
 
-**The Orchestrator** (`/orchestrator`) — Elixir, Phoenix LiveView, Oban, PostgreSQL. This is the main service. It owns the UI, the job queue, the database, and the pub/sub fanout that makes the real-time updates work. Oban handles retries with backoff so a slow inference call doesn't just silently disappear.
+**The Orchestrator** (`/orchestrator`) — Elixir, Phoenix LiveView, Oban, PostgreSQL + pgvector. This is the main service. It owns the UI, the job queue, the database, and the pub/sub fanout that makes the real-time updates work. Oban handles retries with backoff so a slow inference call doesn't just silently disappear. Background workers handle the pipeline: conversion, AI curation, CLIP embedding, preference model training, and burst detection — each on its own queue with appropriate concurrency limits.
 
-**The AI Worker** (`/ai_worker`) — Python, FastAPI, Instructor. This is the muscle. Stateless. It gets an image over HTTP, encodes it to base64, asks the vision model what it sees, and enforces the response into a strict Pydantic schema via `instructor`. It also handles local image ingestion — walking directories, converting RAW/TIFF/JPEG to normalized JPEGs for the queue.
+**The AI Worker** (`/ai_worker`) — Python, FastAPI, Instructor, open_clip, scikit-learn. This is the muscle. It gets an image over HTTP, encodes it to base64, asks the vision model what it sees, and enforces the response into a strict Pydantic schema via `instructor`. It also handles conversion (RAW/TIFF to JPEG with quality scoring), CLIP embedding (ViT-L-14, 768-dim), preference model training/scoring (Ridge regression linear probe), and burst detection (cosine similarity + temporal clustering).
 
-The two services talk over plain HTTP. You could swap out either side without touching the other. Python has the AI ecosystem, Elixir has the concurrency story. No reason to compromise on either.
+The two services talk over plain HTTP. You could swap out either side without touching the other. Python has the AI/ML ecosystem, Elixir has the concurrency story. No reason to compromise on either.
+
+## The pipeline
+
+When you import a photo, here's what happens:
+
+1. **ConversionWorker** — opens the source file (RAW, TIFF, whatever), computes sharpness/exposure scores on the full-res image, extracts EXIF timestamps, resizes to 1440px JPEG.
+2. **AiCurationWorker** — sends the JPEG to the vision LLM for style matching, subject extraction, mood/lighting critique, tag suggestions.
+3. **EmbeddingWorker** — computes a 768-dim CLIP image embedding, stores it in pgvector.
+4. **PreferenceTrainWorker** (debounced) — if you have 20+ rated photos, retrains the Ridge model and backfills `preference_score` across the archive. Collapses rapid rating bursts into one retrain via Oban unique constraints.
+
+Each step is a separate Oban job. Failures retry independently without blocking the rest of the pipeline.
 
 ## LLM options
 
@@ -64,7 +81,23 @@ Set `STATIC_UPLOADS_DIR` in `ai_worker/.env` to point at the orchestrator's stat
 STATIC_UPLOADS_DIR=/path/to/fineshyt/orchestrator/priv/static/uploads
 ```
 
-Phase 1 is sampling a few hundred at random, rating them, seeing what the LLM is doing. Phase 2 is larger batches once you trust the scores.
+## Backfill tasks
+
+For existing photos that predate a feature, there are one-shot mix tasks:
+
+```bash
+cd orchestrator
+
+# CLIP embeddings for all photos missing them
+mix fineshyt.embed_backfill
+
+# Sharpness/exposure scores (from converted JPEGs, or originals for better accuracy)
+mix fineshyt.quality_backfill
+mix fineshyt.quality_backfill --source /Volumes/Photos/originals
+
+# EXIF timestamps (needs originals — converted JPEGs have EXIF stripped)
+mix fineshyt.exif_backfill --source /Volumes/Photos/originals
+```
 
 ## Blog export
 
@@ -97,17 +130,9 @@ make dev
 
 ## Future work
 
-Features that would complement what's already here. Each needs research before implementation.
+**Perceptual duplicate detection** — Deduplication today is filename-stem based: if `DSC_0042.tiff` and `DSC_0042.jpg` both exist, only one gets ingested. That misses actual visual duplicates across different filenames — re-exports, crops, edits. Perceptual hashing or embedding cosine distance would catch those. The CLIP embeddings are already there; this is mostly a UI/workflow question.
 
-~~**CLIP embeddings + pgvector search** — The current gallery search is substring matching on subject and mood. CLIP embeddings would unlock natural language retrieval: "find moody portraits with side lighting," "photos like this one but sharper," "find the selects I'd probably post." pgvector plugs into the existing Postgres instance — no new infrastructure. CLIP inference runs in the ai_worker alongside the existing vision LLM calls.~~
-
-~~**Technical quality scoring** — `style_score` measures aesthetic fit against your description. It says nothing about whether the photo is technically sound. Heuristic scoring for sharpness, exposure, noise, and motion blur using Pillow and numpy (both already in the worker's deps) would give a separate axis for culling. A sharp but off-brand photo and a perfectly-on-brand but blurry photo shouldn't score the same.~~
-
-**Perceptual duplicate detection** — Deduplication today is filename-stem based: if `DSC_0042.tiff` and `DSC_0042.jpg` both exist, only one gets ingested. That misses actual visual duplicates across different filenames — re-exports, crops, edits. Perceptual hashing or embedding cosine distance would catch those.
-
-**Preference learning / feedback loop** — User ratings (1–5 stars) exist but are write-only. They don't feed back into how future photos get scored. A reranker trained on your rating history would let `style_score` drift toward your actual taste over time instead of relying solely on the text description. This is the "gets smarter as you use it" piece.
-
-~~****Burst / sequence best-pick** — Use EXIF timestamps and visual similarity to detect burst sequences, then auto-pick the sharpest frame. Lower priority if you mostly shoot deliberate single frames, high priority for event or action shoots.~~
+**Natural language search** — pgvector and CLIP embeddings are in place. The missing piece is encoding a text query with CLIP's text encoder and doing a nearest-neighbor search against the photo embeddings. "Find moody portraits with side lighting," "photos like this one but sharper." Infrastructure is ready, just needs the endpoint and a search box.
 
 ## Author
 
