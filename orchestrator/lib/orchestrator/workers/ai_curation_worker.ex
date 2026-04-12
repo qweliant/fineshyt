@@ -35,7 +35,6 @@ defmodule Orchestrator.Workers.AiCurationWorker do
     * `"ref"` (required) — opaque reference echoed back in PubSub messages
     * `"style_description"` (optional) — passed through to the AI worker
     * `"source"` (optional, default `"upload"`)
-    * `"instagram_shortcode"` (optional)
     * `"project"` (optional)
 
   ## Return values (visible to Oban)
@@ -81,11 +80,11 @@ defmodule Orchestrator.Workers.AiCurationWorker do
 
     style_description = Map.get(args, "style_description", "")
     source = Map.get(args, "source", "upload")
-    instagram_shortcode = Map.get(args, "instagram_shortcode")
     project = Map.get(args, "project")
     technical_score = Map.get(args, "technical_score")
     sharpness_score = Map.get(args, "sharpness_score")
     exposure_score = Map.get(args, "exposure_score")
+    captured_at = parse_captured_at(Map.get(args, "captured_at"))
     basename = Path.basename(file_path)
 
     uploads_dir = Path.join([:code.priv_dir(:orchestrator), "static", "uploads"])
@@ -123,7 +122,6 @@ defmodule Orchestrator.Workers.AiCurationWorker do
                   file_path: dest,
                   url: "/uploads/#{basename}",
                   source: source,
-                  instagram_shortcode: instagram_shortcode,
                   project: project,
                   style_match: metadata["style_match"],
                   style_score: metadata["style_score"],
@@ -136,6 +134,7 @@ defmodule Orchestrator.Workers.AiCurationWorker do
                   lighting_critique: metadata["lighting_critique"],
                   content_type: metadata["content_type"],
                   suggested_tags: metadata["suggested_tags"],
+                  captured_at: captured_at,
                   curation_status: "complete"
                 })
 
@@ -245,4 +244,13 @@ defmodule Orchestrator.Workers.AiCurationWorker do
       {:curation_failed, ref, basename, reason}
     )
   end
+
+  defp parse_captured_at(nil), do: nil
+  defp parse_captured_at(str) when is_binary(str) do
+    case NaiveDateTime.from_iso8601(str) do
+      {:ok, ndt} -> ndt
+      _ -> nil
+    end
+  end
+  defp parse_captured_at(_), do: nil
 end

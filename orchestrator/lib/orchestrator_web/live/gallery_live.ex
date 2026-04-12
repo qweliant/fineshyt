@@ -70,6 +70,7 @@ defmodule OrchestratorWeb.GalleryLive do
       |> assign(:tag_profile, Photos.tag_affinity_profile())
       |> assign(:selected, MapSet.new())
       |> assign(:bulk_project, "")
+      |> assign(:burst_groups, [])
       |> load_photos()
 
     {:ok, socket}
@@ -180,9 +181,20 @@ defmodule OrchestratorWeb.GalleryLive do
       "failed"       -> :failed
       "rejected"     -> :rejected
       "for_projects" -> :for_projects
+      "bursts"       -> :bursts
       _              -> :all
     end
-    {:noreply, socket |> assign(:selected, MapSet.new()) |> reload(filter: atom)}
+
+    socket = socket |> assign(:selected, MapSet.new())
+
+    socket =
+      if atom == :bursts do
+        assign(socket, :burst_groups, Photos.list_burst_groups())
+      else
+        socket
+      end
+
+    {:noreply, reload(socket, filter: atom)}
   end
 
   @impl Phoenix.LiveView
@@ -415,6 +427,58 @@ defmodule OrchestratorWeb.GalleryLive do
     end
   end
 
+  # ── burst detection ───────────────────────────────────────────────────────
+
+  @impl Phoenix.LiveView
+  def handle_event("detect_bursts", _params, socket) do
+    Orchestrator.Workers.BurstDetectionWorker.new(%{})
+    |> Oban.insert()
+
+    {:noreply, put_flash(socket, :info, "Burst detection started — this takes a few seconds.")}
+  end
+
+  @impl Phoenix.LiveView
+  def handle_event("keep_best", %{"group" => group_str}, socket) do
+    group_id = String.to_integer(group_str)
+    burst_groups = socket.assigns.burst_groups
+
+    case List.keyfind(burst_groups, group_id, 0) do
+      {^group_id, [_best | rest]} when rest != [] ->
+        reject_ids = Enum.map(rest, & &1.id)
+        {:ok, n} = Photos.bulk_reject(reject_ids)
+
+        {:noreply,
+         socket
+         |> assign(:burst_groups, Photos.list_burst_groups())
+         |> put_flash(:info, "Kept sharpest, rejected #{n} duplicate#{if n == 1, do: "", else: "s"}.")
+         |> load_photos()}
+
+      _ ->
+        {:noreply, socket}
+    end
+  end
+
+  @impl Phoenix.LiveView
+  def handle_event("keep_best_all", _params, socket) do
+    burst_groups = socket.assigns.burst_groups
+    reject_ids =
+      Enum.flat_map(burst_groups, fn {_gid, [_best | rest]} ->
+        Enum.map(rest, & &1.id)
+      end)
+
+    if reject_ids == [] do
+      {:noreply, socket}
+    else
+      {:ok, n} = Photos.bulk_reject(reject_ids)
+
+      {:noreply,
+       socket
+       |> assign(:burst_groups, Photos.list_burst_groups())
+       |> put_flash(:info, "Kept sharpest per burst, rejected #{n} duplicate#{if n == 1, do: "", else: "s"}.")
+       |> load_photos()}
+    end
+  end
+
   # ── pubsub ────────────────────────────────────────────────────────────────
 
   @doc """
@@ -443,6 +507,20 @@ defmodule OrchestratorWeb.GalleryLive do
 
   def handle_info({:preference_scores_updated, _version}, socket) do
     {:noreply, load_photos(socket)}
+  end
+
+  def handle_info({:burst_detection_complete, n_groups}, socket) do
+    socket =
+      if socket.assigns.filter == :bursts do
+        assign(socket, :burst_groups, Photos.list_burst_groups())
+      else
+        socket
+      end
+
+    {:noreply,
+     socket
+     |> put_flash(:info, "Detected #{n_groups} burst group#{if n_groups == 1, do: "", else: "s"}.")
+     |> load_photos()}
   end
 
   def handle_info({:curation_failed, _ref, _basename, _reason}, socket) do
@@ -534,6 +612,7 @@ defmodule OrchestratorWeb.GalleryLive do
           {"For Projects", :for_projects},
           {"Match ✓", :match}, {"No Match ✗", :no_match},
           {"Rated", :rated}, {"Unrated", :unrated},
+          {"Bursts", :bursts},
           {"Rejected", :rejected}, {"Failed", :failed}
         ] do %>
           <button
@@ -581,6 +660,71 @@ defmodule OrchestratorWeb.GalleryLive do
           >
             Retry All
           </button>
+        </div>
+      <% end %>
+
+      <%!-- Burst view --%>
+      <%= if @filter == :bursts do %>
+        <div class="mb-6 p-4 border border-purple-200 bg-purple-50/30">
+          <div class="flex items-center gap-4 mb-4">
+            <p class="font-sans text-xs text-purple-700 flex-1">
+              <%= if @burst_groups == [] do %>
+                No burst groups detected yet. Click <span class="font-bold">Detect Bursts</span> to scan for visually similar photo sequences.
+              <% else %>
+                <%= length(@burst_groups) %> burst group<%= if length(@burst_groups) != 1, do: "s" %> found.
+                The sharpest frame in each group is shown first.
+              <% end %>
+            </p>
+            <button
+              phx-click="detect_bursts"
+              class="font-sans text-[10px] uppercase tracking-widest text-purple-700 border border-purple-300 px-3 py-1.5 hover:border-purple-600 transition-colors shrink-0"
+            >
+              Detect Bursts
+            </button>
+            <%= if @burst_groups != [] do %>
+              <button
+                phx-click="keep_best_all"
+                data-confirm={"Keep sharpest in all #{length(@burst_groups)} groups, reject the rest?"}
+                class="font-sans text-[10px] uppercase tracking-widest text-[#111111] border border-[#111111] px-3 py-1.5 hover:bg-[#111111] hover:text-[#fcfbf9] transition-colors shrink-0"
+              >
+                Keep Best All
+              </button>
+            <% end %>
+          </div>
+
+          <%= for {group_id, photos} <- @burst_groups do %>
+            <% [best | rest] = photos %>
+            <div class="mb-6 border border-gray-200 bg-white/70 p-3">
+              <div class="flex items-center justify-between mb-2">
+                <span class="font-sans text-[10px] uppercase tracking-widest text-gray-500">
+                  Burst #<%= group_id %> · <%= length(photos) %> photos
+                </span>
+                <button
+                  phx-click="keep_best"
+                  phx-value-group={group_id}
+                  data-confirm={"Keep the sharpest and reject #{length(rest)} other#{if length(rest) == 1, do: "", else: "s"}?"}
+                  class="font-sans text-[10px] uppercase tracking-widest text-purple-700 border border-purple-300 px-2 py-1 hover:border-purple-600 transition-colors"
+                >
+                  Keep Best
+                </button>
+              </div>
+              <div class="flex gap-2 overflow-x-auto">
+                <%= for photo <- photos do %>
+                  <div class={[
+                    "relative shrink-0 w-32 h-32 border-2",
+                    photo.id == best.id && "border-emerald-500",
+                    photo.id != best.id && "border-gray-200 opacity-60"
+                  ]}>
+                    <img src={photo.url} class="w-full h-full object-cover" loading="lazy" />
+                    <div class="absolute bottom-0 left-0 right-0 bg-black/60 text-white font-sans text-[9px] px-1 py-0.5 text-center">
+                      sharp <%= photo.sharpness_score || "?" %>
+                      <%= if photo.id == best.id, do: " ★", else: "" %>
+                    </div>
+                  </div>
+                <% end %>
+              </div>
+            </div>
+          <% end %>
         </div>
       <% end %>
 
@@ -657,6 +801,7 @@ defmodule OrchestratorWeb.GalleryLive do
         </div>
       <% end %>
 
+      <%= if @filter != :bursts do %>
       <%!-- Keyboard hint --%>
       <p class="mb-4 font-sans text-[9px] uppercase tracking-widest text-gray-300">
         Click a photo, then: <span class="text-gray-400">1–5</span> rate · <span class="text-gray-400">p</span> pick · <span class="text-gray-400">x</span> reject · <span class="text-gray-400">m</span> select · or use <.link navigate={~p"/review"} class="text-gray-500 underline">Review</.link> for single-image culling
@@ -947,6 +1092,7 @@ defmodule OrchestratorWeb.GalleryLive do
           </div>
         <% end %>
       <% end %>
+      <% end %><%!-- /if @filter != :bursts --%>
 
     </div>
     """

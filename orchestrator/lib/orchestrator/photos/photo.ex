@@ -7,8 +7,7 @@ defmodule Orchestrator.Photos.Photo do
     * **Source / location**
       * `file_path` — absolute path on disk (required)
       * `url` — web-servable path under `/uploads/...`
-      * `source` — `"local"` or `"instagram"`
-      * `instagram_shortcode` — unique IG shortcode when applicable
+      * `source` — `"local"`
 
     * **Style verdict** (set by the AI worker)
       * `style_match` — boolean: does this photo match the photographer's style?
@@ -58,7 +57,6 @@ defmodule Orchestrator.Photos.Photo do
     field :file_path, :string
     field :url, :string
     field :source, :string
-    field :instagram_shortcode, :string
 
     field :style_match, :boolean
     field :style_score, :integer
@@ -79,6 +77,8 @@ defmodule Orchestrator.Photos.Photo do
     field :suggested_tags, {:array, :string}, default: []
     field :user_rating, :integer
     field :project, :string
+    field :captured_at, :naive_datetime
+    field :burst_group, :integer
     field :curation_status, :string, default: "complete"
     field :failure_reason, :string
 
@@ -89,8 +89,7 @@ defmodule Orchestrator.Photos.Photo do
   Build a changeset for inserts and updates.
 
   Casts every user-and-AI-writable field, validates that `user_rating` (when
-  present) sits in 1..5, requires `file_path`, and enforces uniqueness on
-  `instagram_shortcode` so re-ingesting the same IG post is a no-op.
+  present) sits in 1..5, and requires `file_path`.
 
   ## Parameters
 
@@ -110,15 +109,14 @@ defmodule Orchestrator.Photos.Photo do
   def changeset(photo, attrs) do
     photo
     |> cast(attrs, [
-      :file_path, :url, :source, :instagram_shortcode,
+      :file_path, :url, :source,
       :style_match, :style_score, :style_reason,
       :technical_score, :sharpness_score, :exposure_score,
       :clip_embedding, :preference_score, :preference_model_version,
       :subject, :artistic_mood, :lighting_critique, :content_type, :suggested_tags,
-      :user_rating, :project, :curation_status, :failure_reason
+      :user_rating, :project, :captured_at, :burst_group, :curation_status, :failure_reason
     ])
     |> validate_inclusion(:user_rating, 1..5, message: "must be between 1 and 5")
     |> validate_required([:file_path])
-    |> unique_constraint(:instagram_shortcode)
   end
 end

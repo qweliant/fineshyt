@@ -20,7 +20,7 @@ defmodule Orchestrator.Photos do
 
     * **Ingest / lookup** — `create_photo/1`, `create_pending/3`,
       `create_failed/1`, `delete_failed_if_exists/1`, `retry_failed/1`,
-      `mark_curation_status/2`, `already_processed?/1`, `shortcode_exists?/1`,
+      `mark_curation_status/2`, `already_processed?/1`,
       `existing_stems/1`, `existing_basenames/1`, `get_photo!/1`
     * **Listing / pagination** — `list_photos/1`, `count_photos/1`,
       `page_size/0`, `list_projects/0`, `list_projects_with_covers/0`,
@@ -53,8 +53,7 @@ defmodule Orchestrator.Photos do
   ## Returns
 
     * `{:ok, %Photo{}}` on success.
-    * `{:error, %Ecto.Changeset{}}` on validation or constraint failure
-      (e.g. duplicate `instagram_shortcode`).
+    * `{:error, %Ecto.Changeset{}}` on validation or constraint failure.
 
   ## Examples
 
@@ -231,31 +230,6 @@ defmodule Orchestrator.Photos do
     Repo.all(from p in Photo, where: p.style_match == true, order_by: [desc: p.inserted_at])
   end
 
-  @doc """
-  Check whether an Instagram shortcode is already in the DB.
-
-  Cheap existence query — used by the IG ingest path to skip re-downloading
-  posts. The non-binary clause returns `false` so callers can pass `nil`
-  without guarding.
-
-  ## Parameters
-
-    * `shortcode` — IG shortcode string, or anything else (returns `false`).
-
-  ## Returns
-
-    * `boolean()`
-
-  ## Examples
-
-      iex> Orchestrator.Photos.shortcode_exists?(nil)
-      false
-  """
-  def shortcode_exists?(shortcode) when is_binary(shortcode) do
-    Repo.exists?(from p in Photo, where: p.instagram_shortcode == ^shortcode)
-  end
-
-  def shortcode_exists?(_), do: false
 
   @doc """
   Return the subset of given filename stems that already exist in the DB.
@@ -504,6 +478,102 @@ defmodule Orchestrator.Photos do
         select: p.id,
         order_by: [asc: p.id]
     )
+  end
+
+  @doc """
+  Return `{id, file_path}` for every "complete" photo missing quality scores.
+  Used by the quality backfill task.
+  """
+  def list_photos_needing_quality_scores do
+    Repo.all(
+      from p in Photo,
+        where:
+          is_nil(p.technical_score) and p.curation_status == "complete",
+        select: {p.id, p.file_path},
+        order_by: [asc: p.id]
+    )
+  end
+
+  @doc """
+  Return `{id, file_path}` for every "complete" photo that still has
+  `captured_at IS NULL`. Used by the EXIF backfill task.
+  """
+  def list_photos_needing_captured_at do
+    Repo.all(
+      from p in Photo,
+        where: is_nil(p.captured_at) and p.curation_status == "complete",
+        select: {p.id, p.file_path},
+        order_by: [asc: p.id]
+    )
+  end
+
+  # ── Burst detection ────────────────────────────────────────────────────────
+
+  @doc """
+  Return every "complete" photo that has a CLIP embedding, suitable for
+  burst detection. Result shape matches the Python worker's expected input.
+
+  ## Returns
+
+    * `[{id, clip_embedding, sharpness_score, captured_at}]`
+  """
+  def list_photos_for_burst_detection do
+    Repo.all(
+      from p in Photo,
+        where: not is_nil(p.clip_embedding) and p.curation_status == "complete",
+        select: {p.id, p.clip_embedding, p.sharpness_score, p.captured_at}
+    )
+  end
+
+  @doc """
+  Write burst group assignments to the photos table.
+
+  Clears old groups first (sets all `burst_group` to NULL) then writes the
+  new assignments. Each entry in `assignments` is `{photo_id, group_id}`.
+
+  ## Parameters
+
+    * `assignments` — list of `{photo_id, group_id}` tuples.
+
+  ## Returns
+
+    * `:ok`
+  """
+  def assign_burst_groups(assignments) when is_list(assignments) do
+    Repo.transaction(fn ->
+      # Clear previous burst assignments
+      from(p in Photo, where: not is_nil(p.burst_group))
+      |> Repo.update_all(set: [burst_group: nil])
+
+      Enum.each(assignments, fn {id, group_id} ->
+        from(p in Photo, where: p.id == ^id)
+        |> Repo.update_all(set: [burst_group: group_id])
+      end)
+    end)
+
+    :ok
+  end
+
+  @doc """
+  Return burst groups for the gallery — each group is a list of photos,
+  ordered so the sharpest frame comes first.
+
+  ## Returns
+
+    * `[{group_id, [%Photo{}, ...]}]` — list of `{group_id, photos}` tuples,
+      sorted by group_id. Within each group, photos are ordered by
+      `sharpness_score DESC`.
+  """
+  def list_burst_groups do
+    photos =
+      Repo.all(
+        from p in Photo,
+          where: not is_nil(p.burst_group) and p.curation_status == "complete",
+          order_by: [asc: p.burst_group, desc: p.sharpness_score]
+      )
+
+    Enum.group_by(photos, & &1.burst_group)
+    |> Enum.sort_by(fn {group_id, _} -> group_id end)
   end
 
   @doc """
@@ -852,7 +922,7 @@ defmodule Orchestrator.Photos do
 
     * `file_path` — absolute path on disk.
     * `basename` — basename used to build the public `/uploads/...` URL.
-    * `source` — `"local"` or `"instagram"`.
+    * `source` — `"local"`.
 
   ## Returns
 

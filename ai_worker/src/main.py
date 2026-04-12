@@ -138,6 +138,7 @@ class ConvertResponse(BaseModel):
     technical_score: int
     sharpness_score: int
     exposure_score: int
+    captured_at: str | None = None
 
 
 
@@ -345,6 +346,35 @@ def _open_as_pil(path: Path) -> Image.Image:
         return Image.open(path).convert("RGB")
 
 
+def _extract_captured_at(path: Path) -> str | None:
+    """Read EXIF DateTimeOriginal from an image file, return ISO-8601 or None.
+
+    Must be called on the *source* file before conversion strips EXIF.
+    Handles both Pillow-native formats and RAW files (rawpy exposes EXIF
+    on the postprocessed image via Pillow's getexif). Returns None silently
+    on any failure — missing EXIF is common and never fatal.
+    """
+    try:
+        ext = path.suffix.lower()
+        if ext in _RAW_EXTS:
+            if not _RAWPY_AVAILABLE:
+                return None
+            # rawpy doesn't expose EXIF directly; open with Pillow in non-RGB
+            # mode just for metadata when possible, fall back to None.
+            return None
+        img = Image.open(path)
+        exif = img.getexif()
+        # Tag 36867 = DateTimeOriginal, tag 306 = DateTime (fallback)
+        raw_dt = exif.get(36867) or exif.get(306)
+        if not raw_dt or not isinstance(raw_dt, str):
+            return None
+        # EXIF format: "YYYY:MM:DD HH:MM:SS" → ISO-8601
+        dt = datetime.strptime(raw_dt.strip(), "%Y:%m:%d %H:%M:%S")
+        return dt.isoformat()
+    except Exception:
+        return None
+
+
 def _resize_to_long_edge(img: Image.Image, long_edge: int) -> Image.Image:
     """Resize ``img`` so its longer edge equals ``long_edge``, preserving aspect ratio."""
     w, h = img.size
@@ -457,6 +487,8 @@ def convert_file(request: ConvertRequest):
         raise HTTPException(status_code=404, detail=f"File not found: {request.file_path}")
 
     try:
+        # Extract EXIF capture time from the *source* before conversion strips it.
+        captured_at = _extract_captured_at(path)
         img = _open_as_pil(path)
         # Score on the full-resolution image — the 1440 JPEG has already lost
         # the high-frequency detail that sharpness/clipping measurements rely on.
@@ -471,11 +503,73 @@ def convert_file(request: ConvertRequest):
             technical_score=scores["overall"],
             sharpness_score=scores["sharpness"],
             exposure_score=scores["exposure"],
+            captured_at=captured_at,
         )
     except Exception as e:
         raise HTTPException(
             status_code=500,
             detail=_error_detail("convert", e, file_path=str(path)),
+        )
+
+
+class ExifRequest(BaseModel):
+    file_path: str
+
+
+class ExifResponse(BaseModel):
+    captured_at: str | None = None
+
+
+@app.post("/api/v1/exif", response_model=ExifResponse, tags=["Ingestion"])
+def read_exif(request: ExifRequest):
+    """Read EXIF DateTimeOriginal from a source file.
+
+    Used by the EXIF backfill task to populate ``captured_at`` for photos
+    that were converted before EXIF extraction was added. Pass the path to
+    the *original* source file (RAW/TIFF/JPEG on the external drive), not
+    the converted JPEG in uploads.
+    """
+    path = Path(request.file_path)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail=f"File not found: {request.file_path}")
+    return ExifResponse(captured_at=_extract_captured_at(path))
+
+
+class QualityScoresRequest(BaseModel):
+    file_path: str
+
+
+class QualityScoresResponse(BaseModel):
+    technical_score: int
+    sharpness_score: int
+    exposure_score: int
+
+
+@app.post("/api/v1/quality_scores", response_model=QualityScoresResponse, tags=["Ingestion"])
+def quality_scores(request: QualityScoresRequest):
+    """Compute sharpness, exposure, and overall technical scores for a source file.
+
+    Used by the quality backfill task to score photos that were converted
+    before quality scoring was added. Pass the *original* source file for
+    best accuracy — the full-resolution image has more high-frequency detail
+    for sharpness measurement. Falls back to the converted JPEG if that's
+    all that's available (scores will be slightly less accurate).
+    """
+    path = Path(request.file_path)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail=f"File not found: {request.file_path}")
+    try:
+        img = _open_as_pil(path)
+        scores = _compute_quality_scores(img)
+        return QualityScoresResponse(
+            technical_score=scores["overall"],
+            sharpness_score=scores["sharpness"],
+            exposure_score=scores["exposure"],
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=_error_detail("quality_scores", e, file_path=request.file_path),
         )
 
 
@@ -749,4 +843,142 @@ def score_preference(request: PreferenceScoreRequest):
         raise HTTPException(
             status_code=500,
             detail=_error_detail("preference_score", e, n_embeddings=len(request.embeddings)),
+        )
+
+
+# ─── Burst / sequence detection ─────────────────────────────────────────────
+#
+# Detects groups of visually near-identical photos (burst sequences, slight
+# reframes, exposure brackets) by thresholding cosine similarity of their
+# CLIP embeddings. Within each group the sharpest frame is the "best pick."
+# No EXIF needed — the embeddings are L2-normalized so dot product = cosine.
+
+
+class BurstPhotoInput(BaseModel):
+    id: int
+    embedding: list[float]
+    sharpness_score: int = 0
+    captured_at: str | None = None
+
+
+class BurstDetectRequest(BaseModel):
+    photos: list[BurstPhotoInput]
+    similarity_threshold: float = Field(default=0.95, ge=0.8, le=1.0)
+    max_time_gap_seconds: float = Field(default=5.0, ge=0.0, le=300.0)
+
+
+class BurstGroup(BaseModel):
+    group_id: int
+    photo_ids: list[int]
+    best_pick_id: int
+    best_pick_sharpness: int
+    size: int
+
+
+class BurstDetectResponse(BaseModel):
+    groups: list[BurstGroup]
+    n_singletons: int
+
+
+@app.post("/api/v1/detect_bursts", response_model=BurstDetectResponse, tags=["Burst"])
+def detect_bursts(request: BurstDetectRequest):
+    """Detect burst sequences via CLIP embedding cosine similarity + temporal proximity.
+
+    Takes a list of ``{id, embedding, sharpness_score, captured_at}`` for all
+    candidate photos. Two photos are in the same burst only if they are both
+    visually similar (cosine ≥ ``similarity_threshold``) **and** temporally
+    close (within ``max_time_gap_seconds``). When either photo lacks a
+    ``captured_at`` timestamp, the temporal constraint is skipped for that
+    pair so legacy photos without EXIF still cluster by visual similarity alone.
+
+    Complexity: O(n^2) dot products via numpy BLAS, plus O(n) connected
+    components via scipy. For 14k photos (~768-dim) this takes ~2-3s.
+    """
+    if len(request.photos) < 2:
+        return BurstDetectResponse(groups=[], n_singletons=len(request.photos))
+
+    try:
+        from datetime import datetime
+        from scipy.sparse import csr_matrix
+        from scipy.sparse.csgraph import connected_components
+
+        ids = [p.id for p in request.photos]
+        sharpness = {p.id: p.sharpness_score for p in request.photos}
+        X = np.asarray([p.embedding for p in request.photos], dtype=np.float32)
+
+        # Parse timestamps — None for photos without EXIF data.
+        timestamps: list[datetime | None] = []
+        for p in request.photos:
+            if p.captured_at:
+                try:
+                    timestamps.append(datetime.fromisoformat(p.captured_at))
+                except ValueError:
+                    timestamps.append(None)
+            else:
+                timestamps.append(None)
+
+        # Cosine similarity matrix (X is already L2-normalized from _embed_image).
+        S = X @ X.T
+
+        # Zero the diagonal so a photo doesn't form a self-loop.
+        np.fill_diagonal(S, 0.0)
+
+        # Visual similarity mask.
+        visual_adj = S >= request.similarity_threshold
+
+        # Temporal proximity mask: True when both photos have timestamps and
+        # are within max_time_gap_seconds, OR when either photo lacks a
+        # timestamp (fall back to visual-only for those pairs).
+        n = len(request.photos)
+        temporal_adj = np.ones((n, n), dtype=bool)
+        max_gap = request.max_time_gap_seconds
+        for i in range(n):
+            if timestamps[i] is None:
+                continue
+            for j in range(i + 1, n):
+                if timestamps[j] is None:
+                    continue
+                gap = abs((timestamps[i] - timestamps[j]).total_seconds())
+                if gap > max_gap:
+                    temporal_adj[i, j] = False
+                    temporal_adj[j, i] = False
+
+        # Both conditions must hold for an edge.
+        adj = csr_matrix(visual_adj & temporal_adj)
+        n_components, labels = connected_components(adj, directed=False)
+
+        # Group by component label. Only keep groups with size > 1.
+        from collections import defaultdict
+        groups_map: dict[int, list[int]] = defaultdict(list)
+        for idx, label in enumerate(labels):
+            groups_map[int(label)].append(ids[idx])
+
+        burst_groups = []
+        group_id = 0
+        for _label, member_ids in sorted(groups_map.items()):
+            if len(member_ids) < 2:
+                continue
+            best_id = max(member_ids, key=lambda pid: sharpness.get(pid, 0))
+            burst_groups.append(BurstGroup(
+                group_id=group_id,
+                photo_ids=member_ids,
+                best_pick_id=best_id,
+                best_pick_sharpness=sharpness.get(best_id, 0),
+                size=len(member_ids),
+            ))
+            group_id += 1
+
+        n_singletons = sum(1 for member_ids in groups_map.values() if len(member_ids) == 1)
+
+        logger.info(
+            "Burst detection: %d photos → %d bursts (%d photos in bursts), %d singletons",
+            len(request.photos), len(burst_groups),
+            sum(g.size for g in burst_groups), n_singletons,
+        )
+        return BurstDetectResponse(groups=burst_groups, n_singletons=n_singletons)
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=_error_detail("detect_bursts", e, n_photos=len(request.photos)),
         )

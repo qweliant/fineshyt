@@ -99,7 +99,7 @@ make dev
 
 Features that would complement what's already here. Each needs research before implementation.
 
-**CLIP embeddings + pgvector search** — The current gallery search is substring matching on subject and mood. CLIP embeddings would unlock natural language retrieval: "find moody portraits with side lighting," "photos like this one but sharper," "find the selects I'd probably post." pgvector plugs into the existing Postgres instance — no new infrastructure. CLIP inference runs in the ai_worker alongside the existing vision LLM calls.
+~~**CLIP embeddings + pgvector search** — The current gallery search is substring matching on subject and mood. CLIP embeddings would unlock natural language retrieval: "find moody portraits with side lighting," "photos like this one but sharper," "find the selects I'd probably post." pgvector plugs into the existing Postgres instance — no new infrastructure. CLIP inference runs in the ai_worker alongside the existing vision LLM calls.~~
 
 ~~**Technical quality scoring** — `style_score` measures aesthetic fit against your description. It says nothing about whether the photo is technically sound. Heuristic scoring for sharpness, exposure, noise, and motion blur using Pillow and numpy (both already in the worker's deps) would give a separate axis for culling. A sharp but off-brand photo and a perfectly-on-brand but blurry photo shouldn't score the same.~~
 
@@ -107,7 +107,7 @@ Features that would complement what's already here. Each needs research before i
 
 **Preference learning / feedback loop** — User ratings (1–5 stars) exist but are write-only. They don't feed back into how future photos get scored. A reranker trained on your rating history would let `style_score` drift toward your actual taste over time instead of relying solely on the text description. This is the "gets smarter as you use it" piece.
 
-**Burst / sequence best-pick** — Use EXIF timestamps and visual similarity to detect burst sequences, then auto-pick the sharpest frame. Lower priority if you mostly shoot deliberate single frames, high priority for event or action shoots.
+~~****Burst / sequence best-pick** — Use EXIF timestamps and visual similarity to detect burst sequences, then auto-pick the sharpest frame. Lower priority if you mostly shoot deliberate single frames, high priority for event or action shoots.~~
 
 ## Author
 

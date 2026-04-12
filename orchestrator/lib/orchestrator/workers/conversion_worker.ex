@@ -73,7 +73,8 @@ defmodule Orchestrator.Workers.ConversionWorker do
           "project" => project,
           "technical_score" => body["technical_score"],
           "sharpness_score" => body["sharpness_score"],
-          "exposure_score" => body["exposure_score"]
+          "exposure_score" => body["exposure_score"],
+          "captured_at" => body["captured_at"]
         }
         |> Orchestrator.Workers.AiCurationWorker.new()
         |> Oban.insert()
