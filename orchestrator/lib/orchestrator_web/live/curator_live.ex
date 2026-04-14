@@ -6,10 +6,6 @@ defmodule OrchestratorWeb.CuratorLive do
   alias Orchestrator.Repo
   alias Orchestrator.Workers.LocalBatchImportWorker
 
-  @default_style """
-  Photos that lack an obvious sense of place. High grain. Soft focus or motion blur acceptable and often preferable to technical sharpness. B&W or heavily desaturated. Subject ambiguous or secondary to atmosphere. Mood: solitary, searching, still. Framing within frames (windows, doorways, reflections) a recurring pattern. No immediate meaning — meaning deferred.\
-  """
-
   @impl Phoenix.LiveView
   def mount(_params, _session, socket) do
     if connected?(socket), do: Phoenix.PubSub.subscribe(Orchestrator.PubSub, "photo_updates")
@@ -32,8 +28,7 @@ defmodule OrchestratorWeb.CuratorLive do
         select: %{
           filename: fragment("regexp_replace(?, '^.*/', '')", p.file_path),
           subject: p.subject,
-          score: p.style_score,
-          match: p.style_match
+          content_type: p.content_type
         }
     )
 
@@ -41,8 +36,7 @@ defmodule OrchestratorWeb.CuratorLive do
       %{
         filename: r.filename || "",
         subject: r.subject || "—",
-        score: r.score || 0,
-        match: r.match || false
+        content_type: r.content_type || "—"
       }
     end)
 
@@ -50,7 +44,6 @@ defmodule OrchestratorWeb.CuratorLive do
       socket
       |> assign(:status, if(pending > 0, do: :ingesting, else: :idle))
       |> assign(:dir_path, "")
-      |> assign(:style_description, @default_style)
       |> assign(:sample, 50)
       |> assign(:project, "")
       |> assign(:import_queued, pending)
@@ -78,7 +71,6 @@ defmodule OrchestratorWeb.CuratorLive do
   @impl Phoenix.LiveView
   def handle_event("ingest", params, socket) do
     dir_path = params |> Map.get("dir_path", "") |> String.trim()
-    style = Map.get(params, "style_description", @default_style)
     project = params |> Map.get("project", "") |> String.trim()
     sample = case Integer.parse(Map.get(params, "sample", "50")) do
       {n, _} when n > 0 -> n
@@ -86,7 +78,7 @@ defmodule OrchestratorWeb.CuratorLive do
     end
 
     if dir_path != "" do
-      %{"dir_path" => dir_path, "style_description" => style, "sample" => sample, "project" => project}
+      %{"dir_path" => dir_path, "sample" => sample, "project" => project}
       |> LocalBatchImportWorker.new()
       |> Oban.insert()
     end
@@ -101,14 +93,6 @@ defmodule OrchestratorWeb.CuratorLive do
       import_failed_count: 0,
       activity_log: []
     )}
-  end
-
-  @impl Phoenix.LiveView
-  def handle_event("suggest_refinement", _params, socket) do
-    case Orchestrator.Photos.suggest_style_refinement(socket.assigns.style_description) do
-      nil -> {:noreply, put_flash(socket, :info, "Rate at least 5 photos first to generate a refinement.")}
-      suggestion -> {:noreply, assign(socket, style_description: suggestion)}
-    end
   end
 
   @impl Phoenix.LiveView
@@ -137,8 +121,7 @@ defmodule OrchestratorWeb.CuratorLive do
     entry = %{
       filename: basename,
       subject: metadata["subject"] || "—",
-      score: metadata["style_score"] || 0,
-      match: metadata["style_match"] || false
+      content_type: metadata["content_type"] || "—"
     }
     log = [entry | socket.assigns.activity_log] |> Enum.take(100)
     processed = socket.assigns.import_processed + 1
@@ -158,8 +141,7 @@ defmodule OrchestratorWeb.CuratorLive do
     entry = %{
       filename: basename || "unknown",
       subject: reason || "curation failed",
-      score: 0,
-      match: false,
+      content_type: "—",
       status: :failed
     }
     log = [entry | socket.assigns.activity_log] |> Enum.take(100)
@@ -276,55 +258,34 @@ defmodule OrchestratorWeb.CuratorLive do
           </div>
 
           <%!-- Secondary controls --%>
-          <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-            <div class="md:col-span-2">
-              <div class="flex items-center justify-between mb-3">
-                <label class="font-sans text-[10px] uppercase tracking-[0.35em] text-gray-400">
-                  Style Description
-                </label>
-                <button
-                  type="button"
-                  phx-click="suggest_refinement"
-                  class="font-sans text-[9px] uppercase tracking-widest text-gray-400 border border-gray-200 px-2 py-1 hover:border-gray-500 hover:text-gray-700 transition-colors"
-                >
-                  ← Refine from ratings
-                </button>
-              </div>
-              <textarea
-                name="style_description"
-                rows="4"
-                class="w-full border border-gray-300 focus:border-[#111111] px-4 py-3 font-sans text-xs text-gray-600 focus:outline-none resize-none transition-colors leading-relaxed bg-transparent"
-              ><%= @style_description %></textarea>
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+            <div>
+              <label class="font-sans text-[10px] uppercase tracking-[0.35em] text-gray-400 block mb-3">
+                Project
+              </label>
+              <input
+                type="text"
+                name="project"
+                value={@project}
+                placeholder="e.g. 2024-film-roll-01"
+                class="w-full border border-gray-300 focus:border-[#111111] px-4 py-3 font-mono text-xs text-gray-700 focus:outline-none transition-colors bg-transparent placeholder-gray-300"
+              />
             </div>
-            <div class="flex flex-col gap-4">
-              <div>
-                <label class="font-sans text-[10px] uppercase tracking-[0.35em] text-gray-400 block mb-3">
-                  Project
-                </label>
-                <input
-                  type="text"
-                  name="project"
-                  value={@project}
-                  placeholder="e.g. 2024-film-roll-01"
-                  class="w-full border border-gray-300 focus:border-[#111111] px-4 py-3 font-mono text-xs text-gray-700 focus:outline-none transition-colors bg-transparent placeholder-gray-300"
-                />
-              </div>
-              <div>
-                <label class="font-sans text-[10px] uppercase tracking-[0.35em] text-gray-400 block mb-3">
-                  Sample Size
-                </label>
-                <input
-                  type="number"
-                  name="sample"
-                  value={@sample}
-                  min="1"
-                  max="500"
-                  class="w-full border border-gray-300 focus:border-[#111111] px-4 py-4 font-sans text-sm text-gray-700 focus:outline-none transition-colors bg-transparent"
-                />
-                <p class="mt-2 font-sans text-[9px] text-gray-400 leading-relaxed">
-                  Random sample from the directory. Larger sets take longer.
-                </p>
-              </div>
+            <div>
+              <label class="font-sans text-[10px] uppercase tracking-[0.35em] text-gray-400 block mb-3">
+                Sample Size
+              </label>
+              <input
+                type="number"
+                name="sample"
+                value={@sample}
+                min="1"
+                max="500"
+                class="w-full border border-gray-300 focus:border-[#111111] px-4 py-3 font-sans text-sm text-gray-700 focus:outline-none transition-colors bg-transparent"
+              />
+              <p class="mt-2 font-sans text-[9px] text-gray-400 leading-relaxed">
+                Random sample from the directory. Larger sets take longer.
+              </p>
             </div>
           </div>
 
@@ -390,21 +351,11 @@ defmodule OrchestratorWeb.CuratorLive do
                   </div>
                 <% else %>
                   <div class="flex items-center gap-3 px-4 py-2 font-mono text-xs">
-                    <span class={["w-3 shrink-0", entry.match && "text-[#111111]", !entry.match && "text-gray-300"]}>
-                      <%= if entry.match, do: "✓", else: "—" %>
-                    </span>
+                    <span class="w-3 shrink-0 text-gray-300">·</span>
                     <span class="w-52 shrink-0 text-gray-400 truncate"><%= entry.filename %></span>
                     <span class="flex-1 text-gray-500 truncate italic"><%= entry.subject %></span>
-                    <%
-                      score = entry.score
-                      score_class = cond do
-                        score >= 80 -> "text-[#111111] font-bold"
-                        score >= 50 -> "text-gray-600"
-                        true        -> "text-gray-300"
-                      end
-                    %>
-                    <span class={["shrink-0 tabular-nums w-8 text-right", score_class]}>
-                      <%= score %>
+                    <span class="shrink-0 font-sans text-[9px] uppercase tracking-wider text-gray-400">
+                      <%= entry.content_type %>
                     </span>
                   </div>
                 <% end %>

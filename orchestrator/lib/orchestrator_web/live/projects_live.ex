@@ -166,14 +166,14 @@ defmodule OrchestratorWeb.ProjectsLive do
 
                   <%!-- Badges --%>
                   <div class="absolute top-2 right-2 flex flex-col items-end gap-1">
-                    <%= if photo.style_score != nil do %>
+                    <%= if photo.preference_score != nil do %>
                       <div class={[
                         "font-sans text-[9px] uppercase tracking-wider px-2 py-0.5 border font-bold",
-                        photo.style_score >= 80 && "bg-emerald-900/80 text-emerald-300 border-emerald-700",
-                        photo.style_score >= 50 && photo.style_score < 80 && "bg-yellow-900/80 text-yellow-300 border-yellow-700",
-                        photo.style_score < 50 && "bg-red-900/80 text-red-300 border-red-700"
+                        photo.preference_score >= 75 && "bg-fuchsia-900/80 text-fuchsia-200 border-fuchsia-700",
+                        photo.preference_score >= 50 && photo.preference_score < 75 && "bg-purple-900/80 text-purple-200 border-purple-700",
+                        photo.preference_score < 50 && "bg-gray-800/80 text-gray-300 border-gray-600"
                       ]}>
-                        <%= photo.style_score %>
+                        <%= photo.preference_score %>
                       </div>
                     <% end %>
                     <%= if photo.user_rating do %>

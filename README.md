@@ -6,13 +6,23 @@ This project is my answer to that question. I described my own aesthetic to an A
 
 It's also an excuse to get back into ML. The last time I did anything in this space was [deploying a transformer model in 2021](https://qwelian.com/posts/Deploying_Transformer_Models). Which like in AI years, is basically the Jurassic period. A lot has changed. Vision models that can actually reason about composition and aesthetic? That's new and worth playing with.
 
+![Architecture](architecture.svg)
+
+## How this changed
+
+The first version of this project asked a vision LLM (LLaVA, via Ollama) to decide whether each photo "matched my style." You wrote a prose description of your aesthetic, the model compared the photo to it, and spat out a match/no-match verdict plus a style_score.
+
+That worked — sort of. But text prompts are a lossy way to describe a visual style, and LLaVA's read of "moody black-and-white macro" drifted from my read of it. My star ratings didn't feed back into the system; the model's verdict and my verdict lived on parallel tracks.
+
+So the architecture flipped. The vision LLM now does objective metadata only. Every photo gets a CLIP embedding, and a Ridge regression linear probe is trained on your star ratings — so the more you rate, the more `preference_score` drifts toward what you actually like. The MATCH badge is now driven by that personalized score, not by anyone's prose description. See [Photos.match_threshold/0](orchestrator/lib/orchestrator/photos.ex).
+
 ## What it does
 
-You give it a style description in plain english. Something like "high grain, soft focus, B&W, mood: solitary." You point it at a directory on your hard drive — I've got about a TB of TIFFs on an external drive that had never been properly sorted — and it randomly samples N files, converts whatever it finds down to workable JPEGs, runs each one through a vision LLM, and the LLM decides: does this fit the vibe or not.
+You point it at a directory on your hard drive — I've got about a TB of TIFFs on an external drive that had never been properly sorted — and it randomly samples N files, converts whatever it finds down to workable JPEGs, and runs each one through the pipeline.
 
-Results go into a gallery. You can filter by match, no match, or everything. Each photo gets a style score and a one-sentence explanation. The whole thing updates in real-time while the jobs run. No refreshing, no polling, just Phoenix doing what Phoenix does.
+Results go into a gallery. You can filter by match, no match, or everything. The whole thing updates in real-time while the jobs run. No refreshing, no polling, just Phoenix doing what Phoenix does.
 
-As you rate photos (1-5 stars), the system learns your taste. A CLIP embedding is computed for every photo, and a Ridge regression model trained on your ratings produces a separate `preference_score` that drifts toward what you actually like — not just what the text description says you should like. The two scores are independent: `style_score` is the LLM's read on your written aesthetic, `preference_score` is what your rating history says you actually reach for.
+The vision LLM's only job is objective metadata: subject, content type, mood, lighting critique, tags. It is deliberately *not* asked to judge style — that job belongs to you and the preference model. As you rate photos (1-5 stars), a CLIP embedding is computed for every photo and a Ridge regression model trained on your ratings produces a `preference_score` in [0, 100] that drifts toward what you actually like. The gallery's MATCH badge fires when `preference_score >= Photos.match_threshold()` (currently 70, sitting just under the median of 5★ photos). You can also chef's-pick any photo by hand with the `manual_match` flag — that override surfaces as a distinct "★ Chef's Pick" badge and always counts as a match regardless of the numeric score.
 
 Technical quality scoring runs during conversion — sharpness (variance-of-Laplacian) and exposure (histogram clipping) are computed on the full-resolution source before it gets downsized, so you can sort and filter by IQ independent of style.
 
@@ -37,7 +47,7 @@ The two services talk over plain HTTP. You could swap out either side without to
 When you import a photo, here's what happens:
 
 1. **ConversionWorker** — opens the source file (RAW, TIFF, whatever), computes sharpness/exposure scores on the full-res image, extracts EXIF timestamps, resizes to 1440px JPEG.
-2. **AiCurationWorker** — sends the JPEG to the vision LLM for style matching, subject extraction, mood/lighting critique, tag suggestions.
+2. **AiCurationWorker** — sends the JPEG to the vision LLM for subject, content type, mood, lighting critique, and tag suggestions. No style/taste judgment.
 3. **EmbeddingWorker** — computes a 768-dim CLIP image embedding, stores it in pgvector.
 4. **PreferenceTrainWorker** (debounced) — if you have 20+ rated photos, retrains the Ridge model and backfills `preference_score` across the archive. Collapses rapid rating bursts into one retrain via Oban unique constraints.
 
@@ -107,7 +117,7 @@ When you've rated enough and the projects have names, export the approved photos
 cd orchestrator && mix fineshyt.export --target /path/to/blog/photos
 ```
 
-Approved means rated 4+ stars or scored 75+. Unrated photos never export — the whole point is that you had an opinion about it first. Export is additive, existing files don't get touched, and a `photos.json` manifest gets written alongside the images with filename, tags, mood, style score, and project name. Your blog reads from that.
+Approved means you've rated it *and* one of: rating ≥ 4, chef's-picked, or `preference_score` meets the match threshold. Unrated photos never export — the whole point is that you had an opinion about it first. Export is additive, existing files don't get touched, and a `photos.json` manifest gets written alongside the images with filename, tags, mood, `preference_score`, `user_rating`, `manual_match`, and project name. Your blog reads from that.
 
 ## Running it
 

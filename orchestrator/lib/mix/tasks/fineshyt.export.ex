@@ -4,8 +4,9 @@ defmodule Mix.Tasks.Fineshyt.Export do
   @shortdoc "Export approved photos + photos.json manifest to a target directory"
 
   @moduledoc """
-  Copies approved photos (user_rating >= 4 OR style_score >= 75, must be rated)
-  to a target directory and writes/updates a photos.json manifest.
+  Copies approved photos (rated, and either user_rating >= 4, manual_match
+  true, or preference_score >= `Photos.match_threshold/0`) to a target
+  directory and writes/updates a photos.json manifest.
 
   Export is additive — existing files in the target are not replaced.
 
@@ -56,7 +57,9 @@ defmodule Mix.Tasks.Fineshyt.Export do
                   "filename" => basename,
                   "tags" => photo.suggested_tags,
                   "mood" => photo.artistic_mood,
-                  "style_score" => photo.style_score,
+                  "preference_score" => photo.preference_score,
+                  "user_rating" => photo.user_rating,
+                  "manual_match" => photo.manual_match,
                   "project" => photo.project,
                   "inserted_at" => DateTime.to_iso8601(photo.inserted_at)
                 }

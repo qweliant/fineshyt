@@ -12,8 +12,8 @@ defmodule OrchestratorWeb.GalleryLive do
 
     * `:filter` — `:all`, `:match`, `:no_match`, `:rated`, `:unrated`,
       `:for_projects`, `:failed`, `:rejected`
-    * `:sort` — `:newest`, `:score_desc`, `:score_asc`, `:rating_desc`,
-      `:preference_desc`
+    * `:sort` — `:newest`, `:preference_desc`, `:preference_asc`,
+      `:rating_desc`
     * `:search` — substring filter on subject + mood
     * `:page` — current 1-indexed page
     * `:project_filter` — project name to scope to, or `nil`
@@ -41,6 +41,11 @@ defmodule OrchestratorWeb.GalleryLive do
   use OrchestratorWeb, :live_view
 
   alias Orchestrator.Photos
+
+  # Preference score ≥ this → "✓ Match" badge. Sits just under the median
+  # of 5★-rated photos (≈71) — strict enough to skew toward actual 5★s
+  # while still catching the top of 4★.
+  @match_threshold 70
 
   @doc """
   LiveView mount. Subscribes to `"photo_updates"` and primes every assign
@@ -71,6 +76,7 @@ defmodule OrchestratorWeb.GalleryLive do
       |> assign(:selected, MapSet.new())
       |> assign(:bulk_project, "")
       |> assign(:burst_groups, [])
+      |> assign(:match_threshold, @match_threshold)
       |> load_photos()
 
     {:ok, socket}
@@ -134,9 +140,9 @@ defmodule OrchestratorWeb.GalleryLive do
     * `"photo_keydown"` — `%{"id" => id, "key" => key}`. Keyboard while
       a photo card is focused: `1`–`5` rate, `p` pick (★5), `x`
       soft-reject, `m` toggle multi-select.
-    * `"override_score"` — `%{"id" => id, "score" => score}`. Inline edit
-      of `style_score`.
-    * `"toggle_match"` — `%{"id" => id}`. Flip the `style_match` boolean.
+    * `"toggle_match"` — `%{"id" => id}`. Flip the `manual_match` boolean
+      (a.k.a. "chef's pick"). Independent of the preference-driven MATCH
+      badge.
     * `"rate"` — `%{"id" => id, "rating" => rating}`. Star strip click.
     * `"delete_tag"` — `%{"id" => id, "tag" => tag}`. Remove tag chip.
     * `"add_tag"` — `%{"id" => id, "value" => tag}`. New tag input submit.
@@ -200,10 +206,9 @@ defmodule OrchestratorWeb.GalleryLive do
   @impl Phoenix.LiveView
   def handle_event("set_sort", %{"sort" => sort}, socket) do
     atom = case sort do
-      "score_desc"      -> :score_desc
-      "score_asc"       -> :score_asc
       "rating_desc"     -> :rating_desc
       "preference_desc" -> :preference_desc
+      "preference_asc"  -> :preference_asc
       _                 -> :newest
     end
     {:noreply, reload(socket, sort: atom)}
@@ -249,15 +254,9 @@ defmodule OrchestratorWeb.GalleryLive do
   end
 
   @impl Phoenix.LiveView
-  def handle_event("override_score", %{"id" => id, "score" => score}, socket) do
-    Photos.override_curation(String.to_integer(id), %{style_score: String.to_integer(score)})
-    {:noreply, load_photos(socket)}
-  end
-
-  @impl Phoenix.LiveView
   def handle_event("toggle_match", %{"id" => id}, socket) do
     photo = Photos.get_photo!(String.to_integer(id))
-    Photos.override_curation(photo.id, %{style_match: !photo.style_match})
+    Photos.override_curation(photo.id, %{manual_match: !(photo.manual_match || false)})
     {:noreply, load_photos(socket)}
   end
 
@@ -306,8 +305,7 @@ defmodule OrchestratorWeb.GalleryLive do
           "file_path" => fp,
           "ref" => ref,
           "source" => source,
-          "project" => project,
-          "style_description" => ""
+          "project" => project
         })
         |> Oban.insert()
         {:noreply, socket |> put_flash(:info, "Re-queued for curation.") |> load_photos()}
@@ -326,8 +324,7 @@ defmodule OrchestratorWeb.GalleryLive do
         "file_path" => photo.file_path,
         "ref" => ref,
         "source" => photo.source || "local",
-        "project" => photo.project,
-        "style_description" => ""
+        "project" => photo.project
       })
       |> Oban.insert()
     end)
@@ -597,10 +594,9 @@ defmodule OrchestratorWeb.GalleryLive do
             class="border border-gray-300 bg-[#fcfbf9] px-4 py-2.5 font-sans text-xs uppercase tracking-widest focus:outline-none focus:border-[#111111] cursor-pointer"
           >
             <option value="newest"           selected={@sort == :newest}>Newest</option>
-            <option value="score_desc"       selected={@sort == :score_desc}>Score ↓</option>
-            <option value="score_asc"        selected={@sort == :score_asc}>Score ↑</option>
-            <option value="rating_desc"      selected={@sort == :rating_desc}>Rating ↓</option>
             <option value="preference_desc"  selected={@sort == :preference_desc}>Preference ↓</option>
+            <option value="preference_asc"   selected={@sort == :preference_asc}>Preference ↑</option>
+            <option value="rating_desc"      selected={@sort == :rating_desc}>Rating ↓</option>
           </select>
         </form>
       </div>
@@ -860,23 +856,20 @@ defmodule OrchestratorWeb.GalleryLive do
 
               <%!-- Top badges --%>
               <div class="absolute top-2 right-2 flex flex-col items-end gap-1">
-                <div class={[
-                  "font-sans text-xs font-bold uppercase tracking-wider px-2 py-1",
-                  photo.style_match && "bg-[#111111] text-[#fcfbf9]",
-                  photo.style_match == false && "bg-white text-gray-500 border border-gray-300"
-                ]}>
-                  <%= if photo.style_match, do: "✓ Match", else: "✗ No" %>
-                </div>
-                <%= if photo.style_score != nil do %>
-                  <% conf = photo.style_score
-                     {conf_label, conf_class} = cond do
-                       conf >= 80 -> {"high conf", "bg-emerald-900/80 text-emerald-300 border-emerald-700"}
-                       conf >= 50 -> {"med conf", "bg-yellow-900/80 text-yellow-300 border-yellow-700"}
-                       true       -> {"low conf", "bg-red-900/80 text-red-300 border-red-700"}
-                     end %>
-                  <div class={["font-sans text-[9px] uppercase tracking-wider px-2 py-0.5 border font-bold", conf_class]}>
-                    <%= conf_label %> · <%= conf %>
-                  </div>
+                <%= cond do %>
+                  <% photo.manual_match -> %>
+                    <div class="bg-amber-400 text-[#111111] font-sans text-xs font-bold uppercase tracking-wider px-2 py-1">
+                      ★ Chef's Pick
+                    </div>
+                  <% photo.preference_score != nil and photo.preference_score >= @match_threshold -> %>
+                    <div class="bg-[#111111] text-[#fcfbf9] font-sans text-xs font-bold uppercase tracking-wider px-2 py-1">
+                      ✓ Match
+                    </div>
+                  <% photo.preference_score != nil -> %>
+                    <div class="bg-white text-gray-500 border border-gray-300 font-sans text-xs font-bold uppercase tracking-wider px-2 py-1">
+                      ✗ No
+                    </div>
+                  <% true -> %>
                 <% end %>
                 <%= if photo.technical_score != nil do %>
                   <% tech = photo.technical_score
@@ -986,29 +979,6 @@ defmodule OrchestratorWeb.GalleryLive do
 
                 <p class="text-[#fcfbf9] font-serif text-sm leading-snug mb-1"><%= photo.subject %></p>
 
-                <div class="flex items-center gap-2 mt-1">
-                  <input
-                    type="range" min="0" max="100"
-                    value={photo.style_score || 0}
-                    phx-change="override_score"
-                    phx-debounce="300"
-                    phx-value-id={photo.id}
-                    name="score"
-                    oninput="this.nextElementSibling.textContent = this.value"
-                    class="flex-1 h-px cursor-pointer [accent-color:white]"
-                  />
-                  <span class="text-gray-300 font-sans text-xs tabular-nums w-6 text-right shrink-0">
-                    <%= photo.style_score || 0 %>
-                  </span>
-                </div>
-
-                <%= if photo.style_reason && photo.style_reason != "" do %>
-                  <div class="mt-2 border-l-2 border-gray-700 pl-2">
-                    <p class="font-sans text-[9px] uppercase tracking-widest text-gray-600 mb-0.5">model says</p>
-                    <p class="text-gray-400 font-sans text-[10px] italic leading-snug"><%= photo.style_reason %></p>
-                  </div>
-                <% end %>
-
                 <div class="flex flex-wrap gap-1 mt-2">
                   <%= for tag <- photo.suggested_tags do %>
                     <button
@@ -1050,13 +1020,14 @@ defmodule OrchestratorWeb.GalleryLive do
                   <button
                     phx-click="toggle_match"
                     phx-value-id={photo.id}
+                    title="Chef's pick — manual override, independent of the preference score"
                     class={[
                       "font-sans text-[10px] uppercase tracking-widest px-2 py-1 transition-colors",
-                      photo.style_match && "text-[#fcfbf9] border border-gray-500 hover:border-red-400 hover:text-red-400",
-                      !photo.style_match && "text-gray-500 border border-gray-700 hover:border-gray-400 hover:text-gray-300"
+                      photo.manual_match && "bg-amber-400 text-[#111111] border border-amber-400 hover:bg-amber-300",
+                      !photo.manual_match && "text-gray-500 border border-gray-700 hover:border-amber-400 hover:text-amber-300"
                     ]}
                   >
-                    <%= if photo.style_match, do: "✓ match", else: "✗ no" %>
+                    <%= if photo.manual_match, do: "★ picked", else: "☆ pick" %>
                   </button>
                 </div>
 

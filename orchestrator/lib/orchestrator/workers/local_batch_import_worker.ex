@@ -13,10 +13,7 @@ defmodule Orchestrator.Workers.LocalBatchImportWorker do
 
   @impl Oban.Worker
   def perform(%Oban.Job{
-        args: %{
-          "dir_path" => dir_path,
-          "style_description" => style_description
-        } = args
+        args: %{"dir_path" => dir_path} = args
       }) do
     sample = Map.get(args, "sample")
     project = Map.get(args, "project")
@@ -51,11 +48,10 @@ defmodule Orchestrator.Workers.LocalBatchImportWorker do
         ref = make_ref() |> inspect()
 
         %{
-          "file_path"         => file_path,
-          "ref"               => ref,
-          "style_description" => style_description,
-          "source"            => "local",
-          "project"           => project
+          "file_path" => file_path,
+          "ref"       => ref,
+          "source"    => "local",
+          "project"   => project
         }
         |> Orchestrator.Workers.ConversionWorker.new()
         |> Oban.insert()

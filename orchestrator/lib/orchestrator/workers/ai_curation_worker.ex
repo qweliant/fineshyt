@@ -33,7 +33,6 @@ defmodule Orchestrator.Workers.AiCurationWorker do
 
     * `"file_path"` (required) — absolute path to source file
     * `"ref"` (required) — opaque reference echoed back in PubSub messages
-    * `"style_description"` (optional) — passed through to the AI worker
     * `"source"` (optional, default `"upload"`)
     * `"project"` (optional)
 
@@ -78,7 +77,6 @@ defmodule Orchestrator.Workers.AiCurationWorker do
       } = job) do
     Logger.info("Starting AI curation for #{file_path}...")
 
-    style_description = Map.get(args, "style_description", "")
     source = Map.get(args, "source", "upload")
     project = Map.get(args, "project")
     technical_score = Map.get(args, "technical_score")
@@ -106,9 +104,7 @@ defmodule Orchestrator.Workers.AiCurationWorker do
         else
           image_binary = File.read!(dest)
 
-          form_fields =
-            [file: {image_binary, filename: basename, content_type: "image/jpeg"}] ++
-              if style_description != "", do: [style_description: style_description], else: []
+          form_fields = [file: {image_binary, filename: basename, content_type: "image/jpeg"}]
 
           case Req.post("http://127.0.0.1:8000/api/v1/curate",
                  form_multipart: form_fields,
@@ -123,9 +119,6 @@ defmodule Orchestrator.Workers.AiCurationWorker do
                   url: "/uploads/#{basename}",
                   source: source,
                   project: project,
-                  style_match: metadata["style_match"],
-                  style_score: metadata["style_score"],
-                  style_reason: metadata["style_reason"],
                   technical_score: technical_score,
                   sharpness_score: sharpness_score,
                   exposure_score: exposure_score,

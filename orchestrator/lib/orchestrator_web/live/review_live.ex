@@ -481,10 +481,10 @@ defmodule OrchestratorWeb.ReviewLive do
                 </div>
               <% end %>
 
-              <%= if photo.style_score do %>
+              <%= if photo.preference_score do %>
                 <div>
-                  <p class="font-sans text-[9px] uppercase tracking-widest text-gray-600 mb-1">Style score</p>
-                  <p class="font-mono text-sm text-gray-300"><%= photo.style_score %><span class="text-gray-700"> / 100</span></p>
+                  <p class="font-sans text-[9px] uppercase tracking-widest text-gray-600 mb-1">Preference</p>
+                  <p class="font-mono text-sm text-gray-300"><%= photo.preference_score %><span class="text-gray-700"> / 100</span></p>
                 </div>
               <% end %>
 

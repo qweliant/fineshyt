@@ -9,10 +9,10 @@ defmodule Orchestrator.Photos.Photo do
       * `url` — web-servable path under `/uploads/...`
       * `source` — `"local"`
 
-    * **Style verdict** (set by the AI worker)
-      * `style_match` — boolean: does this photo match the photographer's style?
-      * `style_score` — 0–100 confidence integer
-      * `style_reason` — free-form explanation
+    * **Manual override**
+      * `manual_match` — boolean: user-flagged "chef's pick." Independent
+        of the preference model; used to override or augment the
+        automatic MATCH badge in the gallery.
 
     * **Technical quality** (computed by the Python converter on the full-res image)
       * `technical_score` — 0–100 weighted blend (0.7 sharpness + 0.3 exposure)
@@ -58,9 +58,7 @@ defmodule Orchestrator.Photos.Photo do
     field :url, :string
     field :source, :string
 
-    field :style_match, :boolean
-    field :style_score, :integer
-    field :style_reason, :string
+    field :manual_match, :boolean, default: false
 
     field :technical_score, :integer
     field :sharpness_score, :integer
@@ -110,7 +108,7 @@ defmodule Orchestrator.Photos.Photo do
     photo
     |> cast(attrs, [
       :file_path, :url, :source,
-      :style_match, :style_score, :style_reason,
+      :manual_match,
       :technical_score, :sharpness_score, :exposure_score,
       :clip_embedding, :preference_score, :preference_model_version,
       :subject, :artistic_mood, :lighting_critique, :content_type, :suggested_tags,

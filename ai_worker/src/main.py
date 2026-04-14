@@ -7,9 +7,11 @@ Oban workers (`Orchestrator.Workers.AiCurationWorker` and
 
 Endpoints
 ---------
-* ``POST /api/v1/curate`` — accept an image upload and an optional style
-  description, ask LLaVA (via Ollama via the `instructor` structured-output
-  wrapper) to extract metadata, and return it as a `PhotoMetadata` JSON.
+* ``POST /api/v1/curate`` — accept an image upload, ask LLaVA (via Ollama
+  via the `instructor` structured-output wrapper) to extract objective
+  metadata (subject, content_type, mood, tags), and return it as a
+  `PhotoMetadata` JSON. Style/taste matching is handled downstream by the
+  CLIP + Ridge preference model, not by the LLM.
 * ``POST /api/v1/convert`` — open a single source file (RAW or otherwise),
   compute technical quality scores (sharpness, exposure, overall) on the
   full-resolution image, resize to a 1440px long edge, save as quality-82
@@ -54,15 +56,15 @@ import threading
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Annotated
 
 import instructor
 import numpy as np
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from openai import APIError, AsyncOpenAI
 from PIL import Image
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, BeforeValidator
 
 logging.basicConfig(
     level=logging.INFO,
@@ -97,10 +99,26 @@ client = instructor.from_openai(
 
 app = FastAPI(title="Fineshyt Photo Curation API")
 
+VALID_CONTENT_TYPES = {
+    "portrait", "street", "family", "landscape", 
+    "still_life", "architecture", "abstract", "other"
+}
+
+def coerce_content_type(v: Any) -> str:
+    """Forces invalid LLM outputs into the 'other' category."""
+    if isinstance(v, str):
+        v_lower = v.lower().strip()
+        if v_lower in VALID_CONTENT_TYPES:
+            return v_lower
+    # If the LLM hallucinates 'artwork' or anything else, default to 'other'
+    return "other"
+
+# Create a custom type using the validator
+SafeContentType = Annotated[str, BeforeValidator(coerce_content_type)]
 
 class PhotoMetadata(BaseModel):
     subject: str = Field(description="The primary subject of the photo. Be specific — describe what is actually depicted.")
-    content_type: Literal["portrait", "street", "family", "landscape", "still_life", "architecture", "abstract", "other"] = Field(
+    content_type: SafeContentType = Field(
         description=(
             "The primary content category. Choose exactly one: "
             "'portrait' = single person, headshot, or environmental portrait; "
@@ -118,15 +136,6 @@ class PhotoMetadata(BaseModel):
     )
     artistic_mood: str = Field(description="The emotional tone of the photo.")
     suggested_tags: list[str] = Field(description="5 to 7 specific tags describing technique, mood, or subject for a portfolio database. Do not include generic terms like 'photography' or 'photo'.")
-    style_match: bool = Field(
-        description="True if the photo matches the provided style description. False if no style description was given."
-    )
-    style_score: int = Field(
-        description="Style match confidence from 0 to 100. 0 if no style description was given."
-    )
-    style_reason: str = Field(
-        description="One sentence explaining the style match decision. Empty string if no style description was given."
-    )
 
 
 class ConvertRequest(BaseModel):
@@ -145,28 +154,25 @@ class ConvertResponse(BaseModel):
 @app.post("/api/v1/curate", response_model=PhotoMetadata, tags=["Agent Workflow"])
 async def curate_photo(
     file: UploadFile = File(...),
-    style_description: str = Form(""),
 ):
     """Curate a single photo via LLaVA and return structured metadata.
 
-    Encodes the upload as base64, builds a multimodal prompt (with an
-    optional style-match instruction when ``style_description`` is given),
-    and asks the LLM to fill out a ``PhotoMetadata`` schema via
-    ``instructor``. ``instructor`` retries up to 3 times to coerce a valid
-    response, but does not protect against upstream connection errors.
+    Encodes the upload as base64 and asks the LLM to fill out a
+    ``PhotoMetadata`` schema via ``instructor``. ``instructor`` retries up
+    to 3 times to coerce a valid response, but does not protect against
+    upstream connection errors.
+
+    Style/taste matching lives downstream in the CLIP + Ridge preference
+    model (see ``/api/v1/preference/score``). LLaVA's job here is only
+    objective metadata extraction.
 
     Args:
         file: Multipart upload. ``file.content_type`` must start with
             ``image/`` or the request is rejected with HTTP 400.
-        style_description: Optional photographer style. When non-empty,
-            the LLM is asked to set ``style_match``, ``style_score``, and
-            ``style_reason`` against this description; when empty, those
-            three fields are explicitly set to false / 0 / "".
 
     Returns:
         PhotoMetadata: subject, content_type, lighting_critique,
-        artistic_mood, suggested_tags, style_match, style_score,
-        style_reason.
+        artistic_mood, suggested_tags.
 
     Raises:
         HTTPException: 400 if the upload is not an image. Otherwise the
@@ -175,25 +181,13 @@ async def curate_photo(
         ``_error_detail``.
 
     Example:
-        ``curl -F file=@photo.jpg -F style_description='moody, cinematic' \\
-            http://127.0.0.1:8000/api/v1/curate``
+        ``curl -F file=@photo.jpg http://127.0.0.1:8000/api/v1/curate``
     """
     if not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="File must be an image.")
 
     image_bytes = await file.read()
     base64_image = base64.b64encode(image_bytes).decode("utf-8")
-
-    if style_description:
-        style_prompt = f"""
-The photographer's style is described as:
-"{style_description}"
-
-Evaluate whether this photograph matches that style. Be strict — only mark style_match: true
-if the photo genuinely fits the described aesthetic. Set style_score (0-100) and style_reason accordingly.
-"""
-    else:
-        style_prompt = "No style description provided. Set style_match: false, style_score: 0, style_reason: empty string."
 
     try:
         metadata = await client.chat.completions.create(
@@ -209,8 +203,8 @@ if the photo genuinely fits the described aesthetic. Set style_score (0-100) and
                                 "You are an expert photo curator. Analyze this photograph and extract the metadata. "
                                 "Be accurate about content_type — most photos are of people (portrait, family, street). "
                                 "Only use 'still_life' for photos where objects are the clear, intentional subject with no people present. "
-                                "Only use 'abstract' for photos that are genuinely non-representational.\n\n"
-                                f"{style_prompt}"
+                                "Only use 'abstract' for photos that are genuinely non-representational.\n"
+                                "CRITICAL: For content_type, you MUST choose from the exact provided list. DO NOT invent new categories like 'artwork' or 'interior'. If unsure, choose 'other'."
                             ),
                         },
                         {
