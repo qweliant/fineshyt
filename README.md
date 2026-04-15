@@ -12,13 +12,13 @@ It's also an excuse to get back into ML. The last time I did anything in this sp
 
 The first version of this project asked a vision LLM (LLaVA, via Ollama) to decide whether each photo "matched my style." You wrote a prose description of your aesthetic, the model compared the photo to it, and spat out a match/no-match verdict plus a style_score.
 
-That worked — sort of. But text prompts are a lossy way to describe a visual style, and LLaVA's read of "moody black-and-white macro" drifted from my read of it. My star ratings didn't feed back into the system; the model's verdict and my verdict lived on parallel tracks.
+That worked. Sort of. But text prompts are a lossy way to describe a visual style, and LLaVA's read of "moody black-and-white macro" drifted from my read of it. My star ratings didn't feed back into the system; the model's verdict and my verdict lived on parallel tracks.
 
-So the architecture flipped. The vision LLM now does objective metadata only. Every photo gets a CLIP embedding, and a Ridge regression linear probe is trained on your star ratings — so the more you rate, the more `preference_score` drifts toward what you actually like. The MATCH badge is now driven by that personalized score, not by anyone's prose description. See [Photos.match_threshold/0](orchestrator/lib/orchestrator/photos.ex).
+So the architecture flipped. The vision LLM now does objective metadata only. Every photo gets a CLIP embedding, and a Ridge regression linear probe is trained on your star ratings. So the more you rate, the more `preference_score` drifts toward what you actually like. The MATCH badge is now driven by that personalized score, not by anyone's prose description. See [Photos.match_threshold/0](orchestrator/lib/orchestrator/photos.ex).
 
 ## What it does
 
-You point it at a directory on your hard drive — I've got about a TB of TIFFs on an external drive that had never been properly sorted — and it randomly samples N files, converts whatever it finds down to workable JPEGs, and runs each one through the pipeline.
+You point it at a directory on your hard drive. I've got about a TB of TIFFs on an external drive that had never been properly sorted. It randomly samples N files, converts whatever it finds down to workable JPEGs, and runs each one through the pipeline.
 
 Results go into a gallery. You can filter by match, no match, or everything. The whole thing updates in real-time while the jobs run. No refreshing, no polling, just Phoenix doing what Phoenix does.
 
