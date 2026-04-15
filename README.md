@@ -20,11 +20,11 @@ So the architecture flipped. The vision LLM now does objective metadata only. Ev
 
 You point it at a directory on your hard drive. I've got about a TB of TIFFs on an external drive that had never been properly sorted. It randomly samples N files, converts whatever it finds down to workable JPEGs, and runs each one through the pipeline.
 
-Results go into a gallery. You can filter by match, no match, or everything. The whole thing updates in real-time while the jobs run. No refreshing, no polling, just Phoenix doing what Phoenix does.
+Results go into a gallery. You can filter by match, no match, or everything. The whole thing updates in real-time while the jobs run. 
 
-The vision LLM's only job is objective metadata: subject, content type, mood, lighting critique, tags. It is deliberately *not* asked to judge style — that job belongs to you and the preference model. As you rate photos (1-5 stars), a CLIP embedding is computed for every photo and a Ridge regression model trained on your ratings produces a `preference_score` in [0, 100] that drifts toward what you actually like. The gallery's MATCH badge fires when `preference_score >= Photos.match_threshold()` (currently 70, sitting just under the median of 5★ photos). You can also chef's-pick any photo by hand with the `manual_match` flag — that override surfaces as a distinct "★ Chef's Pick" badge and always counts as a match regardless of the numeric score.
+The vision LLM's only job is objective metadata: subject, content type, mood, lighting critique, tags. It is deliberately *not* asked to judge style because that job belongs to you and the preference model. As you rate photos (1-5 stars), a CLIP embedding is computed for every photo and a Ridge regression model trained on your ratings produces a `preference_score` in [0, 100] that drifts toward what you actually like. The gallery's MATCH badge fires when `preference_score >= Photos.match_threshold()` (currently 70, sitting just under the median of 5★ photos). You can also chef's-pick any photo by hand with the `manual_match` flag — that override surfaces as a distinct "★ Chef's Pick" badge and always counts as a match regardless of the numeric score.
 
-Technical quality scoring runs during conversion — sharpness (variance-of-Laplacian) and exposure (histogram clipping) are computed on the full-resolution source before it gets downsized, so you can sort and filter by IQ independent of style.
+Technical quality scoring runs during conversion. Sharpness (variance-of-Laplacian) and exposure (histogram clipping) are computed on the full-resolution source before it gets downsized, so you can sort and filter independent of style. This is still buggy and doesnt produce the best results for me but it is useful potentially for identifying technically sound photographs.
 
 Burst detection groups visually similar photos taken within seconds of each other (CLIP cosine similarity + EXIF timestamps), highlights the sharpest frame, and lets you keep-best-reject-rest in one click.
 
@@ -34,13 +34,9 @@ Single image curation still works too, at `/`. Drop a photo, get a museum placar
 
 ## Architecture
 
-Two services, intentionally decoupled.
+**The Orchestrator** (`/orchestrator`) — Elixir, Phoenix LiveView, Oban, PostgreSQL + pgvector. This is the main service. It owns the UI, the job queue, the database, and the pub/sub fanout that makes the real-time updates work. Oban handles retries with backoff so a slow inference call doesn't just silently disappear. Background workers handle the pipeline: conversion, AI curation, CLIP embedding, preference model training, and burst detection are each on its own queue with appropriate concurrency limits.
 
-**The Orchestrator** (`/orchestrator`) — Elixir, Phoenix LiveView, Oban, PostgreSQL + pgvector. This is the main service. It owns the UI, the job queue, the database, and the pub/sub fanout that makes the real-time updates work. Oban handles retries with backoff so a slow inference call doesn't just silently disappear. Background workers handle the pipeline: conversion, AI curation, CLIP embedding, preference model training, and burst detection — each on its own queue with appropriate concurrency limits.
-
-**The AI Worker** (`/ai_worker`) — Python, FastAPI, Instructor, open_clip, scikit-learn. This is the muscle. It gets an image over HTTP, encodes it to base64, asks the vision model what it sees, and enforces the response into a strict Pydantic schema via `instructor`. It also handles conversion (RAW/TIFF to JPEG with quality scoring), CLIP embedding (ViT-L-14, 768-dim), preference model training/scoring (Ridge regression linear probe), and burst detection (cosine similarity + temporal clustering).
-
-The two services talk over plain HTTP. You could swap out either side without touching the other. Python has the AI/ML ecosystem, Elixir has the concurrency story. No reason to compromise on either.
+**The AI Worker** (`/ai_worker`) — Python, FastAPI, Instructor, open_clip, scikit-learn. This is the AI microservice. Though it does takeup like 3GB of RAM. It gets an image over HTTP, encodes it to base64, asks the vision model what it sees, and enforces the response into a strict Pydantic schema via `instructor`. It also handles conversion (RAW/TIFF to JPEG with quality scoring), CLIP embedding (ViT-L-14, 768-dim), preference model training/scoring (Ridge regression linear probe), and burst detection (cosine similarity + temporal clustering).
 
 ## The pipeline
 
@@ -74,7 +70,7 @@ LLM_API_KEY=hf_...
 LLM_MODEL=meta-llama/Llama-3.2-11B-Vision-Instruct
 ```
 
-Local inference is free and private but will make your fans spin. Claude is genuinely good at this. It reasons about aesthetic intent, not just subject matter, which is exactly what you need when the question is "does this fit a style" rather than "what is in this image."
+Local inference is free and private but will make your fans spin. 
 
 ## Ingesting photos
 
