@@ -7,12 +7,15 @@ Oban workers (`Orchestrator.Workers.AiCurationWorker` and
 
 Endpoints
 ---------
-* ``POST /api/v1/curate`` — accept an image upload and an optional style
-  description, ask LLaVA (via Ollama via the `instructor` structured-output
-  wrapper) to extract metadata, and return it as a `PhotoMetadata` JSON.
+* ``POST /api/v1/curate`` — accept an image upload, ask LLaVA (via Ollama
+  via the `instructor` structured-output wrapper) to extract objective
+  metadata (subject, content_type, mood, tags), and return it as a
+  `PhotoMetadata` JSON. Style/taste matching is handled downstream by the
+  CLIP + Ridge preference model, not by the LLM.
 * ``POST /api/v1/convert`` — open a single source file (RAW or otherwise),
-  resize to a 1440px long edge, save as quality-82 JPEG into
-  ``STATIC_UPLOADS_DIR``, and return the new path.
+  compute technical quality scores (sharpness, exposure, overall) on the
+  full-resolution image, resize to a 1440px long edge, save as quality-82
+  JPEG into ``STATIC_UPLOADS_DIR``, and return the new path plus scores.
 
 Structured error contract
 -------------------------
@@ -48,16 +51,20 @@ Read from environment via ``python-dotenv``:
 import base64
 import logging
 import os
+import pickle
+import threading
 import traceback
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Annotated
 
 import instructor
+import numpy as np
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from openai import APIError, AsyncOpenAI
 from PIL import Image
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, BeforeValidator
 
 logging.basicConfig(
     level=logging.INFO,
@@ -73,6 +80,18 @@ LLM_MODEL = os.getenv("LLM_MODEL", "llava")
 # Where converted JPEGs are written — must match orchestrator's priv/static/uploads/
 STATIC_UPLOADS_DIR = os.getenv("STATIC_UPLOADS_DIR", "/tmp/fineshyt_uploads")
 
+# CLIP model — open_clip ViT-L-14 checkpoint. 768-dim image embeddings.
+CLIP_MODEL_NAME = os.getenv("CLIP_MODEL_NAME", "ViT-L-14")
+CLIP_PRETRAINED = os.getenv("CLIP_PRETRAINED", "laion2b_s32b_b82k")
+CLIP_EMBED_DIM = 768
+# cuda → mps → cpu by default; override with CLIP_DEVICE=cpu to force.
+CLIP_DEVICE = os.getenv("CLIP_DEVICE", "auto")
+
+# Preference model (scikit-learn Ridge linear probe) lives alongside other
+# fineshyt state. Override with $FINESHYT_MODEL_DIR for tests.
+FINESHYT_MODEL_DIR = Path(os.getenv("FINESHYT_MODEL_DIR", str(Path.home() / ".fineshyt")))
+PREFERENCE_MODEL_PATH = FINESHYT_MODEL_DIR / "preference_model.pkl"
+
 client = instructor.from_openai(
     AsyncOpenAI(base_url=LLM_BASE_URL, api_key=LLM_API_KEY),
     mode=instructor.Mode.JSON,
@@ -80,10 +99,26 @@ client = instructor.from_openai(
 
 app = FastAPI(title="Fineshyt Photo Curation API")
 
+VALID_CONTENT_TYPES = {
+    "portrait", "street", "family", "landscape", 
+    "still_life", "architecture", "abstract", "other"
+}
+
+def coerce_content_type(v: Any) -> str:
+    """Forces invalid LLM outputs into the 'other' category."""
+    if isinstance(v, str):
+        v_lower = v.lower().strip()
+        if v_lower in VALID_CONTENT_TYPES:
+            return v_lower
+    # If the LLM hallucinates 'artwork' or anything else, default to 'other'
+    return "other"
+
+# Create a custom type using the validator
+SafeContentType = Annotated[str, BeforeValidator(coerce_content_type)]
 
 class PhotoMetadata(BaseModel):
     subject: str = Field(description="The primary subject of the photo. Be specific — describe what is actually depicted.")
-    content_type: Literal["portrait", "street", "family", "landscape", "still_life", "architecture", "abstract", "other"] = Field(
+    content_type: SafeContentType = Field(
         description=(
             "The primary content category. Choose exactly one: "
             "'portrait' = single person, headshot, or environmental portrait; "
@@ -101,15 +136,6 @@ class PhotoMetadata(BaseModel):
     )
     artistic_mood: str = Field(description="The emotional tone of the photo.")
     suggested_tags: list[str] = Field(description="5 to 7 specific tags describing technique, mood, or subject for a portfolio database. Do not include generic terms like 'photography' or 'photo'.")
-    style_match: bool = Field(
-        description="True if the photo matches the provided style description. False if no style description was given."
-    )
-    style_score: int = Field(
-        description="Style match confidence from 0 to 100. 0 if no style description was given."
-    )
-    style_reason: str = Field(
-        description="One sentence explaining the style match decision. Empty string if no style description was given."
-    )
 
 
 class ConvertRequest(BaseModel):
@@ -118,34 +144,35 @@ class ConvertRequest(BaseModel):
 
 class ConvertResponse(BaseModel):
     jpeg_path: str
+    technical_score: int
+    sharpness_score: int
+    exposure_score: int
+    captured_at: str | None = None
 
 
 
 @app.post("/api/v1/curate", response_model=PhotoMetadata, tags=["Agent Workflow"])
 async def curate_photo(
     file: UploadFile = File(...),
-    style_description: str = Form(""),
 ):
     """Curate a single photo via LLaVA and return structured metadata.
 
-    Encodes the upload as base64, builds a multimodal prompt (with an
-    optional style-match instruction when ``style_description`` is given),
-    and asks the LLM to fill out a ``PhotoMetadata`` schema via
-    ``instructor``. ``instructor`` retries up to 3 times to coerce a valid
-    response, but does not protect against upstream connection errors.
+    Encodes the upload as base64 and asks the LLM to fill out a
+    ``PhotoMetadata`` schema via ``instructor``. ``instructor`` retries up
+    to 3 times to coerce a valid response, but does not protect against
+    upstream connection errors.
+
+    Style/taste matching lives downstream in the CLIP + Ridge preference
+    model (see ``/api/v1/preference/score``). LLaVA's job here is only
+    objective metadata extraction.
 
     Args:
         file: Multipart upload. ``file.content_type`` must start with
             ``image/`` or the request is rejected with HTTP 400.
-        style_description: Optional photographer style. When non-empty,
-            the LLM is asked to set ``style_match``, ``style_score``, and
-            ``style_reason`` against this description; when empty, those
-            three fields are explicitly set to false / 0 / "".
 
     Returns:
         PhotoMetadata: subject, content_type, lighting_critique,
-        artistic_mood, suggested_tags, style_match, style_score,
-        style_reason.
+        artistic_mood, suggested_tags.
 
     Raises:
         HTTPException: 400 if the upload is not an image. Otherwise the
@@ -154,25 +181,13 @@ async def curate_photo(
         ``_error_detail``.
 
     Example:
-        ``curl -F file=@photo.jpg -F style_description='moody, cinematic' \\
-            http://127.0.0.1:8000/api/v1/curate``
+        ``curl -F file=@photo.jpg http://127.0.0.1:8000/api/v1/curate``
     """
     if not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="File must be an image.")
 
     image_bytes = await file.read()
     base64_image = base64.b64encode(image_bytes).decode("utf-8")
-
-    if style_description:
-        style_prompt = f"""
-The photographer's style is described as:
-"{style_description}"
-
-Evaluate whether this photograph matches that style. Be strict — only mark style_match: true
-if the photo genuinely fits the described aesthetic. Set style_score (0-100) and style_reason accordingly.
-"""
-    else:
-        style_prompt = "No style description provided. Set style_match: false, style_score: 0, style_reason: empty string."
 
     try:
         metadata = await client.chat.completions.create(
@@ -188,8 +203,8 @@ if the photo genuinely fits the described aesthetic. Set style_score (0-100) and
                                 "You are an expert photo curator. Analyze this photograph and extract the metadata. "
                                 "Be accurate about content_type — most photos are of people (portrait, family, street). "
                                 "Only use 'still_life' for photos where objects are the clear, intentional subject with no people present. "
-                                "Only use 'abstract' for photos that are genuinely non-representational.\n\n"
-                                f"{style_prompt}"
+                                "Only use 'abstract' for photos that are genuinely non-representational.\n"
+                                "CRITICAL: For content_type, you MUST choose from the exact provided list. DO NOT invent new categories like 'artwork' or 'interior'. If unsure, choose 'other'."
                             ),
                         },
                         {
@@ -307,7 +322,6 @@ _RAW_EXTS = {".cr2", ".cr3", ".nef", ".arw", ".dng", ".raf", ".orf", ".rw2", ".p
 
 try:
     import rawpy
-    import numpy as np
     _RAWPY_AVAILABLE = True
 except ImportError:
     _RAWPY_AVAILABLE = False
@@ -326,6 +340,35 @@ def _open_as_pil(path: Path) -> Image.Image:
         return Image.open(path).convert("RGB")
 
 
+def _extract_captured_at(path: Path) -> str | None:
+    """Read EXIF DateTimeOriginal from an image file, return ISO-8601 or None.
+
+    Must be called on the *source* file before conversion strips EXIF.
+    Handles both Pillow-native formats and RAW files (rawpy exposes EXIF
+    on the postprocessed image via Pillow's getexif). Returns None silently
+    on any failure — missing EXIF is common and never fatal.
+    """
+    try:
+        ext = path.suffix.lower()
+        if ext in _RAW_EXTS:
+            if not _RAWPY_AVAILABLE:
+                return None
+            # rawpy doesn't expose EXIF directly; open with Pillow in non-RGB
+            # mode just for metadata when possible, fall back to None.
+            return None
+        img = Image.open(path)
+        exif = img.getexif()
+        # Tag 36867 = DateTimeOriginal, tag 306 = DateTime (fallback)
+        raw_dt = exif.get(36867) or exif.get(306)
+        if not raw_dt or not isinstance(raw_dt, str):
+            return None
+        # EXIF format: "YYYY:MM:DD HH:MM:SS" → ISO-8601
+        dt = datetime.strptime(raw_dt.strip(), "%Y:%m:%d %H:%M:%S")
+        return dt.isoformat()
+    except Exception:
+        return None
+
+
 def _resize_to_long_edge(img: Image.Image, long_edge: int) -> Image.Image:
     """Resize ``img`` so its longer edge equals ``long_edge``, preserving aspect ratio."""
     w, h = img.size
@@ -334,6 +377,71 @@ def _resize_to_long_edge(img: Image.Image, long_edge: int) -> Image.Image:
     if w >= h:
         return img.resize((long_edge, round(h * long_edge / w)), Image.LANCZOS)
     return img.resize((round(w * long_edge / h), long_edge), Image.LANCZOS)
+
+
+# Scoring is done on a downsampled grayscale copy so the numbers are comparable
+# across source resolutions (a 45MP RAW and a 12MP JPEG should land in the same
+# range for the same scene). Still run on the pre-1440 image — the 1440 JPEG has
+# already lost most of the high-frequency detail we're measuring.
+_SCORE_LONG_EDGE = 1024
+
+
+def _score_downsample(img: Image.Image) -> np.ndarray:
+    """Convert to grayscale, downsample to ``_SCORE_LONG_EDGE``, return float32 array."""
+    gray = img.convert("L")
+    w, h = gray.size
+    if max(w, h) > _SCORE_LONG_EDGE:
+        if w >= h:
+            gray = gray.resize((_SCORE_LONG_EDGE, round(h * _SCORE_LONG_EDGE / w)), Image.BILINEAR)
+        else:
+            gray = gray.resize((round(w * _SCORE_LONG_EDGE / h), _SCORE_LONG_EDGE), Image.BILINEAR)
+    return np.asarray(gray, dtype=np.float32)
+
+
+def _sharpness_score(gray: np.ndarray) -> int:
+    """Variance-of-Laplacian sharpness, normalized to 0..100.
+
+    Higher variance = more high-frequency content = sharper. The 300.0 divisor
+    was picked so typical in-focus photos land in the 70-100 range; clearly
+    blurry shots drop under 30. Revisit after seeing real numbers.
+    """
+    # 3x3 Laplacian via array slicing (avoids pulling in scipy)
+    c = gray[1:-1, 1:-1]
+    lap = 4.0 * c - gray[:-2, 1:-1] - gray[2:, 1:-1] - gray[1:-1, :-2] - gray[1:-1, 2:]
+    var = float(lap.var())
+    return int(round(min(var / 300.0, 1.0) * 100))
+
+
+def _exposure_score(gray: np.ndarray) -> int:
+    """Penalize histogram clipping at the black and white points.
+
+    Counts pixels within 5 levels of either endpoint — JPEG quantization and
+    scene noise mean truly crushed/blown regions cluster near 0/255 rather
+    than landing on them exactly, so a strict `== 0 | == 255` test misses
+    almost everything. Up to 0.5% combined clipped pixels is free (normal
+    high-contrast scenes), and the score falls linearly to 0 at 5% clipped.
+    """
+    total = gray.size
+    clipped = float(((gray <= 5.0) | (gray >= 250.0)).sum()) / total
+    if clipped <= 0.005:
+        return 100
+    if clipped >= 0.05:
+        return 0
+    return int(round((1.0 - (clipped - 0.005) / 0.045) * 100))
+
+
+def _compute_quality_scores(img: Image.Image) -> dict[str, int]:
+    """Compute technical quality scores from a full-resolution PIL image.
+
+    Returns sharpness, exposure, and a weighted overall score. The weights
+    (0.7 sharpness, 0.3 exposure) reflect that blur is usually a harder cull
+    than mild clipping; retune against real data.
+    """
+    gray = _score_downsample(img)
+    sharpness = _sharpness_score(gray)
+    exposure = _exposure_score(gray)
+    overall = int(round(0.7 * sharpness + 0.3 * exposure))
+    return {"sharpness": sharpness, "exposure": exposure, "overall": overall}
 
 
 def _unique_output_path(uploads_dir: Path, stem: str) -> Path:
@@ -373,15 +481,498 @@ def convert_file(request: ConvertRequest):
         raise HTTPException(status_code=404, detail=f"File not found: {request.file_path}")
 
     try:
+        # Extract EXIF capture time from the *source* before conversion strips it.
+        captured_at = _extract_captured_at(path)
         img = _open_as_pil(path)
+        # Score on the full-resolution image — the 1440 JPEG has already lost
+        # the high-frequency detail that sharpness/clipping measurements rely on.
+        scores = _compute_quality_scores(img)
         img = _resize_to_long_edge(img, 1440)
         uploads_dir = Path(STATIC_UPLOADS_DIR)
         uploads_dir.mkdir(parents=True, exist_ok=True)
         out = _unique_output_path(uploads_dir, path.stem)
         img.save(out, "JPEG", quality=82, optimize=True)
-        return ConvertResponse(jpeg_path=str(out))
+        return ConvertResponse(
+            jpeg_path=str(out),
+            technical_score=scores["overall"],
+            sharpness_score=scores["sharpness"],
+            exposure_score=scores["exposure"],
+            captured_at=captured_at,
+        )
     except Exception as e:
         raise HTTPException(
             status_code=500,
             detail=_error_detail("convert", e, file_path=str(path)),
+        )
+
+
+class ExifRequest(BaseModel):
+    file_path: str
+
+
+class ExifResponse(BaseModel):
+    captured_at: str | None = None
+
+
+@app.post("/api/v1/exif", response_model=ExifResponse, tags=["Ingestion"])
+def read_exif(request: ExifRequest):
+    """Read EXIF DateTimeOriginal from a source file.
+
+    Used by the EXIF backfill task to populate ``captured_at`` for photos
+    that were converted before EXIF extraction was added. Pass the path to
+    the *original* source file (RAW/TIFF/JPEG on the external drive), not
+    the converted JPEG in uploads.
+    """
+    path = Path(request.file_path)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail=f"File not found: {request.file_path}")
+    return ExifResponse(captured_at=_extract_captured_at(path))
+
+
+class QualityScoresRequest(BaseModel):
+    file_path: str
+
+
+class QualityScoresResponse(BaseModel):
+    technical_score: int
+    sharpness_score: int
+    exposure_score: int
+
+
+@app.post("/api/v1/quality_scores", response_model=QualityScoresResponse, tags=["Ingestion"])
+def quality_scores(request: QualityScoresRequest):
+    """Compute sharpness, exposure, and overall technical scores for a source file.
+
+    Used by the quality backfill task to score photos that were converted
+    before quality scoring was added. Pass the *original* source file for
+    best accuracy — the full-resolution image has more high-frequency detail
+    for sharpness measurement. Falls back to the converted JPEG if that's
+    all that's available (scores will be slightly less accurate).
+    """
+    path = Path(request.file_path)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail=f"File not found: {request.file_path}")
+    try:
+        img = _open_as_pil(path)
+        scores = _compute_quality_scores(img)
+        return QualityScoresResponse(
+            technical_score=scores["overall"],
+            sharpness_score=scores["sharpness"],
+            exposure_score=scores["exposure"],
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=_error_detail("quality_scores", e, file_path=request.file_path),
+        )
+
+
+# ─── CLIP embeddings + preference learning ──────────────────────────────────
+#
+# Two-stage personalization: CLIP image encoder produces a 768-dim image
+# embedding; a scikit-learn Ridge regression head fits those embeddings
+# against the user's 1–5 star ratings and predicts a preference score for
+# unrated photos. The CLIP model is loaded lazily so test imports and cold
+# starts don't pay the ~900MB download cost unless embeddings are actually
+# requested. The preference model is pickled to disk (versioned by an
+# integer) so scores can be compared across retrains.
+
+_clip_state: dict[str, Any] = {"model": None, "preprocess": None, "device": None}
+_clip_lock = threading.Lock()
+
+_pref_state: dict[str, Any] = {"model": None, "scaler": None, "version": 0, "mtime": 0.0}
+_pref_lock = threading.Lock()
+
+
+def _resolve_clip_device() -> str:
+    """Pick the CLIP inference device — honors ``$CLIP_DEVICE`` override."""
+    if CLIP_DEVICE != "auto":
+        return CLIP_DEVICE
+    import torch
+
+    if torch.cuda.is_available():
+        return "cuda"
+    if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
+def _get_clip():
+    """Lazily load the CLIP model + preprocess transform, cached process-wide.
+
+    Returns a tuple ``(model, preprocess, device)``. First call pays the
+    download + load cost (~900MB for ViT-L-14 laion2b). Subsequent calls are
+    a dict lookup. Thread-safe — the double-check lock pattern keeps concurrent
+    embed requests from loading the model twice.
+    """
+    if _clip_state["model"] is not None:
+        return _clip_state["model"], _clip_state["preprocess"], _clip_state["device"]
+
+    with _clip_lock:
+        if _clip_state["model"] is not None:
+            return _clip_state["model"], _clip_state["preprocess"], _clip_state["device"]
+
+        import open_clip
+        import torch
+
+        device = _resolve_clip_device()
+        logger.info("Loading CLIP model=%s pretrained=%s device=%s", CLIP_MODEL_NAME, CLIP_PRETRAINED, device)
+        model, _, preprocess = open_clip.create_model_and_transforms(
+            CLIP_MODEL_NAME, pretrained=CLIP_PRETRAINED
+        )
+        model.eval()
+        model.to(device)
+        _clip_state["model"] = model
+        _clip_state["preprocess"] = preprocess
+        _clip_state["device"] = device
+        _clip_state["torch"] = torch
+        return model, preprocess, device
+
+
+def _embed_image(path: Path) -> list[float]:
+    """Open ``path`` and return its L2-normalized CLIP image embedding as a Python list."""
+    model, preprocess, device = _get_clip()
+    torch = _clip_state["torch"]
+
+    img = _open_as_pil(path)
+    tensor = preprocess(img).unsqueeze(0).to(device)
+    with torch.no_grad():
+        feats = model.encode_image(tensor)
+        feats = feats / feats.norm(dim=-1, keepdim=True)
+    return feats.squeeze(0).detach().cpu().float().tolist()
+
+
+def _load_preference_model() -> dict[str, Any] | None:
+    """Load the pickled preference model, reloading if the file's mtime changed.
+
+    Returns a dict ``{"model", "scaler", "version"}`` or ``None`` if no model
+    has been trained yet. Mtime tracking means the score endpoint picks up a
+    fresh train without a restart.
+    """
+    if not PREFERENCE_MODEL_PATH.exists():
+        return None
+
+    mtime = PREFERENCE_MODEL_PATH.stat().st_mtime
+    with _pref_lock:
+        if _pref_state["model"] is not None and mtime == _pref_state["mtime"]:
+            return _pref_state
+
+        with open(PREFERENCE_MODEL_PATH, "rb") as f:
+            payload = pickle.load(f)
+        _pref_state["model"] = payload["model"]
+        _pref_state["scaler"] = payload["scaler"]
+        _pref_state["version"] = payload["version"]
+        _pref_state["mtime"] = mtime
+        logger.info("Loaded preference model version=%s", payload["version"])
+        return _pref_state
+
+
+class EmbedRequest(BaseModel):
+    file_path: str
+
+
+class EmbedResponse(BaseModel):
+    embedding: list[float]
+    model: str
+    dim: int
+
+
+class PreferenceSample(BaseModel):
+    embedding: list[float]
+    rating: int = Field(ge=1, le=5)
+
+
+class PreferenceTrainRequest(BaseModel):
+    samples: list[PreferenceSample]
+    min_samples: int = 20
+
+
+class PreferenceTrainResponse(BaseModel):
+    model_version: int
+    n_samples: int
+    train_r2: float
+    trained_at: str
+
+
+class PreferenceScoreRequest(BaseModel):
+    embeddings: list[list[float]]
+
+
+class PreferenceScoreResponse(BaseModel):
+    scores: list[int]
+    model_version: int
+
+
+@app.post("/api/v1/embed", response_model=EmbedResponse, tags=["Preference"])
+def embed_file(request: EmbedRequest):
+    """Compute the CLIP image embedding for a single file on disk.
+
+    Loads the image via ``_open_as_pil`` (handles RAW + Pillow-native
+    formats), runs it through the CLIP vision encoder, L2-normalizes the
+    output, and returns a 768-dim float vector. Called once per photo by
+    the Elixir ``EmbeddingWorker`` after curation succeeds.
+    """
+    path = Path(request.file_path)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail=f"File not found: {request.file_path}")
+
+    try:
+        embedding = _embed_image(path)
+        return EmbedResponse(embedding=embedding, model=CLIP_MODEL_NAME, dim=CLIP_EMBED_DIM)
+    except Exception as e:
+        raise HTTPException(
+            status_code=_status_for(e),
+            detail=_error_detail("embed", e, file_path=str(path)),
+        )
+
+
+@app.post("/api/v1/preference/train", response_model=PreferenceTrainResponse, tags=["Preference"])
+def train_preference_model(request: PreferenceTrainRequest):
+    """Fit a Ridge regression linear probe on rated photos and persist it.
+
+    Expects a list of ``{embedding, rating}`` samples gathered by the
+    Elixir ``PreferenceTrainWorker`` via ``Photos.list_rated_with_embeddings/0``.
+    Standardizes the embeddings, fits ``Ridge(alpha=1.0)`` on the rating
+    labels, pickles ``{model, scaler, version}`` to ``PREFERENCE_MODEL_PATH``,
+    and returns the new model version.
+
+    If fewer than ``min_samples`` labeled examples are provided, returns
+    400 so the worker can log-and-skip without incrementing the version.
+    """
+    if len(request.samples) < request.min_samples:
+        raise HTTPException(
+            status_code=400,
+            detail=_error_detail(
+                "preference_train",
+                ValueError(f"need >= {request.min_samples} samples, got {len(request.samples)}"),
+                n_samples=len(request.samples),
+                min_samples=request.min_samples,
+            ),
+        )
+
+    try:
+        from sklearn.linear_model import Ridge
+        from sklearn.preprocessing import StandardScaler
+
+        X = np.asarray([s.embedding for s in request.samples], dtype=np.float32)
+        y = np.asarray([s.rating for s in request.samples], dtype=np.float32)
+
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X)
+
+        model = Ridge(alpha=1.0)
+        model.fit(X_scaled, y)
+        train_r2 = float(model.score(X_scaled, y))
+
+        # Bump version = previous + 1. Zero on fresh install.
+        prev = _load_preference_model()
+        new_version = (prev["version"] if prev else 0) + 1
+
+        FINESHYT_MODEL_DIR.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "model": model,
+            "scaler": scaler,
+            "version": new_version,
+            "clip_model": CLIP_MODEL_NAME,
+            "embed_dim": CLIP_EMBED_DIM,
+        }
+        with open(PREFERENCE_MODEL_PATH, "wb") as f:
+            pickle.dump(payload, f)
+
+        # Refresh the in-memory cache so the next score call doesn't have to
+        # re-read from disk.
+        with _pref_lock:
+            _pref_state["model"] = model
+            _pref_state["scaler"] = scaler
+            _pref_state["version"] = new_version
+            _pref_state["mtime"] = PREFERENCE_MODEL_PATH.stat().st_mtime
+
+        trained_at = datetime.now(timezone.utc).isoformat()
+        logger.info(
+            "Trained preference model version=%s n_samples=%d train_r2=%.4f",
+            new_version, len(request.samples), train_r2,
+        )
+        return PreferenceTrainResponse(
+            model_version=new_version,
+            n_samples=len(request.samples),
+            train_r2=train_r2,
+            trained_at=trained_at,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=_error_detail("preference_train", e, n_samples=len(request.samples)),
+        )
+
+
+@app.post("/api/v1/preference/score", response_model=PreferenceScoreResponse, tags=["Preference"])
+def score_preference(request: PreferenceScoreRequest):
+    """Score a batch of pre-computed embeddings against the fitted preference model.
+
+    Ridge predicts a float in the 1–5 rating space; we linearly map that to
+    a 0–100 integer (rating 1 → 0, rating 5 → 100, clamped). If no preference
+    model has been trained yet, returns 400 so the caller can gracefully skip.
+    """
+    state = _load_preference_model()
+    if state is None:
+        raise HTTPException(
+            status_code=400,
+            detail=_error_detail(
+                "preference_score",
+                RuntimeError("no preference model trained yet"),
+                n_embeddings=len(request.embeddings),
+            ),
+        )
+
+    try:
+        X = np.asarray(request.embeddings, dtype=np.float32)
+        X_scaled = state["scaler"].transform(X)
+        preds = state["model"].predict(X_scaled)
+        # Map rating [1,5] → score [0,100]. interp handles out-of-range gracefully.
+        scores = np.clip(np.round((preds - 1.0) * 25.0), 0, 100).astype(int).tolist()
+        return PreferenceScoreResponse(scores=scores, model_version=state["version"])
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=_error_detail("preference_score", e, n_embeddings=len(request.embeddings)),
+        )
+
+
+# ─── Burst / sequence detection ─────────────────────────────────────────────
+#
+# Detects groups of visually near-identical photos (burst sequences, slight
+# reframes, exposure brackets) by thresholding cosine similarity of their
+# CLIP embeddings. Within each group the sharpest frame is the "best pick."
+# No EXIF needed — the embeddings are L2-normalized so dot product = cosine.
+
+
+class BurstPhotoInput(BaseModel):
+    id: int
+    embedding: list[float]
+    sharpness_score: int = 0
+    captured_at: str | None = None
+
+
+class BurstDetectRequest(BaseModel):
+    photos: list[BurstPhotoInput]
+    similarity_threshold: float = Field(default=0.95, ge=0.8, le=1.0)
+    max_time_gap_seconds: float = Field(default=5.0, ge=0.0, le=300.0)
+
+
+class BurstGroup(BaseModel):
+    group_id: int
+    photo_ids: list[int]
+    best_pick_id: int
+    best_pick_sharpness: int
+    size: int
+
+
+class BurstDetectResponse(BaseModel):
+    groups: list[BurstGroup]
+    n_singletons: int
+
+
+@app.post("/api/v1/detect_bursts", response_model=BurstDetectResponse, tags=["Burst"])
+def detect_bursts(request: BurstDetectRequest):
+    """Detect burst sequences via CLIP embedding cosine similarity + temporal proximity.
+
+    Takes a list of ``{id, embedding, sharpness_score, captured_at}`` for all
+    candidate photos. Two photos are in the same burst only if they are both
+    visually similar (cosine ≥ ``similarity_threshold``) **and** temporally
+    close (within ``max_time_gap_seconds``). When either photo lacks a
+    ``captured_at`` timestamp, the temporal constraint is skipped for that
+    pair so legacy photos without EXIF still cluster by visual similarity alone.
+
+    Complexity: O(n^2) dot products via numpy BLAS, plus O(n) connected
+    components via scipy. For 14k photos (~768-dim) this takes ~2-3s.
+    """
+    if len(request.photos) < 2:
+        return BurstDetectResponse(groups=[], n_singletons=len(request.photos))
+
+    try:
+        from datetime import datetime
+        from scipy.sparse import csr_matrix
+        from scipy.sparse.csgraph import connected_components
+
+        ids = [p.id for p in request.photos]
+        sharpness = {p.id: p.sharpness_score for p in request.photos}
+        X = np.asarray([p.embedding for p in request.photos], dtype=np.float32)
+
+        # Parse timestamps — None for photos without EXIF data.
+        timestamps: list[datetime | None] = []
+        for p in request.photos:
+            if p.captured_at:
+                try:
+                    timestamps.append(datetime.fromisoformat(p.captured_at))
+                except ValueError:
+                    timestamps.append(None)
+            else:
+                timestamps.append(None)
+
+        # Cosine similarity matrix (X is already L2-normalized from _embed_image).
+        S = X @ X.T
+
+        # Zero the diagonal so a photo doesn't form a self-loop.
+        np.fill_diagonal(S, 0.0)
+
+        # Visual similarity mask.
+        visual_adj = S >= request.similarity_threshold
+
+        # Temporal proximity mask: True when both photos have timestamps and
+        # are within max_time_gap_seconds, OR when either photo lacks a
+        # timestamp (fall back to visual-only for those pairs).
+        n = len(request.photos)
+        temporal_adj = np.ones((n, n), dtype=bool)
+        max_gap = request.max_time_gap_seconds
+        for i in range(n):
+            if timestamps[i] is None:
+                continue
+            for j in range(i + 1, n):
+                if timestamps[j] is None:
+                    continue
+                gap = abs((timestamps[i] - timestamps[j]).total_seconds())
+                if gap > max_gap:
+                    temporal_adj[i, j] = False
+                    temporal_adj[j, i] = False
+
+        # Both conditions must hold for an edge.
+        adj = csr_matrix(visual_adj & temporal_adj)
+        n_components, labels = connected_components(adj, directed=False)
+
+        # Group by component label. Only keep groups with size > 1.
+        from collections import defaultdict
+        groups_map: dict[int, list[int]] = defaultdict(list)
+        for idx, label in enumerate(labels):
+            groups_map[int(label)].append(ids[idx])
+
+        burst_groups = []
+        group_id = 0
+        for _label, member_ids in sorted(groups_map.items()):
+            if len(member_ids) < 2:
+                continue
+            best_id = max(member_ids, key=lambda pid: sharpness.get(pid, 0))
+            burst_groups.append(BurstGroup(
+                group_id=group_id,
+                photo_ids=member_ids,
+                best_pick_id=best_id,
+                best_pick_sharpness=sharpness.get(best_id, 0),
+                size=len(member_ids),
+            ))
+            group_id += 1
+
+        n_singletons = sum(1 for member_ids in groups_map.values() if len(member_ids) == 1)
+
+        logger.info(
+            "Burst detection: %d photos → %d bursts (%d photos in bursts), %d singletons",
+            len(request.photos), len(burst_groups),
+            sum(g.size for g in burst_groups), n_singletons,
+        )
+        return BurstDetectResponse(groups=burst_groups, n_singletons=n_singletons)
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=_error_detail("detect_bursts", e, n_photos=len(request.photos)),
         )

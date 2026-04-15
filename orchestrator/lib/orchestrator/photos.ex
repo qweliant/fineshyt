@@ -20,11 +20,11 @@ defmodule Orchestrator.Photos do
 
     * **Ingest / lookup** — `create_photo/1`, `create_pending/3`,
       `create_failed/1`, `delete_failed_if_exists/1`, `retry_failed/1`,
-      `mark_curation_status/2`, `already_processed?/1`, `shortcode_exists?/1`,
+      `mark_curation_status/2`, `already_processed?/1`,
       `existing_stems/1`, `existing_basenames/1`, `get_photo!/1`
     * **Listing / pagination** — `list_photos/1`, `count_photos/1`,
       `page_size/0`, `list_projects/0`, `list_projects_with_covers/0`,
-      `list_style_matches/0`, `list_approved/0`
+      `list_approved/0`
     * **Mutation** — `rate_photo/2`, `set_project/2`, `override_curation/2`,
       `add_tag/2`, `delete_tag/2`
     * **Soft-delete lifecycle** — `delete_photo/1` (hard), `reject_photo/1`
@@ -32,13 +32,24 @@ defmodule Orchestrator.Photos do
     * **Bulk** — `bulk_set_project/2`, `bulk_reject/1`
     * **Cull / rate workflow** — `list_cull_queue/1`, `list_rate_queue/1`,
       `count_pending_cull/0`, `count_rated/0`, `count_rejected/0`
-    * **Vibe scoring** — `tag_affinity_profile/0`, `vibe_score/2`,
-      `suggest_style_refinement/1`
+    * **Vibe scoring** — `tag_affinity_profile/0`, `vibe_score/2`
   """
 
   import Ecto.Query
   alias Orchestrator.Repo
   alias Orchestrator.Photos.Photo
+
+  # Preference score ≥ this → "✓ Match" (see GalleryLive). Sits just under
+  # the median of 5★-rated photos (≈71), so matches skew to the top of 4★
+  # and most of 5★.
+  @match_threshold 70
+
+  @doc """
+  Preference-score threshold (0–100) at which a photo is considered a MATCH.
+
+  Kept here so the context, LiveViews, and the export task all agree.
+  """
+  def match_threshold, do: @match_threshold
 
   @doc """
   Insert a new photo row from a free-form attribute map.
@@ -53,16 +64,14 @@ defmodule Orchestrator.Photos do
   ## Returns
 
     * `{:ok, %Photo{}}` on success.
-    * `{:error, %Ecto.Changeset{}}` on validation or constraint failure
-      (e.g. duplicate `instagram_shortcode`).
+    * `{:error, %Ecto.Changeset{}}` on validation or constraint failure.
 
   ## Examples
 
       Orchestrator.Photos.create_photo(%{
         file_path: "/uploads/a.jpg",
         url: "/uploads/a.jpg",
-        source: "local",
-        style_score: 88
+        source: "local"
       })
   """
   def create_photo(attrs) do
@@ -82,8 +91,10 @@ defmodule Orchestrator.Photos do
     * `opts` — keyword list:
       * `:page` — 1-indexed page number (default `1`)
       * `:filter` — one of `:all`, `:match`, `:no_match`, `:rated`,
-        `:unrated`, `:for_projects`, `:failed`, `:rejected` (default `:all`)
-      * `:sort` — one of `:newest`, `:score_desc`, `:score_asc`,
+        `:unrated`, `:for_projects`, `:failed`, `:rejected` (default `:all`).
+        `:match` and `:no_match` key off `preference_score` plus the
+        `manual_match` override.
+      * `:sort` — one of `:newest`, `:preference_desc`, `:preference_asc`,
         `:rating_desc` (default `:newest`)
       * `:search` — substring matched against `subject` and `artistic_mood`
       * `:project` — restrict to photos with this project name
@@ -165,8 +176,17 @@ defmodule Orchestrator.Photos do
   defp apply_filter(q, :all),      do: q
   defp apply_filter(q, :failed),   do: q
   defp apply_filter(q, :rejected), do: q
-  defp apply_filter(q, :match),    do: where(q, [p], p.style_match == true)
-  defp apply_filter(q, :no_match), do: where(q, [p], p.style_match == false)
+  defp apply_filter(q, :match),
+    do: where(q, [p], p.manual_match == true or p.preference_score >= ^@match_threshold)
+
+  defp apply_filter(q, :no_match),
+    do:
+      where(
+        q,
+        [p],
+        (p.manual_match == false or is_nil(p.manual_match)) and
+          (p.preference_score < ^@match_threshold or is_nil(p.preference_score))
+      )
   defp apply_filter(q, :rated),    do: where(q, [p], not is_nil(p.user_rating))
   defp apply_filter(q, :unrated),  do: where(q, [p], is_nil(p.user_rating))
   defp apply_filter(q, :for_projects), do: where(q, [p], not is_nil(p.user_rating) and p.user_rating >= 4 and (is_nil(p.project) or p.project == ""))
@@ -208,53 +228,16 @@ defmodule Orchestrator.Photos do
     where(q, [p], ilike(p.subject, ^term) or ilike(p.artistic_mood, ^term))
   end
 
-  defp apply_sort(q, :newest),      do: order_by(q, [p], desc: p.inserted_at)
-  defp apply_sort(q, :score_desc),  do: order_by(q, [p], [desc_nulls_last: p.style_score, desc: p.inserted_at])
-  defp apply_sort(q, :score_asc),   do: order_by(q, [p], [asc_nulls_last: p.style_score, desc: p.inserted_at])
-  defp apply_sort(q, :rating_desc), do: order_by(q, [p], [desc_nulls_last: p.user_rating, desc: p.inserted_at])
-  defp apply_sort(q, _),            do: order_by(q, [p], desc: p.inserted_at)
+  defp apply_sort(q, :newest),          do: order_by(q, [p], desc: p.inserted_at)
+  defp apply_sort(q, :rating_desc),     do: order_by(q, [p], [desc_nulls_last: p.user_rating, desc: p.inserted_at])
+  defp apply_sort(q, :preference_desc), do: order_by(q, [p], [desc_nulls_last: p.preference_score, desc: p.inserted_at])
+  defp apply_sort(q, :preference_asc),  do: order_by(q, [p], [asc_nulls_last: p.preference_score, desc: p.inserted_at])
+  defp apply_sort(q, _),                do: order_by(q, [p], desc: p.inserted_at)
 
   defp paginate(q, page) do
     offset = (page - 1) * @page_size
     q |> limit(@page_size) |> offset(^offset)
   end
-
-  @doc """
-  Fetch every photo flagged by the AI worker as a style match, newest first.
-
-  ## Returns
-
-    * `[%Photo{}]`
-  """
-  def list_style_matches do
-    Repo.all(from p in Photo, where: p.style_match == true, order_by: [desc: p.inserted_at])
-  end
-
-  @doc """
-  Check whether an Instagram shortcode is already in the DB.
-
-  Cheap existence query — used by the IG ingest path to skip re-downloading
-  posts. The non-binary clause returns `false` so callers can pass `nil`
-  without guarding.
-
-  ## Parameters
-
-    * `shortcode` — IG shortcode string, or anything else (returns `false`).
-
-  ## Returns
-
-    * `boolean()`
-
-  ## Examples
-
-      iex> Orchestrator.Photos.shortcode_exists?(nil)
-      false
-  """
-  def shortcode_exists?(shortcode) when is_binary(shortcode) do
-    Repo.exists?(from p in Photo, where: p.instagram_shortcode == ^shortcode)
-  end
-
-  def shortcode_exists?(_), do: false
 
   @doc """
   Return the subset of given filename stems that already exist in the DB.
@@ -380,8 +363,8 @@ defmodule Orchestrator.Photos do
   @doc """
   Update arbitrary curation fields on a photo.
 
-  Used by gallery overrides — flipping `style_match`, editing `style_score`,
-  changing `subject`, etc. Whatever the changeset accepts.
+  Used by gallery overrides — flipping `manual_match`, changing `subject`,
+  etc. Whatever the changeset accepts.
 
   ## Parameters
 
@@ -394,12 +377,211 @@ defmodule Orchestrator.Photos do
 
   ## Examples
 
-      Orchestrator.Photos.override_curation(42, %{style_score: 95})
+      Orchestrator.Photos.override_curation(42, %{manual_match: true})
   """
   def override_curation(id, attrs) do
     get_photo!(id)
     |> Photo.changeset(attrs)
     |> Repo.update()
+  end
+
+  @doc """
+  Return every photo that has both a star rating and a CLIP embedding.
+
+  This is the training set for the preference model: the
+  `PreferenceTrainWorker` ships these to the AI worker's
+  `/api/v1/preference/train` endpoint, which fits a Ridge regression on
+  `{embedding → rating}`. Only "complete" photos are included — rejected
+  and failed rows are excluded from the signal.
+
+  ## Returns
+
+    * `[{id, clip_embedding, user_rating}]` — a list of tuples, where
+      `clip_embedding` is a `%Pgvector{}` you can `Pgvector.to_list/1` to
+      marshal into JSON.
+  """
+  def list_rated_with_embeddings do
+    Repo.all(
+      from p in Photo,
+        where:
+          not is_nil(p.user_rating) and not is_nil(p.clip_embedding) and
+            p.curation_status == "complete",
+        select: {p.id, p.clip_embedding, p.user_rating}
+    )
+  end
+
+  @doc """
+  Return photos whose `preference_score` is stale relative to the current
+  model version.
+
+  A row is stale when it has an embedding but either has never been scored
+  (`preference_model_version IS NULL`) or was scored by an older model.
+  Used by the `PreferenceTrainWorker` to backfill after each retrain.
+
+  ## Parameters
+
+    * `current_version` — the latest model version integer; rows at or
+      above this version are considered fresh.
+    * `limit` — maximum number of rows to return (default 500, matches
+      the backfill batch size).
+
+  ## Returns
+
+    * `[{id, clip_embedding}]`
+  """
+  def list_photos_needing_preference_score(current_version, limit \\ 500) do
+    Repo.all(
+      from p in Photo,
+        where:
+          not is_nil(p.clip_embedding) and p.curation_status == "complete" and
+            (is_nil(p.preference_model_version) or p.preference_model_version < ^current_version),
+        select: {p.id, p.clip_embedding},
+        limit: ^limit
+    )
+  end
+
+  @doc """
+  Batch-update `preference_score` + `preference_model_version` on many photos
+  in a single transaction.
+
+  Deliberately narrower than `override_curation/2` because the
+  `PreferenceTrainWorker` runs this in tight loops over hundreds of rows and
+  each call only touches two columns. Uses `update_all/3` keyed by id.
+
+  ## Parameters
+
+    * `updates` — list of `{id, score, version}` tuples.
+
+  ## Returns
+
+    * `:ok` — always. Errors bubble up as Ecto exceptions.
+  """
+  def update_preference_scores(updates) when is_list(updates) do
+    Repo.transaction(fn ->
+      Enum.each(updates, fn {id, score, version} ->
+        from(p in Photo, where: p.id == ^id)
+        |> Repo.update_all(
+          set: [preference_score: score, preference_model_version: version]
+        )
+      end)
+    end)
+
+    :ok
+  end
+
+  @doc """
+  IDs of photos that still need a CLIP embedding.
+
+  Used by the `fineshyt.embed_backfill` mix task to enqueue one
+  `EmbeddingWorker` per row after the initial migration lands.
+
+  ## Returns
+
+    * `[integer]` — every "complete" photo id with `clip_embedding IS NULL`.
+  """
+  def list_photos_needing_embedding do
+    Repo.all(
+      from p in Photo,
+        where: is_nil(p.clip_embedding) and p.curation_status == "complete",
+        select: p.id,
+        order_by: [asc: p.id]
+    )
+  end
+
+  @doc """
+  Return `{id, file_path}` for every "complete" photo missing quality scores.
+  Used by the quality backfill task.
+  """
+  def list_photos_needing_quality_scores do
+    Repo.all(
+      from p in Photo,
+        where:
+          is_nil(p.technical_score) and p.curation_status == "complete",
+        select: {p.id, p.file_path},
+        order_by: [asc: p.id]
+    )
+  end
+
+  @doc """
+  Return `{id, file_path}` for every "complete" photo that still has
+  `captured_at IS NULL`. Used by the EXIF backfill task.
+  """
+  def list_photos_needing_captured_at do
+    Repo.all(
+      from p in Photo,
+        where: is_nil(p.captured_at) and p.curation_status == "complete",
+        select: {p.id, p.file_path},
+        order_by: [asc: p.id]
+    )
+  end
+
+  # ── Burst detection ────────────────────────────────────────────────────────
+
+  @doc """
+  Return every "complete" photo that has a CLIP embedding, suitable for
+  burst detection. Result shape matches the Python worker's expected input.
+
+  ## Returns
+
+    * `[{id, clip_embedding, sharpness_score, captured_at}]`
+  """
+  def list_photos_for_burst_detection do
+    Repo.all(
+      from p in Photo,
+        where: not is_nil(p.clip_embedding) and p.curation_status == "complete",
+        select: {p.id, p.clip_embedding, p.sharpness_score, p.captured_at}
+    )
+  end
+
+  @doc """
+  Write burst group assignments to the photos table.
+
+  Clears old groups first (sets all `burst_group` to NULL) then writes the
+  new assignments. Each entry in `assignments` is `{photo_id, group_id}`.
+
+  ## Parameters
+
+    * `assignments` — list of `{photo_id, group_id}` tuples.
+
+  ## Returns
+
+    * `:ok`
+  """
+  def assign_burst_groups(assignments) when is_list(assignments) do
+    Repo.transaction(fn ->
+      # Clear previous burst assignments
+      from(p in Photo, where: not is_nil(p.burst_group))
+      |> Repo.update_all(set: [burst_group: nil])
+
+      Enum.each(assignments, fn {id, group_id} ->
+        from(p in Photo, where: p.id == ^id)
+        |> Repo.update_all(set: [burst_group: group_id])
+      end)
+    end)
+
+    :ok
+  end
+
+  @doc """
+  Return burst groups for the gallery — each group is a list of photos,
+  ordered so the sharpest frame comes first.
+
+  ## Returns
+
+    * `[{group_id, [%Photo{}, ...]}]` — list of `{group_id, photos}` tuples,
+      sorted by group_id. Within each group, photos are ordered by
+      `sharpness_score DESC`.
+  """
+  def list_burst_groups do
+    photos =
+      Repo.all(
+        from p in Photo,
+          where: not is_nil(p.burst_group) and p.curation_status == "complete",
+          order_by: [asc: p.burst_group, desc: p.sharpness_score]
+      )
+
+    Enum.group_by(photos, & &1.burst_group)
+    |> Enum.sort_by(fn {group_id, _} -> group_id end)
   end
 
   @doc """
@@ -748,7 +930,7 @@ defmodule Orchestrator.Photos do
 
     * `file_path` — absolute path on disk.
     * `basename` — basename used to build the public `/uploads/...` URL.
-    * `source` — `"local"` or `"instagram"`.
+    * `source` — `"local"`.
 
   ## Returns
 
@@ -877,7 +1059,7 @@ defmodule Orchestrator.Photos do
   Return every named project with its photo count and a cover image URL.
 
   Used by the projects landing page to render the project grid. The cover
-  is the highest-`style_score` photo in that project (newest as tie-break).
+  is the highest-`preference_score` photo in that project (newest as tie-break).
 
   ## Returns
 
@@ -903,7 +1085,7 @@ defmodule Orchestrator.Photos do
         Repo.one(
           from p in Photo,
             where: p.project == ^name and not is_nil(p.url) and p.curation_status == "complete",
-            order_by: [desc_nulls_last: p.style_score, desc: p.inserted_at],
+            order_by: [desc_nulls_last: p.preference_score, desc: p.inserted_at],
             limit: 1,
             select: p.url
         )
@@ -943,18 +1125,23 @@ defmodule Orchestrator.Photos do
   @doc """
   Fetch every photo approved for blog export.
 
-  "Approved" means: a user rating exists *and* either the rating is ≥4 or
-  the AI's `style_score` is ≥75. Unrated photos are never included so the
-  user's deliberate judgment is always part of the cut.
+  "Approved" means: a user rating exists *and* either the rating is ≥4,
+  `manual_match` is true, or `preference_score` meets `match_threshold/0`.
+  Unrated photos are never included so the user's deliberate judgment is
+  always part of the cut.
 
   ## Returns
 
     * `[%Photo{}]` — newest first.
   """
   def list_approved do
+    threshold = @match_threshold
+
     Repo.all(
       from p in Photo,
-        where: not is_nil(p.user_rating) and (p.user_rating >= 4 or p.style_score >= 75),
+        where:
+          not is_nil(p.user_rating) and
+            (p.user_rating >= 4 or p.manual_match == true or p.preference_score >= ^threshold),
         order_by: [desc: p.inserted_at]
     )
   end
@@ -992,7 +1179,7 @@ defmodule Orchestrator.Photos do
   Looks up each tag in the profile, drops misses, and averages the surviving
   ratings on the 1..5 scale before normalizing to 0..100. Returns `nil` when
   there is no signal — either an empty profile or a photo whose tags
-  produced no matches — so the UI can fall back to the LLM `style_score`.
+  produced no matches — so the UI can fall back to `preference_score`.
 
   ## Parameters
 
@@ -1029,62 +1216,4 @@ defmodule Orchestrator.Photos do
     end
   end
 
-  @doc """
-  Generate a natural-language style description addendum from rating history.
-
-  Reads the affinity profile and surfaces the top-rated tags ("photos like
-  this score well") and the bottom-rated ones ("avoid these"). When a base
-  description is provided, the refinement is appended; otherwise the bare
-  insight is returned.
-
-  Returns `nil` when there is not enough data — currently fewer than 3
-  unique rated tags, or no top-tier (≥4.0) tags at all.
-
-  ## Parameters
-
-    * `base_description` — optional existing style description to extend.
-
-  ## Returns
-
-    * `String.t()` — the (possibly extended) refinement text.
-    * `nil` — when the profile is too thin to draw conclusions.
-
-  ## Examples
-
-      Orchestrator.Photos.suggest_style_refinement("Moody, cinematic.")
-      # => "Moody, cinematic.\\n\\n[Rating-derived refinement: ...]"
-  """
-  def suggest_style_refinement(base_description \\ "") do
-    profile = tag_affinity_profile()
-
-    if map_size(profile) < 3 do
-      nil
-    else
-      top = profile
-        |> Enum.filter(fn {_, r} -> r >= 4.0 end)
-        |> Enum.sort_by(&elem(&1, 1), :desc)
-        |> Enum.take(8)
-        |> Enum.map(&elem(&1, 0))
-
-      avoid = profile
-        |> Enum.filter(fn {_, r} -> r <= 2.0 end)
-        |> Enum.sort_by(&elem(&1, 1), :asc)
-        |> Enum.take(5)
-        |> Enum.map(&elem(&1, 0))
-
-      if top == [] do
-        nil
-      else
-        affinity = "Based on your ratings, photos with these qualities score well: #{Enum.join(top, ", ")}."
-        avoidance = if avoid != [], do: " Tend to avoid: #{Enum.join(avoid, ", ")}.", else: ""
-        insight = affinity <> avoidance
-
-        if base_description != "" do
-          base_description <> "\n\n[Rating-derived refinement: #{insight}]"
-        else
-          insight
-        end
-      end
-    end
-  end
 end

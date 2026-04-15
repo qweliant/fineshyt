@@ -15,8 +15,8 @@ defmodule Orchestrator.Workers.ConversionWorker do
     1. POST `{file_path}` to `http://127.0.0.1:8000/api/v1/convert` with a
        60s timeout (rawpy on a large RAW file can take that long).
     2. On HTTP 200, enqueue an `AiCurationWorker` job pointing at the
-       returned `jpeg_path`, carrying through `ref`, `style_description`,
-       `source`, and `project`.
+       returned `jpeg_path`, carrying through `ref`, `source`, and
+       `project`.
     3. On any non-200, transport error, or exception: detail is logged,
        recorded to `Orchestrator.ErrorLog`, and `{:error, reason}` is
        returned so Oban will retry up to `max_attempts: 3`.
@@ -41,7 +41,7 @@ defmodule Orchestrator.Workers.ConversionWorker do
   ## Parameters
 
     * `job` — `%Oban.Job{}`. `job.args` must include `"file_path"`.
-      Optional keys: `"ref"`, `"style_description"`, `"source"`, `"project"`.
+      Optional keys: `"ref"`, `"source"`, `"project"`.
 
   ## Returns
 
@@ -51,7 +51,6 @@ defmodule Orchestrator.Workers.ConversionWorker do
   @impl Oban.Worker
   def perform(%Oban.Job{args: %{"file_path" => file_path} = args} = job) do
     ref = Map.get(args, "ref", inspect(make_ref()))
-    style_description = Map.get(args, "style_description", "")
     source = Map.get(args, "source", "local")
     project = Map.get(args, "project")
 
@@ -62,15 +61,18 @@ defmodule Orchestrator.Workers.ConversionWorker do
            # rawpy on a large RAW file can take up to 60s
            receive_timeout: 60_000
          ) do
-      {:ok, %Req.Response{status: 200, body: %{"jpeg_path" => jpeg_path}}} ->
+      {:ok, %Req.Response{status: 200, body: %{"jpeg_path" => jpeg_path} = body}} ->
         Logger.info("Converted #{Path.basename(file_path)} → #{Path.basename(jpeg_path)}")
 
         %{
           "file_path" => jpeg_path,
           "ref" => ref,
-          "style_description" => style_description,
           "source" => source,
-          "project" => project
+          "project" => project,
+          "technical_score" => body["technical_score"],
+          "sharpness_score" => body["sharpness_score"],
+          "exposure_score" => body["exposure_score"],
+          "captured_at" => body["captured_at"]
         }
         |> Orchestrator.Workers.AiCurationWorker.new()
         |> Oban.insert()

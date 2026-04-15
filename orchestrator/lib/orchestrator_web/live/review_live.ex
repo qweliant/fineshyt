@@ -229,10 +229,21 @@ defmodule OrchestratorWeb.ReviewLive do
       nil -> socket
       photo ->
         case Photos.rate_photo(photo.id, value) do
-          {:ok, updated} -> socket |> patch_current(updated) |> flash_for("★ #{value}")
-          _ -> socket
+          {:ok, updated} ->
+            trigger_preference_retrain()
+            socket |> patch_current(updated) |> flash_for("★ #{value}")
+
+          _ ->
+            socket
         end
     end
+  end
+
+  # Debounced retrain — Oban unique job collapses a burst of ratings into
+  # a single PreferenceTrainWorker run within any 5-minute window.
+  defp trigger_preference_retrain do
+    Orchestrator.Workers.PreferenceTrainWorker.new(%{trigger: "rating_change"})
+    |> Oban.insert()
   end
 
   defp unrate_current(socket) do
@@ -470,10 +481,10 @@ defmodule OrchestratorWeb.ReviewLive do
                 </div>
               <% end %>
 
-              <%= if photo.style_score do %>
+              <%= if photo.preference_score do %>
                 <div>
-                  <p class="font-sans text-[9px] uppercase tracking-widest text-gray-600 mb-1">Style score</p>
-                  <p class="font-mono text-sm text-gray-300"><%= photo.style_score %><span class="text-gray-700"> / 100</span></p>
+                  <p class="font-sans text-[9px] uppercase tracking-widest text-gray-600 mb-1">Preference</p>
+                  <p class="font-mono text-sm text-gray-300"><%= photo.preference_score %><span class="text-gray-700"> / 100</span></p>
                 </div>
               <% end %>
 

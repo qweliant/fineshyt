@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  com.fineshyt.backup.plist — Daily automated backup via launchd.
+
+  Install:
+    cp scripts/com.fineshyt.backup.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.fineshyt.backup.plist
+
+  Uninstall:
+    launchctl unload ~/Library/LaunchAgents/com.fineshyt.backup.plist
+    rm ~/Library/LaunchAgents/com.fineshyt.backup.plist
+
+  Check status:
+    launchctl list | grep fineshyt
+
+  Run manually (outside schedule):
+    launchctl start com.fineshyt.backup
+
+  Logs: ~/.fineshyt-backups/backup.log
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.fineshyt.backup</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/qwelian/Programs/fineshyt/scripts/backup.sh</string>
+  </array>
+
+  <!-- Run daily at 2:00 AM -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>2</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+
+  <!-- Also run on load if the scheduled time was missed (e.g. laptop was asleep) -->
+  <key>StartInterval</key>
+  <integer>86400</integer>
+
+  <key>StandardOutPath</key>
+  <string>/Users/qwelian/.fineshyt-backups/backup.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/qwelian/.fineshyt-backups/backup.log</string>
+
+  <!-- Ensure Docker is accessible -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+</dict>
+</plist>

@@ -11,7 +11,8 @@
       "WebFetch(domain:instaloader.github.io)",
       "WebSearch",
       "WebFetch(domain:github.com)",
-      "Bash(echo \"exit=$?\")"
+      "Bash(echo \"exit=$?\")",
+      "Bash(uv run python -c ':*)"
     ]
   }
 }

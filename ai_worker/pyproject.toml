@@ -12,6 +12,11 @@ dependencies = [
     "pillow>=10.0",
     "rawpy>=0.18",
     "numpy>=1.24",
+    "torch>=2.2",
+    "torchvision>=0.17",
+    "open_clip_torch>=2.24",
+    "scikit-learn>=1.4",
+    "scipy>=1.12",
 ]
 
 [tool.ruff]

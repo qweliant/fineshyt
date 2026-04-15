@@ -12,7 +12,8 @@ defmodule OrchestratorWeb.GalleryLive do
 
     * `:filter` — `:all`, `:match`, `:no_match`, `:rated`, `:unrated`,
       `:for_projects`, `:failed`, `:rejected`
-    * `:sort` — `:newest`, `:score_desc`, `:score_asc`, `:rating_desc`
+    * `:sort` — `:newest`, `:preference_desc`, `:preference_asc`,
+      `:rating_desc`
     * `:search` — substring filter on subject + mood
     * `:page` — current 1-indexed page
     * `:project_filter` — project name to scope to, or `nil`
@@ -40,6 +41,11 @@ defmodule OrchestratorWeb.GalleryLive do
   use OrchestratorWeb, :live_view
 
   alias Orchestrator.Photos
+
+  # Preference score ≥ this → "✓ Match" badge. Sits just under the median
+  # of 5★-rated photos (≈71) — strict enough to skew toward actual 5★s
+  # while still catching the top of 4★.
+  @match_threshold 70
 
   @doc """
   LiveView mount. Subscribes to `"photo_updates"` and primes every assign
@@ -69,6 +75,8 @@ defmodule OrchestratorWeb.GalleryLive do
       |> assign(:tag_profile, Photos.tag_affinity_profile())
       |> assign(:selected, MapSet.new())
       |> assign(:bulk_project, "")
+      |> assign(:burst_groups, [])
+      |> assign(:match_threshold, @match_threshold)
       |> load_photos()
 
     {:ok, socket}
@@ -104,6 +112,14 @@ defmodule OrchestratorWeb.GalleryLive do
     |> load_photos()
   end
 
+  # Enqueue a preference-model retrain. Oban's `unique` constraint on the
+  # worker collapses a burst of rating keypresses into a single retrain
+  # within a 5-minute window, so calling this on every star press is cheap.
+  defp trigger_preference_retrain do
+    Orchestrator.Workers.PreferenceTrainWorker.new(%{trigger: "rating_change"})
+    |> Oban.insert()
+  end
+
   # ── events ────────────────────────────────────────────────────────────────
 
   @doc """
@@ -124,9 +140,9 @@ defmodule OrchestratorWeb.GalleryLive do
     * `"photo_keydown"` — `%{"id" => id, "key" => key}`. Keyboard while
       a photo card is focused: `1`–`5` rate, `p` pick (★5), `x`
       soft-reject, `m` toggle multi-select.
-    * `"override_score"` — `%{"id" => id, "score" => score}`. Inline edit
-      of `style_score`.
-    * `"toggle_match"` — `%{"id" => id}`. Flip the `style_match` boolean.
+    * `"toggle_match"` — `%{"id" => id}`. Flip the `manual_match` boolean
+      (a.k.a. "chef's pick"). Independent of the preference-driven MATCH
+      badge.
     * `"rate"` — `%{"id" => id, "rating" => rating}`. Star strip click.
     * `"delete_tag"` — `%{"id" => id, "tag" => tag}`. Remove tag chip.
     * `"add_tag"` — `%{"id" => id, "value" => tag}`. New tag input submit.
@@ -171,18 +187,29 @@ defmodule OrchestratorWeb.GalleryLive do
       "failed"       -> :failed
       "rejected"     -> :rejected
       "for_projects" -> :for_projects
+      "bursts"       -> :bursts
       _              -> :all
     end
-    {:noreply, socket |> assign(:selected, MapSet.new()) |> reload(filter: atom)}
+
+    socket = socket |> assign(:selected, MapSet.new())
+
+    socket =
+      if atom == :bursts do
+        assign(socket, :burst_groups, Photos.list_burst_groups())
+      else
+        socket
+      end
+
+    {:noreply, reload(socket, filter: atom)}
   end
 
   @impl Phoenix.LiveView
   def handle_event("set_sort", %{"sort" => sort}, socket) do
     atom = case sort do
-      "score_desc"  -> :score_desc
-      "score_asc"   -> :score_asc
-      "rating_desc" -> :rating_desc
-      _             -> :newest
+      "rating_desc"     -> :rating_desc
+      "preference_desc" -> :preference_desc
+      "preference_asc"  -> :preference_asc
+      _                 -> :newest
     end
     {:noreply, reload(socket, sort: atom)}
   end
@@ -204,9 +231,11 @@ defmodule OrchestratorWeb.GalleryLive do
     case key do
       k when k in ["1", "2", "3", "4", "5"] ->
         Photos.rate_photo(photo_id, String.to_integer(k))
+        trigger_preference_retrain()
         {:noreply, socket |> assign(:tag_profile, Photos.tag_affinity_profile()) |> load_photos()}
       "p" ->
         Photos.rate_photo(photo_id, 5)
+        trigger_preference_retrain()
         {:noreply, socket |> assign(:tag_profile, Photos.tag_affinity_profile()) |> load_photos()}
       "x" ->
         Photos.reject_photo(photo_id)
@@ -225,21 +254,16 @@ defmodule OrchestratorWeb.GalleryLive do
   end
 
   @impl Phoenix.LiveView
-  def handle_event("override_score", %{"id" => id, "score" => score}, socket) do
-    Photos.override_curation(String.to_integer(id), %{style_score: String.to_integer(score)})
-    {:noreply, load_photos(socket)}
-  end
-
-  @impl Phoenix.LiveView
   def handle_event("toggle_match", %{"id" => id}, socket) do
     photo = Photos.get_photo!(String.to_integer(id))
-    Photos.override_curation(photo.id, %{style_match: !photo.style_match})
+    Photos.override_curation(photo.id, %{manual_match: !(photo.manual_match || false)})
     {:noreply, load_photos(socket)}
   end
 
   @impl Phoenix.LiveView
   def handle_event("rate", %{"id" => id, "rating" => rating_str}, socket) do
     Photos.rate_photo(String.to_integer(id), String.to_integer(rating_str))
+    trigger_preference_retrain()
     {:noreply, socket |> assign(:tag_profile, Photos.tag_affinity_profile()) |> load_photos()}
   end
 
@@ -281,8 +305,7 @@ defmodule OrchestratorWeb.GalleryLive do
           "file_path" => fp,
           "ref" => ref,
           "source" => source,
-          "project" => project,
-          "style_description" => ""
+          "project" => project
         })
         |> Oban.insert()
         {:noreply, socket |> put_flash(:info, "Re-queued for curation.") |> load_photos()}
@@ -301,8 +324,7 @@ defmodule OrchestratorWeb.GalleryLive do
         "file_path" => photo.file_path,
         "ref" => ref,
         "source" => photo.source || "local",
-        "project" => photo.project,
-        "style_description" => ""
+        "project" => photo.project
       })
       |> Oban.insert()
     end)
@@ -402,6 +424,58 @@ defmodule OrchestratorWeb.GalleryLive do
     end
   end
 
+  # ── burst detection ───────────────────────────────────────────────────────
+
+  @impl Phoenix.LiveView
+  def handle_event("detect_bursts", _params, socket) do
+    Orchestrator.Workers.BurstDetectionWorker.new(%{})
+    |> Oban.insert()
+
+    {:noreply, put_flash(socket, :info, "Burst detection started — this takes a few seconds.")}
+  end
+
+  @impl Phoenix.LiveView
+  def handle_event("keep_best", %{"group" => group_str}, socket) do
+    group_id = String.to_integer(group_str)
+    burst_groups = socket.assigns.burst_groups
+
+    case List.keyfind(burst_groups, group_id, 0) do
+      {^group_id, [_best | rest]} when rest != [] ->
+        reject_ids = Enum.map(rest, & &1.id)
+        {:ok, n} = Photos.bulk_reject(reject_ids)
+
+        {:noreply,
+         socket
+         |> assign(:burst_groups, Photos.list_burst_groups())
+         |> put_flash(:info, "Kept sharpest, rejected #{n} duplicate#{if n == 1, do: "", else: "s"}.")
+         |> load_photos()}
+
+      _ ->
+        {:noreply, socket}
+    end
+  end
+
+  @impl Phoenix.LiveView
+  def handle_event("keep_best_all", _params, socket) do
+    burst_groups = socket.assigns.burst_groups
+    reject_ids =
+      Enum.flat_map(burst_groups, fn {_gid, [_best | rest]} ->
+        Enum.map(rest, & &1.id)
+      end)
+
+    if reject_ids == [] do
+      {:noreply, socket}
+    else
+      {:ok, n} = Photos.bulk_reject(reject_ids)
+
+      {:noreply,
+       socket
+       |> assign(:burst_groups, Photos.list_burst_groups())
+       |> put_flash(:info, "Kept sharpest per burst, rejected #{n} duplicate#{if n == 1, do: "", else: "s"}.")
+       |> load_photos()}
+    end
+  end
+
   # ── pubsub ────────────────────────────────────────────────────────────────
 
   @doc """
@@ -426,6 +500,24 @@ defmodule OrchestratorWeb.GalleryLive do
       |> assign(:tag_profile, Photos.tag_affinity_profile())
       |> assign(:projects, Photos.list_projects())
       |> load_photos()}
+  end
+
+  def handle_info({:preference_scores_updated, _version}, socket) do
+    {:noreply, load_photos(socket)}
+  end
+
+  def handle_info({:burst_detection_complete, n_groups}, socket) do
+    socket =
+      if socket.assigns.filter == :bursts do
+        assign(socket, :burst_groups, Photos.list_burst_groups())
+      else
+        socket
+      end
+
+    {:noreply,
+     socket
+     |> put_flash(:info, "Detected #{n_groups} burst group#{if n_groups == 1, do: "", else: "s"}.")
+     |> load_photos()}
   end
 
   def handle_info({:curation_failed, _ref, _basename, _reason}, socket) do
@@ -483,30 +575,30 @@ defmodule OrchestratorWeb.GalleryLive do
 
       <%!-- Search + Sort bar --%>
       <div class="flex flex-col sm:flex-row gap-4 mb-8">
-        <div class="flex-1 relative">
+        <form phx-change="search" class="flex-1 relative">
           <input
             type="text"
             placeholder="search subjects, mood…"
             value={@search}
-            phx-change="search"
             phx-debounce="300"
             name="q"
             class="w-full border border-gray-300 bg-transparent px-4 py-2.5 font-sans text-sm focus:outline-none focus:border-[#111111] placeholder-gray-300"
           />
           <%= if @search != "" do %>
-            <button phx-click="search" phx-value-q="" class="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-700 font-sans text-sm">×</button>
+            <button type="button" phx-click="search" phx-value-q="" class="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-700 font-sans text-sm">×</button>
           <% end %>
-        </div>
-        <select
-          phx-change="set_sort"
-          name="sort"
-          class="border border-gray-300 bg-[#fcfbf9] px-4 py-2.5 font-sans text-xs uppercase tracking-widest focus:outline-none focus:border-[#111111] cursor-pointer"
-        >
-          <option value="newest"      selected={@sort == :newest}>Newest</option>
-          <option value="score_desc"  selected={@sort == :score_desc}>Score ↓</option>
-          <option value="score_asc"   selected={@sort == :score_asc}>Score ↑</option>
-          <option value="rating_desc" selected={@sort == :rating_desc}>Rating ↓</option>
-        </select>
+        </form>
+        <form phx-change="set_sort">
+          <select
+            name="sort"
+            class="border border-gray-300 bg-[#fcfbf9] px-4 py-2.5 font-sans text-xs uppercase tracking-widest focus:outline-none focus:border-[#111111] cursor-pointer"
+          >
+            <option value="newest"           selected={@sort == :newest}>Newest</option>
+            <option value="preference_desc"  selected={@sort == :preference_desc}>Preference ↓</option>
+            <option value="preference_asc"   selected={@sort == :preference_asc}>Preference ↑</option>
+            <option value="rating_desc"      selected={@sort == :rating_desc}>Rating ↓</option>
+          </select>
+        </form>
       </div>
 
       <%!-- Filter Tabs --%>
@@ -516,6 +608,7 @@ defmodule OrchestratorWeb.GalleryLive do
           {"For Projects", :for_projects},
           {"Match ✓", :match}, {"No Match ✗", :no_match},
           {"Rated", :rated}, {"Unrated", :unrated},
+          {"Bursts", :bursts},
           {"Rejected", :rejected}, {"Failed", :failed}
         ] do %>
           <button
@@ -563,6 +656,71 @@ defmodule OrchestratorWeb.GalleryLive do
           >
             Retry All
           </button>
+        </div>
+      <% end %>
+
+      <%!-- Burst view --%>
+      <%= if @filter == :bursts do %>
+        <div class="mb-6 p-4 border border-purple-200 bg-purple-50/30">
+          <div class="flex items-center gap-4 mb-4">
+            <p class="font-sans text-xs text-purple-700 flex-1">
+              <%= if @burst_groups == [] do %>
+                No burst groups detected yet. Click <span class="font-bold">Detect Bursts</span> to scan for visually similar photo sequences.
+              <% else %>
+                <%= length(@burst_groups) %> burst group<%= if length(@burst_groups) != 1, do: "s" %> found.
+                The sharpest frame in each group is shown first.
+              <% end %>
+            </p>
+            <button
+              phx-click="detect_bursts"
+              class="font-sans text-[10px] uppercase tracking-widest text-purple-700 border border-purple-300 px-3 py-1.5 hover:border-purple-600 transition-colors shrink-0"
+            >
+              Detect Bursts
+            </button>
+            <%= if @burst_groups != [] do %>
+              <button
+                phx-click="keep_best_all"
+                data-confirm={"Keep sharpest in all #{length(@burst_groups)} groups, reject the rest?"}
+                class="font-sans text-[10px] uppercase tracking-widest text-[#111111] border border-[#111111] px-3 py-1.5 hover:bg-[#111111] hover:text-[#fcfbf9] transition-colors shrink-0"
+              >
+                Keep Best All
+              </button>
+            <% end %>
+          </div>
+
+          <%= for {group_id, photos} <- @burst_groups do %>
+            <% [best | rest] = photos %>
+            <div class="mb-6 border border-gray-200 bg-white/70 p-3">
+              <div class="flex items-center justify-between mb-2">
+                <span class="font-sans text-[10px] uppercase tracking-widest text-gray-500">
+                  Burst #<%= group_id %> · <%= length(photos) %> photos
+                </span>
+                <button
+                  phx-click="keep_best"
+                  phx-value-group={group_id}
+                  data-confirm={"Keep the sharpest and reject #{length(rest)} other#{if length(rest) == 1, do: "", else: "s"}?"}
+                  class="font-sans text-[10px] uppercase tracking-widest text-purple-700 border border-purple-300 px-2 py-1 hover:border-purple-600 transition-colors"
+                >
+                  Keep Best
+                </button>
+              </div>
+              <div class="flex gap-2 overflow-x-auto">
+                <%= for photo <- photos do %>
+                  <div class={[
+                    "relative shrink-0 w-32 h-32 border-2",
+                    photo.id == best.id && "border-emerald-500",
+                    photo.id != best.id && "border-gray-200 opacity-60"
+                  ]}>
+                    <img src={photo.url} class="w-full h-full object-cover" loading="lazy" />
+                    <div class="absolute bottom-0 left-0 right-0 bg-black/60 text-white font-sans text-[9px] px-1 py-0.5 text-center">
+                      sharp <%= photo.sharpness_score || "?" %>
+                      <%= if photo.id == best.id, do: " ★", else: "" %>
+                    </div>
+                  </div>
+                <% end %>
+              </div>
+            </div>
+          <% end %>
         </div>
       <% end %>
 
@@ -639,6 +797,7 @@ defmodule OrchestratorWeb.GalleryLive do
         </div>
       <% end %>
 
+      <%= if @filter != :bursts do %>
       <%!-- Keyboard hint --%>
       <p class="mb-4 font-sans text-[9px] uppercase tracking-widest text-gray-300">
         Click a photo, then: <span class="text-gray-400">1–5</span> rate · <span class="text-gray-400">p</span> pick · <span class="text-gray-400">x</span> reject · <span class="text-gray-400">m</span> select · or use <.link navigate={~p"/review"} class="text-gray-500 underline">Review</.link> for single-image culling
@@ -697,22 +856,49 @@ defmodule OrchestratorWeb.GalleryLive do
 
               <%!-- Top badges --%>
               <div class="absolute top-2 right-2 flex flex-col items-end gap-1">
-                <div class={[
-                  "font-sans text-xs font-bold uppercase tracking-wider px-2 py-1",
-                  photo.style_match && "bg-[#111111] text-[#fcfbf9]",
-                  photo.style_match == false && "bg-white text-gray-500 border border-gray-300"
-                ]}>
-                  <%= if photo.style_match, do: "✓ Match", else: "✗ No" %>
-                </div>
-                <%= if photo.style_score != nil do %>
-                  <% conf = photo.style_score
-                     {conf_label, conf_class} = cond do
-                       conf >= 80 -> {"high conf", "bg-emerald-900/80 text-emerald-300 border-emerald-700"}
-                       conf >= 50 -> {"med conf", "bg-yellow-900/80 text-yellow-300 border-yellow-700"}
-                       true       -> {"low conf", "bg-red-900/80 text-red-300 border-red-700"}
+                <%= cond do %>
+                  <% photo.manual_match -> %>
+                    <div class="bg-amber-400 text-[#111111] font-sans text-xs font-bold uppercase tracking-wider px-2 py-1">
+                      ★ Chef's Pick
+                    </div>
+                  <% photo.preference_score != nil and photo.preference_score >= @match_threshold -> %>
+                    <div class="bg-[#111111] text-[#fcfbf9] font-sans text-xs font-bold uppercase tracking-wider px-2 py-1">
+                      ✓ Match
+                    </div>
+                  <% photo.preference_score != nil -> %>
+                    <div class="bg-white text-gray-500 border border-gray-300 font-sans text-xs font-bold uppercase tracking-wider px-2 py-1">
+                      ✗ No
+                    </div>
+                  <% true -> %>
+                <% end %>
+                <%= if photo.technical_score != nil do %>
+                  <% tech = photo.technical_score
+                     {tech_label, tech_class} = cond do
+                       tech >= 75 -> {"sharp", "bg-sky-900/80 text-sky-300 border-sky-700"}
+                       tech >= 50 -> {"ok",    "bg-slate-800/80 text-slate-300 border-slate-600"}
+                       true       -> {"soft",  "bg-red-900/80 text-red-300 border-red-700"}
+                     end
+                     tech_title =
+                       "sharpness #{photo.sharpness_score || "?"} · exposure #{photo.exposure_score || "?"}" %>
+                  <div
+                    title={tech_title}
+                    class={["font-sans text-[9px] uppercase tracking-wider px-2 py-0.5 border font-bold", tech_class]}
+                  >
+                    <%= tech_label %> · <%= tech %>
+                  </div>
+                <% end %>
+                <%= if photo.preference_score != nil do %>
+                  <% pref = photo.preference_score
+                     {pref_label, pref_class} = cond do
+                       pref >= 75 -> {"taste", "bg-fuchsia-900/80 text-fuchsia-200 border-fuchsia-700"}
+                       pref >= 50 -> {"maybe", "bg-purple-900/80 text-purple-200 border-purple-700"}
+                       true       -> {"meh",   "bg-gray-800/80 text-gray-300 border-gray-600"}
                      end %>
-                  <div class={["font-sans text-[9px] uppercase tracking-wider px-2 py-0.5 border font-bold", conf_class]}>
-                    <%= conf_label %> · <%= conf %>
+                  <div
+                    title={"preference model v#{photo.preference_model_version || "?"}"}
+                    class={["font-sans text-[9px] uppercase tracking-wider px-2 py-0.5 border font-bold", pref_class]}
+                  >
+                    <%= pref_label %> · <%= pref %>
                   </div>
                 <% end %>
                 <%= if vibe do %>
@@ -793,29 +979,6 @@ defmodule OrchestratorWeb.GalleryLive do
 
                 <p class="text-[#fcfbf9] font-serif text-sm leading-snug mb-1"><%= photo.subject %></p>
 
-                <div class="flex items-center gap-2 mt-1">
-                  <input
-                    type="range" min="0" max="100"
-                    value={photo.style_score || 0}
-                    phx-change="override_score"
-                    phx-debounce="300"
-                    phx-value-id={photo.id}
-                    name="score"
-                    oninput="this.nextElementSibling.textContent = this.value"
-                    class="flex-1 h-px cursor-pointer [accent-color:white]"
-                  />
-                  <span class="text-gray-300 font-sans text-xs tabular-nums w-6 text-right shrink-0">
-                    <%= photo.style_score || 0 %>
-                  </span>
-                </div>
-
-                <%= if photo.style_reason && photo.style_reason != "" do %>
-                  <div class="mt-2 border-l-2 border-gray-700 pl-2">
-                    <p class="font-sans text-[9px] uppercase tracking-widest text-gray-600 mb-0.5">model says</p>
-                    <p class="text-gray-400 font-sans text-[10px] italic leading-snug"><%= photo.style_reason %></p>
-                  </div>
-                <% end %>
-
                 <div class="flex flex-wrap gap-1 mt-2">
                   <%= for tag <- photo.suggested_tags do %>
                     <button
@@ -857,13 +1020,14 @@ defmodule OrchestratorWeb.GalleryLive do
                   <button
                     phx-click="toggle_match"
                     phx-value-id={photo.id}
+                    title="Chef's pick — manual override, independent of the preference score"
                     class={[
                       "font-sans text-[10px] uppercase tracking-widest px-2 py-1 transition-colors",
-                      photo.style_match && "text-[#fcfbf9] border border-gray-500 hover:border-red-400 hover:text-red-400",
-                      !photo.style_match && "text-gray-500 border border-gray-700 hover:border-gray-400 hover:text-gray-300"
+                      photo.manual_match && "bg-amber-400 text-[#111111] border border-amber-400 hover:bg-amber-300",
+                      !photo.manual_match && "text-gray-500 border border-gray-700 hover:border-amber-400 hover:text-amber-300"
                     ]}
                   >
-                    <%= if photo.style_match, do: "✓ match", else: "✗ no" %>
+                    <%= if photo.manual_match, do: "★ picked", else: "☆ pick" %>
                   </button>
                 </div>
 
@@ -899,6 +1063,7 @@ defmodule OrchestratorWeb.GalleryLive do
           </div>
         <% end %>
       <% end %>
+      <% end %><%!-- /if @filter != :bursts --%>
 
     </div>
     """

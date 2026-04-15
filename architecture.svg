@@ -1,0 +1,140 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 820" font-family="ui-serif, Georgia, 'Times New Roman', serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#111111"/>
+    </marker>
+    <marker id="arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#9a3412"/>
+    </marker>
+  </defs>
+
+  <rect width="960" height="820" fill="#fcfbf9"/>
+
+  <text x="40" y="50" font-weight="900" font-size="30" fill="#111111" letter-spacing="-1">FINE. SHYT.</text>
+  <text x="40" y="72" font-family="ui-sans-serif, system-ui, sans-serif" font-size="10" fill="#666" letter-spacing="5">ARCHITECTURE · 2026</text>
+  <line x1="40" y1="85" x2="920" y2="85" stroke="#111111" stroke-width="2"/>
+
+  <!-- Browser -->
+  <g>
+    <rect x="40" y="110" width="880" height="64" fill="#ffffff" stroke="#111111" stroke-width="2"/>
+    <text x="60" y="138" font-size="15" font-weight="700" fill="#111111">Browser — Phoenix LiveView</text>
+    <text x="60" y="160" font-family="ui-sans-serif, system-ui, sans-serif" font-size="10" fill="#666">Ingest  ·  Gallery  ·  Review  ·  Projects  —  real-time via WebSocket</text>
+  </g>
+
+  <!-- Browser <-> Orchestrator link -->
+  <line x1="480" y1="174" x2="480" y2="212" stroke="#111111" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#arrow)"/>
+  <text x="488" y="198" font-family="ui-sans-serif, system-ui, sans-serif" font-size="9" fill="#666">WS</text>
+
+  <!-- Orchestrator -->
+  <g>
+    <rect x="40" y="212" width="880" height="238" fill="#ffffff" stroke="#111111" stroke-width="2"/>
+    <text x="60" y="240" font-size="15" font-weight="700" fill="#111111">Orchestrator — Elixir / Phoenix / Oban</text>
+    <text x="60" y="258" font-family="ui-sans-serif, system-ui, sans-serif" font-size="9" fill="#888" letter-spacing="2">PIPELINE STAGES (each on its own Oban queue)</text>
+
+    <!-- Workers -->
+    <g font-family="ui-sans-serif, system-ui, sans-serif">
+      <rect x="60" y="272" width="195" height="78" fill="#fcfbf9" stroke="#111111"/>
+      <text x="72" y="294" font-size="11" font-weight="700" fill="#111111">1 · ConversionWorker</text>
+      <text x="72" y="313" font-size="9" fill="#555">RAW / TIFF → 1440px JPEG</text>
+      <text x="72" y="327" font-size="9" fill="#555">sharpness + exposure scores</text>
+      <text x="72" y="341" font-size="9" fill="#555">EXIF timestamp extraction</text>
+
+      <rect x="265" y="272" width="195" height="78" fill="#fcfbf9" stroke="#111111"/>
+      <text x="277" y="294" font-size="11" font-weight="700" fill="#111111">2 · AiCurationWorker</text>
+      <text x="277" y="313" font-size="9" fill="#555">vision LLM → metadata only</text>
+      <text x="277" y="327" font-size="9" fill="#555">subject · mood · tags</text>
+      <text x="277" y="341" font-size="9" fill="#9a3412" font-style="italic">no taste judgment</text>
+
+      <rect x="470" y="272" width="195" height="78" fill="#fcfbf9" stroke="#111111"/>
+      <text x="482" y="294" font-size="11" font-weight="700" fill="#111111">3 · EmbeddingWorker</text>
+      <text x="482" y="313" font-size="9" fill="#555">CLIP ViT-L-14</text>
+      <text x="482" y="327" font-size="9" fill="#555">768-dim image vector</text>
+      <text x="482" y="341" font-size="9" fill="#555">stored in pgvector</text>
+
+      <rect x="675" y="272" width="225" height="78" fill="#111111"/>
+      <text x="687" y="294" font-size="11" font-weight="700" fill="#fcfbf9">4 · PreferenceTrainWorker</text>
+      <text x="687" y="313" font-size="9" fill="#dddddd">Ridge regression (debounced)</text>
+      <text x="687" y="327" font-size="9" fill="#dddddd">retrain on your 1–5 ratings</text>
+      <text x="687" y="341" font-size="9" fill="#fcd34d" font-style="italic">owns the taste call</text>
+    </g>
+
+    <line x1="255" y1="311" x2="265" y2="311" stroke="#111111" marker-end="url(#arrow)"/>
+    <line x1="460" y1="311" x2="470" y2="311" stroke="#111111" marker-end="url(#arrow)"/>
+    <line x1="665" y1="311" x2="675" y2="311" stroke="#111111" marker-end="url(#arrow)"/>
+
+    <!-- Rating feedback loop -->
+    <path d="M 787,272 C 787,242 787,242 500,242 C 260,242 100,242 100,266" fill="none" stroke="#9a3412" stroke-width="1.2" stroke-dasharray="3 3" marker-end="url(#arrow-accent)"/>
+    <text x="395" y="236" font-family="ui-sans-serif, system-ui, sans-serif" font-size="9" fill="#9a3412" font-style="italic">★ rating event triggers debounced retrain + score backfill</text>
+
+    <!-- DB -->
+    <rect x="60" y="365" width="840" height="72" fill="#111111"/>
+    <text x="76" y="390" font-size="13" font-weight="700" fill="#fcfbf9">PostgreSQL 16 + pgvector</text>
+    <text x="76" y="412" font-family="ui-mono, 'SF Mono', Menlo, monospace" font-size="9.5" fill="#dddddd">photos: file_path  ·  user_rating  ·  manual_match  ·  preference_score  ·  clip_embedding  ·  sharpness/exposure  ·  subject/mood/tags</text>
+    <text x="76" y="428" font-family="ui-mono, 'SF Mono', Menlo, monospace" font-size="9.5" fill="#888">oban_jobs     ·    retries + unique-constraint debouncing</text>
+  </g>
+
+  <!-- HTTP to AI Worker -->
+  <line x1="480" y1="450" x2="480" y2="495" stroke="#111111" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="490" y="478" font-family="ui-sans-serif, system-ui, sans-serif" font-size="10" fill="#666">HTTP</text>
+
+  <!-- AI Worker -->
+  <g>
+    <rect x="40" y="495" width="880" height="245" fill="#ffffff" stroke="#111111" stroke-width="2"/>
+    <text x="60" y="523" font-size="15" font-weight="700" fill="#111111">AI Worker — Python / FastAPI</text>
+    <text x="60" y="541" font-family="ui-sans-serif, system-ui, sans-serif" font-size="9" fill="#888" letter-spacing="2">FOUR ENDPOINTS · STATELESS · SWAPPABLE</text>
+
+    <g font-family="ui-sans-serif, system-ui, sans-serif">
+      <rect x="60" y="560" width="202" height="150" fill="#fcfbf9" stroke="#111111"/>
+      <text x="72" y="582" font-size="11" font-weight="700" fill="#111111">/convert</text>
+      <text x="72" y="602" font-size="9" fill="#555">Pillow + libraw</text>
+      <text x="72" y="617" font-size="9" fill="#555">RAW (CR2/NEF/ARW/DNG) → JPEG</text>
+      <text x="72" y="632" font-size="9" fill="#555">variance-of-Laplacian</text>
+      <text x="72" y="647" font-size="9" fill="#555">histogram clipping</text>
+      <text x="72" y="672" font-size="9" fill="#9a3412" font-style="italic">full-res quality scoring</text>
+      <text x="72" y="686" font-size="9" fill="#9a3412" font-style="italic">before the downsize</text>
+
+      <rect x="272" y="560" width="202" height="150" fill="#fcfbf9" stroke="#111111"/>
+      <text x="284" y="582" font-size="11" font-weight="700" fill="#111111">/curate</text>
+      <text x="284" y="602" font-size="9" fill="#555">vision LLM via instructor</text>
+      <text x="284" y="617" font-size="9" fill="#555">Pydantic-validated output</text>
+      <text x="284" y="632" font-size="9" fill="#555">subject · content_type</text>
+      <text x="284" y="647" font-size="9" fill="#555">mood · lighting · tags</text>
+      <text x="284" y="672" font-size="9" fill="#555">configurable: ollama ·</text>
+      <text x="284" y="686" font-size="9" fill="#555">Claude · HuggingFace</text>
+
+      <rect x="484" y="560" width="202" height="150" fill="#fcfbf9" stroke="#111111"/>
+      <text x="496" y="582" font-size="11" font-weight="700" fill="#111111">/embed</text>
+      <text x="496" y="602" font-size="9" fill="#555">open_clip ViT-L-14</text>
+      <text x="496" y="617" font-size="9" fill="#555">laion2b_s32b_b82k weights</text>
+      <text x="496" y="632" font-size="9" fill="#555">768-dim, L2-normalized</text>
+      <text x="496" y="672" font-size="9" fill="#555">also powers burst detection</text>
+      <text x="496" y="686" font-size="9" fill="#555">(cosine sim + timestamps)</text>
+
+      <rect x="696" y="560" width="204" height="150" fill="#111111"/>
+      <text x="708" y="582" font-size="11" font-weight="700" fill="#fcfbf9">/preference/*</text>
+      <text x="708" y="602" font-size="9" fill="#dddddd">scikit-learn Ridge(α=1.0)</text>
+      <text x="708" y="617" font-size="9" fill="#dddddd">+ StandardScaler</text>
+      <text x="708" y="632" font-size="9" fill="#dddddd">linear probe on CLIP</text>
+      <text x="708" y="647" font-size="9" fill="#dddddd">pickled to ~/.fineshyt/</text>
+      <text x="708" y="672" font-size="9" fill="#fcd34d" font-style="italic">predicts 1–5, mapped</text>
+      <text x="708" y="686" font-size="9" fill="#fcd34d" font-style="italic">to 0–100 preference_score</text>
+    </g>
+  </g>
+
+  <!-- Legend -->
+  <g font-family="ui-sans-serif, system-ui, sans-serif">
+    <line x1="40" y1="760" x2="920" y2="760" stroke="#e5e5e5" stroke-width="1"/>
+    <text x="40" y="782" font-size="10" fill="#666" letter-spacing="2">LEGEND</text>
+
+    <line x1="115" y1="779" x2="145" y2="779" stroke="#111111" stroke-width="1.5"/>
+    <text x="152" y="782" font-size="9" fill="#555">data flow</text>
+
+    <line x1="215" y1="779" x2="245" y2="779" stroke="#9a3412" stroke-width="1.2" stroke-dasharray="3 3"/>
+    <text x="252" y="782" font-size="9" fill="#555">rating feedback</text>
+
+    <rect x="345" y="773" width="14" height="10" fill="#111111"/>
+    <text x="365" y="782" font-size="9" fill="#555">taste-owning path (Ridge preference model)</text>
+
+    <text x="40" y="802" font-size="9" fill="#999" font-style="italic">vision LLM produces objective metadata only — your ratings + the Ridge model own every taste call.</text>
+  </g>
+</svg>

@@ -7,13 +7,26 @@ defmodule Orchestrator.Photos.Photo do
     * **Source / location**
       * `file_path` — absolute path on disk (required)
       * `url` — web-servable path under `/uploads/...`
-      * `source` — `"local"` or `"instagram"`
-      * `instagram_shortcode` — unique IG shortcode when applicable
+      * `source` — `"local"`
 
-    * **Style verdict** (set by the AI worker)
-      * `style_match` — boolean: does this photo match the photographer's style?
-      * `style_score` — 0–100 confidence integer
-      * `style_reason` — free-form explanation
+    * **Manual override**
+      * `manual_match` — boolean: user-flagged "chef's pick." Independent
+        of the preference model; used to override or augment the
+        automatic MATCH badge in the gallery.
+
+    * **Technical quality** (computed by the Python converter on the full-res image)
+      * `technical_score` — 0–100 weighted blend (0.7 sharpness + 0.3 exposure)
+      * `sharpness_score` — variance-of-Laplacian, normalized 0–100
+      * `exposure_score` — histogram clipping penalty, 0–100
+
+    * **Preference learning** (CLIP embedding + Ridge linear probe)
+      * `clip_embedding` — 768-dim CLIP image embedding (`ViT-L-14`),
+        populated by `Orchestrator.Workers.EmbeddingWorker`
+      * `preference_score` — 0–100 personalized score from the Ridge model
+        fit on the user's star ratings
+      * `preference_model_version` — integer version of the Ridge model that
+        produced the current `preference_score`; stale rows are re-scored
+        on the next retrain
 
     * **Content metadata** (set by the AI worker)
       * `subject`, `artistic_mood`, `lighting_critique`, `content_type`
@@ -44,11 +57,16 @@ defmodule Orchestrator.Photos.Photo do
     field :file_path, :string
     field :url, :string
     field :source, :string
-    field :instagram_shortcode, :string
 
-    field :style_match, :boolean
-    field :style_score, :integer
-    field :style_reason, :string
+    field :manual_match, :boolean, default: false
+
+    field :technical_score, :integer
+    field :sharpness_score, :integer
+    field :exposure_score, :integer
+
+    field :clip_embedding, Pgvector.Ecto.Vector
+    field :preference_score, :integer
+    field :preference_model_version, :integer
 
     field :subject, :string
     field :artistic_mood, :string
@@ -57,6 +75,8 @@ defmodule Orchestrator.Photos.Photo do
     field :suggested_tags, {:array, :string}, default: []
     field :user_rating, :integer
     field :project, :string
+    field :captured_at, :naive_datetime
+    field :burst_group, :integer
     field :curation_status, :string, default: "complete"
     field :failure_reason, :string
 
@@ -67,8 +87,7 @@ defmodule Orchestrator.Photos.Photo do
   Build a changeset for inserts and updates.
 
   Casts every user-and-AI-writable field, validates that `user_rating` (when
-  present) sits in 1..5, requires `file_path`, and enforces uniqueness on
-  `instagram_shortcode` so re-ingesting the same IG post is a no-op.
+  present) sits in 1..5, and requires `file_path`.
 
   ## Parameters
 
@@ -88,13 +107,14 @@ defmodule Orchestrator.Photos.Photo do
   def changeset(photo, attrs) do
     photo
     |> cast(attrs, [
-      :file_path, :url, :source, :instagram_shortcode,
-      :style_match, :style_score, :style_reason,
+      :file_path, :url, :source,
+      :manual_match,
+      :technical_score, :sharpness_score, :exposure_score,
+      :clip_embedding, :preference_score, :preference_model_version,
       :subject, :artistic_mood, :lighting_critique, :content_type, :suggested_tags,
-      :user_rating, :project, :curation_status, :failure_reason
+      :user_rating, :project, :captured_at, :burst_group, :curation_status, :failure_reason
     ])
     |> validate_inclusion(:user_rating, 1..5, message: "must be between 1 and 5")
     |> validate_required([:file_path])
-    |> unique_constraint(:instagram_shortcode)
   end
 end

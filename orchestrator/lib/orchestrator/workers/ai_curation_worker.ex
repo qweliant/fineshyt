@@ -33,9 +33,7 @@ defmodule Orchestrator.Workers.AiCurationWorker do
 
     * `"file_path"` (required) — absolute path to source file
     * `"ref"` (required) — opaque reference echoed back in PubSub messages
-    * `"style_description"` (optional) — passed through to the AI worker
     * `"source"` (optional, default `"upload"`)
-    * `"instagram_shortcode"` (optional)
     * `"project"` (optional)
 
   ## Return values (visible to Oban)
@@ -79,10 +77,12 @@ defmodule Orchestrator.Workers.AiCurationWorker do
       } = job) do
     Logger.info("Starting AI curation for #{file_path}...")
 
-    style_description = Map.get(args, "style_description", "")
     source = Map.get(args, "source", "upload")
-    instagram_shortcode = Map.get(args, "instagram_shortcode")
     project = Map.get(args, "project")
+    technical_score = Map.get(args, "technical_score")
+    sharpness_score = Map.get(args, "sharpness_score")
+    exposure_score = Map.get(args, "exposure_score")
+    captured_at = parse_captured_at(Map.get(args, "captured_at"))
     basename = Path.basename(file_path)
 
     uploads_dir = Path.join([:code.priv_dir(:orchestrator), "static", "uploads"])
@@ -104,9 +104,7 @@ defmodule Orchestrator.Workers.AiCurationWorker do
         else
           image_binary = File.read!(dest)
 
-          form_fields =
-            [file: {image_binary, filename: basename, content_type: "image/jpeg"}] ++
-              if style_description != "", do: [style_description: style_description], else: []
+          form_fields = [file: {image_binary, filename: basename, content_type: "image/jpeg"}]
 
           case Req.post("http://127.0.0.1:8000/api/v1/curate",
                  form_multipart: form_fields,
@@ -114,22 +112,35 @@ defmodule Orchestrator.Workers.AiCurationWorker do
                ) do
             {:ok, %Req.Response{status: 200, body: metadata}} ->
               Photos.delete_failed_if_exists(dest)
-              Photos.create_photo(%{
-                file_path: dest,
-                url: "/uploads/#{basename}",
-                source: source,
-                instagram_shortcode: instagram_shortcode,
-                project: project,
-                style_match: metadata["style_match"],
-                style_score: metadata["style_score"],
-                style_reason: metadata["style_reason"],
-                subject: metadata["subject"],
-                artistic_mood: metadata["artistic_mood"],
-                lighting_critique: metadata["lighting_critique"],
-                content_type: metadata["content_type"],
-                suggested_tags: metadata["suggested_tags"],
-                curation_status: "complete"
-              })
+
+              insert_result =
+                Photos.create_photo(%{
+                  file_path: dest,
+                  url: "/uploads/#{basename}",
+                  source: source,
+                  project: project,
+                  technical_score: technical_score,
+                  sharpness_score: sharpness_score,
+                  exposure_score: exposure_score,
+                  subject: metadata["subject"],
+                  artistic_mood: metadata["artistic_mood"],
+                  lighting_critique: metadata["lighting_critique"],
+                  content_type: metadata["content_type"],
+                  suggested_tags: metadata["suggested_tags"],
+                  captured_at: captured_at,
+                  curation_status: "complete"
+                })
+
+              # Kick off CLIP embedding in the background. Embedding failures
+              # are non-fatal for curation — the photo is already usable.
+              case insert_result do
+                {:ok, %{id: photo_id}} ->
+                  Orchestrator.Workers.EmbeddingWorker.new(%{photo_id: photo_id})
+                  |> Oban.insert()
+
+                _ ->
+                  :noop
+              end
 
               Logger.info("AI Curation successful for #{basename}!")
               Phoenix.PubSub.broadcast(
@@ -226,4 +237,13 @@ defmodule Orchestrator.Workers.AiCurationWorker do
       {:curation_failed, ref, basename, reason}
     )
   end
+
+  defp parse_captured_at(nil), do: nil
+  defp parse_captured_at(str) when is_binary(str) do
+    case NaiveDateTime.from_iso8601(str) do
+      {:ok, ndt} -> ndt
+      _ -> nil
+    end
+  end
+  defp parse_captured_at(_), do: nil
 end
