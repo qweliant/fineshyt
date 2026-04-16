@@ -280,7 +280,7 @@ defmodule OrchestratorWeb.CuratorLive do
                 name="sample"
                 value={@sample}
                 min="1"
-                max="500"
+                max="1000"
                 class="w-full border border-gray-300 focus:border-[#111111] px-4 py-3 font-sans text-sm text-gray-700 focus:outline-none transition-colors bg-transparent"
               />
               <p class="mt-2 font-sans text-[9px] text-gray-400 leading-relaxed">

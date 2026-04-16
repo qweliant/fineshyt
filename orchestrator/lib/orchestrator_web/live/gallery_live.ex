@@ -67,7 +67,7 @@ defmodule OrchestratorWeb.GalleryLive do
     socket =
       socket
       |> assign(:filter, :all)
-      |> assign(:sort, :newest)
+      |> assign(:sort, :vibe_desc)
       |> assign(:search, "")
       |> assign(:page, 1)
       |> assign(:project_filter, nil)
@@ -95,14 +95,33 @@ defmodule OrchestratorWeb.GalleryLive do
   end
 
   defp load_photos(socket) do
-    opts  = query_opts(socket)
-    total = Photos.count_photos(opts)
-    pages = max(1, ceil(total / Photos.page_size()))
-    assign(socket,
-      photos: Photos.list_photos(opts),
-      total:  total,
-      pages:  pages
-    )
+    opts = query_opts(socket)
+
+    if socket.assigns.sort == :vibe_desc do
+      # Vibe is computed in-memory from the tag profile, so we fetch all
+      # matching photos, score + sort here, then slice the page.
+      profile = socket.assigns.tag_profile
+      all = Photos.list_photos(Keyword.merge(opts, page: :all, sort: :newest))
+
+      sorted =
+        Enum.sort_by(all, fn photo ->
+          {Photos.vibe_score(photo, profile) || -1, photo.preference_score || -1}
+        end, :desc)
+
+      total = length(sorted)
+      pages = max(1, ceil(total / Photos.page_size()))
+
+      page_photos =
+        sorted
+        |> Enum.drop((socket.assigns.page - 1) * Photos.page_size())
+        |> Enum.take(Photos.page_size())
+
+      assign(socket, photos: page_photos, total: total, pages: pages)
+    else
+      total = Photos.count_photos(opts)
+      pages = max(1, ceil(total / Photos.page_size()))
+      assign(socket, photos: Photos.list_photos(opts), total: total, pages: pages)
+    end
   end
 
   defp reload(socket, overrides) do
@@ -206,6 +225,7 @@ defmodule OrchestratorWeb.GalleryLive do
   @impl Phoenix.LiveView
   def handle_event("set_sort", %{"sort" => sort}, socket) do
     atom = case sort do
+      "vibe_desc"       -> :vibe_desc
       "rating_desc"     -> :rating_desc
       "preference_desc" -> :preference_desc
       "preference_asc"  -> :preference_asc
@@ -593,6 +613,7 @@ defmodule OrchestratorWeb.GalleryLive do
             name="sort"
             class="border border-gray-300 bg-[#fcfbf9] px-4 py-2.5 font-sans text-xs uppercase tracking-widest focus:outline-none focus:border-[#111111] cursor-pointer"
           >
+            <option value="vibe_desc"        selected={@sort == :vibe_desc}>Vibe ↓</option>
             <option value="newest"           selected={@sort == :newest}>Newest</option>
             <option value="preference_desc"  selected={@sort == :preference_desc}>Preference ↓</option>
             <option value="preference_asc"   selected={@sort == :preference_asc}>Preference ↑</option>
@@ -854,65 +875,34 @@ defmodule OrchestratorWeb.GalleryLive do
                 </div>
               <% end %>
 
-              <%!-- Top badges --%>
+              <%!-- Primary score — top-left --%>
+              <% primary = vibe || photo.preference_score %>
+              <%= if primary do %>
+                <div class={[
+                  "absolute top-2 left-2 font-sans text-[11px] font-bold tabular-nums px-2 py-1",
+                  primary >= 70 && "bg-[#111111] text-[#fcfbf9]",
+                  primary >= 40 and primary < 70 && "bg-[#fcfbf9]/90 text-gray-600 border border-gray-300",
+                  primary < 40 && "bg-[#fcfbf9]/70 text-gray-400 border border-gray-200"
+                ]}>
+                  <%= primary %>
+                </div>
+              <% end %>
+
+              <%!-- Match status + project — top-right --%>
               <div class="absolute top-2 right-2 flex flex-col items-end gap-1">
                 <%= cond do %>
                   <% photo.manual_match -> %>
-                    <div class="bg-amber-400 text-[#111111] font-sans text-xs font-bold uppercase tracking-wider px-2 py-1">
-                      ★ Chef's Pick
+                    <div class="bg-amber-400 text-[#111111] font-sans text-[10px] font-bold uppercase tracking-wider px-2 py-1">
+                      ★ Pick
                     </div>
                   <% photo.preference_score != nil and photo.preference_score >= @match_threshold -> %>
-                    <div class="bg-[#111111] text-[#fcfbf9] font-sans text-xs font-bold uppercase tracking-wider px-2 py-1">
+                    <div class="bg-[#111111] text-[#fcfbf9] font-sans text-[10px] font-bold uppercase tracking-wider px-2 py-1">
                       ✓ Match
-                    </div>
-                  <% photo.preference_score != nil -> %>
-                    <div class="bg-white text-gray-500 border border-gray-300 font-sans text-xs font-bold uppercase tracking-wider px-2 py-1">
-                      ✗ No
                     </div>
                   <% true -> %>
                 <% end %>
-                <%= if photo.technical_score != nil do %>
-                  <% tech = photo.technical_score
-                     {tech_label, tech_class} = cond do
-                       tech >= 75 -> {"sharp", "bg-sky-900/80 text-sky-300 border-sky-700"}
-                       tech >= 50 -> {"ok",    "bg-slate-800/80 text-slate-300 border-slate-600"}
-                       true       -> {"soft",  "bg-red-900/80 text-red-300 border-red-700"}
-                     end
-                     tech_title =
-                       "sharpness #{photo.sharpness_score || "?"} · exposure #{photo.exposure_score || "?"}" %>
-                  <div
-                    title={tech_title}
-                    class={["font-sans text-[9px] uppercase tracking-wider px-2 py-0.5 border font-bold", tech_class]}
-                  >
-                    <%= tech_label %> · <%= tech %>
-                  </div>
-                <% end %>
-                <%= if photo.preference_score != nil do %>
-                  <% pref = photo.preference_score
-                     {pref_label, pref_class} = cond do
-                       pref >= 75 -> {"taste", "bg-fuchsia-900/80 text-fuchsia-200 border-fuchsia-700"}
-                       pref >= 50 -> {"maybe", "bg-purple-900/80 text-purple-200 border-purple-700"}
-                       true       -> {"meh",   "bg-gray-800/80 text-gray-300 border-gray-600"}
-                     end %>
-                  <div
-                    title={"preference model v#{photo.preference_model_version || "?"}"}
-                    class={["font-sans text-[9px] uppercase tracking-wider px-2 py-0.5 border font-bold", pref_class]}
-                  >
-                    <%= pref_label %> · <%= pref %>
-                  </div>
-                <% end %>
-                <%= if vibe do %>
-                  <div class="bg-[#fcfbf9] border border-[#111111] font-sans text-[10px] uppercase tracking-wider px-2 py-1 font-bold">
-                    vibe <%= vibe %>
-                  </div>
-                <% end %>
-                <%= if photo.content_type do %>
-                  <div class="bg-[#fcfbf9]/90 border border-gray-300 font-sans text-[9px] uppercase tracking-wider px-2 py-0.5 text-gray-500">
-                    <%= photo.content_type %>
-                  </div>
-                <% end %>
                 <%= if photo.project do %>
-                  <div class="bg-[#fcfbf9] border border-gray-400 font-sans text-[10px] uppercase tracking-wider px-2 py-1 text-gray-600 max-w-[80px] truncate">
+                  <div class="bg-[#fcfbf9]/90 border border-gray-300 font-sans text-[9px] uppercase tracking-wider px-2 py-0.5 text-gray-500 max-w-[80px] truncate">
                     <%= photo.project %>
                   </div>
                 <% end %>
@@ -979,7 +969,23 @@ defmodule OrchestratorWeb.GalleryLive do
 
                 <p class="text-[#fcfbf9] font-serif text-sm leading-snug mb-1"><%= photo.subject %></p>
 
-                <div class="flex flex-wrap gap-1 mt-2">
+                <%!-- Score breakdown --%>
+                <div class="flex items-center gap-1.5 mt-1 mb-1 flex-wrap">
+                  <%= if vibe do %>
+                    <span class="font-sans text-[9px] uppercase tracking-wider text-gray-400 border border-gray-700 px-1.5 py-0.5">vibe <%= vibe %></span>
+                  <% end %>
+                  <%= if photo.preference_score do %>
+                    <span class="font-sans text-[9px] uppercase tracking-wider text-gray-400 border border-gray-700 px-1.5 py-0.5">pref <%= photo.preference_score %></span>
+                  <% end %>
+                  <%= if photo.technical_score do %>
+                    <span class="font-sans text-[9px] uppercase tracking-wider text-gray-400 border border-gray-700 px-1.5 py-0.5">tech <%= photo.technical_score %></span>
+                  <% end %>
+                  <%= if photo.content_type do %>
+                    <span class="font-sans text-[9px] uppercase tracking-wider text-gray-500"><%= photo.content_type %></span>
+                  <% end %>
+                </div>
+
+                <div class="flex flex-wrap gap-1 mt-1">
                   <%= for tag <- photo.suggested_tags do %>
                     <button
                       phx-click="delete_tag"

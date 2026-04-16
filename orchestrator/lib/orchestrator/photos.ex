@@ -234,6 +234,7 @@ defmodule Orchestrator.Photos do
   defp apply_sort(q, :preference_asc),  do: order_by(q, [p], [asc_nulls_last: p.preference_score, desc: p.inserted_at])
   defp apply_sort(q, _),                do: order_by(q, [p], desc: p.inserted_at)
 
+  defp paginate(q, :all), do: q
   defp paginate(q, page) do
     offset = (page - 1) * @page_size
     q |> limit(@page_size) |> offset(^offset)
@@ -831,7 +832,7 @@ defmodule Orchestrator.Photos do
     Repo.all(
       from p in Photo,
         where: p.curation_status == "complete" and is_nil(p.user_rating),
-        order_by: [asc: p.inserted_at, asc: p.id],
+        order_by: [desc_nulls_last: p.preference_score, desc: p.inserted_at],
         limit: ^limit
     )
   end
@@ -1201,6 +1202,7 @@ defmodule Orchestrator.Photos do
     nil
   end
 
+  def vibe_score(%Photo{suggested_tags: nil}, _profile), do: nil
   def vibe_score(%Photo{suggested_tags: []}, _profile), do: nil
 
   def vibe_score(%Photo{suggested_tags: tags}, profile) do
