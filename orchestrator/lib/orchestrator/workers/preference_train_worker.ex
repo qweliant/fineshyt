@@ -8,9 +8,12 @@ defmodule Orchestrator.Workers.PreferenceTrainWorker do
 
   Runs on the `:preference` queue with concurrency 1 — there is exactly one
   pickled model on disk and no benefit to racing retrains. Uses
-  `unique: [period: 300, states: [:available, :scheduled, :executing]]` so
-  that a burst of rating keypresses or a batch of new embeddings all
-  collapse into a single retrain job within any given 5-minute window.
+  `unique: [period: 300, fields: [:worker, :queue],
+  states: [:available, :scheduled, :executing, :completed]]` so that any
+  retrain attempt within 5 minutes of the last one — regardless of
+  `trigger` args — is suppressed. `:completed` is included so a finished
+  retrain enforces a real cooldown instead of the next enqueue firing
+  immediately.
 
   ## Flow
 
@@ -35,7 +38,11 @@ defmodule Orchestrator.Workers.PreferenceTrainWorker do
   use Oban.Worker,
     queue: :preference,
     max_attempts: 3,
-    unique: [period: 300, states: [:available, :scheduled, :executing]]
+    unique: [
+      period: 300,
+      fields: [:worker, :queue],
+      states: [:available, :scheduled, :executing, :completed]
+    ]
 
   require Logger
 

@@ -16,9 +16,13 @@ defmodule Orchestrator.Workers.EmbeddingWorker do
     2. POST `{file_path}` to `http://127.0.0.1:8000/api/v1/embed` with a
        120s timeout (first call pays the ~900MB CLIP model load).
     3. On HTTP 200, persist `clip_embedding` via `Photos.override_curation/2`.
-    4. Enqueue a `PreferenceTrainWorker` job tagged `"embedding_added"`;
-       Oban's unique constraint on that worker handles debouncing so a
-       burst of new embeddings collapses into one retrain.
+    4. Enqueue follow-up preference work. A retrain only makes sense
+       when this photo contributes a new training sample, i.e. it has a
+       `user_rating` already. Otherwise the new embedding just needs its
+       `preference_score` computed against the existing model, so we
+       enqueue a `PreferenceScoreWorker` instead. This keeps batch
+       imports of unrated photos from triggering hundreds of pointless
+       retrains.
     5. On any non-200, transport error, or exception: detail is logged,
        recorded to `Orchestrator.ErrorLog`, and `{:error, reason}` is
        returned so Oban retries up to `max_attempts: 3`.
@@ -72,8 +76,7 @@ defmodule Orchestrator.Workers.EmbeddingWorker do
           {:ok, %Req.Response{status: 200, body: %{"embedding" => embedding}}} ->
             case Photos.override_curation(photo_id, %{clip_embedding: embedding}) do
               {:ok, _photo} ->
-                Orchestrator.Workers.PreferenceTrainWorker.new(%{trigger: "embedding_added"})
-                |> Oban.insert()
+                enqueue_preference_followup(photo)
 
                 Logger.info("Embedded photo #{photo_id} (dim=#{length(embedding)})")
                 :ok
@@ -96,6 +99,16 @@ defmodule Orchestrator.Workers.EmbeddingWorker do
             {:error, inspect(reason)}
         end
     end
+  end
+
+  defp enqueue_preference_followup(%{user_rating: rating, id: id}) when not is_nil(rating) do
+    Orchestrator.Workers.PreferenceTrainWorker.new(%{trigger: "rated_embedding_added", photo_id: id})
+    |> Oban.insert()
+  end
+
+  defp enqueue_preference_followup(%{id: id}) do
+    Orchestrator.Workers.PreferenceScoreWorker.new(%{photo_id: id})
+    |> Oban.insert()
   end
 
   defp record_error(%Oban.Job{attempt: attempt, max_attempts: max}, basename, reason, opts) do
