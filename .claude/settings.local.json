@@ -12,7 +12,8 @@
       "WebSearch",
       "WebFetch(domain:github.com)",
       "Bash(echo \"exit=$?\")",
-      "Bash(uv run python -c ':*)"
+      "Bash(uv run python -c ':*)",
+      "Bash(uv run --active python -c ' *)"
     ]
   }
 }

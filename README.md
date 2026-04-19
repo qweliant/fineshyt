@@ -45,9 +45,118 @@ When you import a photo, here's what happens:
 1. **ConversionWorker** — opens the source file (RAW, TIFF, whatever), computes sharpness/exposure scores on the full-res image, extracts EXIF timestamps, resizes to 1440px JPEG.
 2. **AiCurationWorker** — sends the JPEG to the vision LLM for subject, content type, mood, lighting critique, and tag suggestions. No style/taste judgment.
 3. **EmbeddingWorker** — computes a 768-dim CLIP image embedding, stores it in pgvector.
-4. **PreferenceTrainWorker** (debounced) — if you have 20+ rated photos, retrains the Ridge model and backfills `preference_score` across the archive. Collapses rapid rating bursts into one retrain via Oban unique constraints.
+4. **PreferenceTrainWorker / PreferenceScoreWorker** — after the embedding lands, the pipeline forks. If the photo already has a star rating, it becomes a new training sample and `PreferenceTrainWorker` (debounced to one run per 5 min) refits the Ridge model and backfills `preference_score` across the archive. If the photo is unrated, a much cheaper `PreferenceScoreWorker` just scores it against the existing model — no retrain. This keeps batch imports of hundreds of unrated photos from triggering hundreds of pointless retrains.
 
 Each step is a separate Oban job. Failures retry independently without blocking the rest of the pipeline.
+
+## Design
+
+This is how I think about the architecture — a RADIO breakdown (**R**equirements, **A**rchitecture, **D**ata model, **I**nterface, **O**ptimizations). Non-trivial changes to how the pieces talk to each other get argued in this frame before they ship. If a proposal doesn't fit one of the five boxes, it's probably a feature, not a design change.
+
+### R — Requirements
+
+**Problem:** curate ~1TB of botanical/macro TIFFs and surface the ones that match my aesthetic, not a generic one.
+
+**Scoping decisions, and the tradeoff behind each:**
+
+- **Single-user, local-first.** No multi-tenant auth, no cloud sync. Runs on one machine.
+- **The user owns the taste call, not the LLM.** LLM produces objective metadata only; a model trained on my star ratings owns the aesthetic verdict.
+- **Real-time UI.** The gallery updates as background jobs finish, rather than rendering a batch after the whole import completes.
+- **Inputs:** TIFF / JPEG / PNG / WebP + camera RAW (CR2 / CR3 / NEF / ARW / DNG).
+- **Failures are per-photo, not per-batch.** Every pipeline step is its own Oban job with independent retries.
+- **Output:** a live gallery for browsing and a blog export (`photos.json` manifest).
+
+**Explicit non-goals:** multi-user auth, cloud sync, training a bespoke vision model from scratch.
+
+### A — Architecture
+
+Two services plus infrastructure, decoupled by a Postgres-backed job queue.
+
+**1. Orchestrator ([orchestrator/](orchestrator/))** — Elixir / Phoenix LiveView / Oban / Postgres + pgvector. Owns the UI, DB, job queue, and pub/sub fanout. Workers live in [orchestrator/lib/orchestrator/workers/](orchestrator/lib/orchestrator/workers/):
+
+- `ConversionWorker` → RAW/TIFF → 1440px JPEG + sharpness / exposure
+- `AiCurationWorker` → vision-LLM metadata
+- `EmbeddingWorker` → CLIP embedding, then forks to either train or score
+- `PreferenceTrainWorker` → Ridge retrain (debounced to 5 min)
+- `PreferenceScoreWorker` → score a single photo without retraining
+- `BurstDetectionWorker` → near-duplicate grouping
+- `LocalBatchImportWorker` → directory walk
+
+**2. AI Worker ([ai_worker/src/fineshyt_ai/](ai_worker/src/fineshyt_ai/))** — Python / FastAPI / Instructor / open_clip / scikit-learn. Stateless inference service split along a transport/domain seam: every ML op is a plain function in `domain/`, and `transports/http/` is the thin FastAPI layer that marshals them. LLM-agnostic (LLaVA / Claude / Llama via `LLM_BASE_URL`). Holds CLIP (ViT-L-14, 768-dim) in process memory and a pickled Ridge preference model at `~/.fineshyt/preference_model.pkl`.
+
+**3. Infrastructure:** Postgres 16 + pgvector (Docker), on-disk JPEGs under `priv/static/uploads/`.
+
+**Flow:** import → Oban fans out a per-photo job chain → orchestrator calls the AI worker over HTTP → writes results back → LiveView pushes the update.
+
+### D — Data Model
+
+The `photos` table in [orchestrator/lib/orchestrator/photos/photo.ex:57-81](orchestrator/lib/orchestrator/photos/photo.ex#L57-L81) is the single aggregate — everything about a photo lives on one row, owned by the orchestrator:
+
+| Field group   | Fields                                                                                      | Written by                                       |
+|---------------|---------------------------------------------------------------------------------------------|--------------------------------------------------|
+| Identity      | `file_path`, `url`, `source`                                                                | Orchestrator on ingest                           |
+| Tech quality  | `technical_score`, `sharpness_score`, `exposure_score`                                      | AI Worker `/convert` + `/quality_scores`         |
+| Semantic      | `clip_embedding` (pgvector, 768-dim)                                                        | AI Worker `/embed`                               |
+| Taste         | `preference_score` (0-100), `preference_model_version`, `user_rating` (1-5), `manual_match` | Ridge via `/preference/score`; user via LiveView |
+| LLM metadata  | `subject`, `content_type`, `artistic_mood`, `lighting_critique`, `suggested_tags[]`         | AI Worker `/curate`                              |
+| Organization  | `project`, `burst_group`, `captured_at`                                                     | User + `BurstDetectionWorker`                    |
+| Lifecycle     | `curation_status`, `failure_reason`                                                         | Oban workers                                     |
+
+**Other persisted state:**
+
+- `oban_jobs` — queue state, orchestrator-only.
+- `error_logs` — every worker failure, retained for the `/logs` LiveView.
+- `~/.fineshyt/preference_model.pkl` — `{model, scaler, version, clip_model, embed_dim}`, worker-local.
+
+### I — Interface
+
+Elixir ↔ Python, HTTP + JSON, all POST:
+
+| Endpoint                    | Input                                           | Output                                                 | Caller                                             |
+|-----------------------------|-------------------------------------------------|--------------------------------------------------------|----------------------------------------------------|
+| `/api/v1/convert`           | `{file_path}`                                   | `{jpeg_path, sharpness, exposure, captured_at}`        | `ConversionWorker`                                 |
+| `/api/v1/curate`            | multipart `file`                                | `PhotoMetadata`                                        | `AiCurationWorker`                                 |
+| `/api/v1/embed`             | `{file_path}`                                   | `{embedding[768], model, dim}`                         | `EmbeddingWorker`                                  |
+| `/api/v1/preference/train`  | `{samples[{embedding, rating}], min_samples}`   | `{model_version, n_samples, train_r2}`                 | `PreferenceTrainWorker`                            |
+| `/api/v1/preference/score`  | `{embeddings[][]}`                              | `{scores[0-100], model_version}`                       | `PreferenceTrainWorker`, `PreferenceScoreWorker`   |
+| `/api/v1/exif`              | `{file_path}`                                   | `{captured_at}`                                        | backfill task                                      |
+| `/api/v1/quality_scores`    | `{file_path}`                                   | `{sharpness, exposure}`                                | backfill task                                      |
+| `/api/v1/detect_bursts`     | `{photos[{id, embedding, captured_at}]}`        | `{groups[]}`                                           | `BurstDetectionWorker`                             |
+
+Errors are funneled through a structured payload — `{op, error_type, message, context, upstream?}` — with `openai.APIError` unwrapped so upstream status codes (404 / 413 / 429 / 503) survive the hop. The Elixir side parses the body in `AiCurationWorker.format_api_error/1`, records it in `error_logs`, and decides whether to retry.
+
+**User ↔ Orchestrator:** Phoenix LiveView at `/` (single-upload), `/gallery` (archive / rate / filter / chef's-pick / burst keep-reject / project assignment / export), and `/logs` (live error stream).
+
+### Operational ugliness (a sub-note on I)
+
+This is where the operational ugliness has to stay visible. `_status_for` and `_error_detail` on the Python side unwrap `openai.APIError` so upstream codes — 404 model-not-found, 413 payload-too-large, 429 rate-limited — survive the hop to Elixir as structured payloads ([ai_worker/src/fineshyt_ai/errors.py](ai_worker/src/fineshyt_ai/errors.py)); `AiCurationWorker.format_api_error/1` parses them back into human sentences, photos land in a `curation_status: "failed"` lane with a populated `failure_reason`, and every worker hands the failure plus its Oban `attempt`/`max_attempts` counters to `ErrorLog.record/1`, itself wrapped in `rescue` so the audit trail can't be taken down by the thing it's auditing ([orchestrator/lib/orchestrator/error_log.ex](orchestrator/lib/orchestrator/error_log.ex)). Inserts broadcast on PubSub to a real-time `/logs` feed. None of that is polish — AI pipelines fail in extremely specific and uninteresting ways (the LLM returns a string where a float should be, `rawpy` segfaults on one RAW in a thousand, Ollama 429s under burst, a worker vanishes mid-inference), and most of the real work here isn't "ask the model, receive magic" but figuring out why outputs are malformed, why a worker is wedged, or why jobs disappeared into the void. The error log belongs in this story because it reflects the actual development experience, not the idealized one.
+
+### O — Optimizations & deep dive
+
+The current bottleneck is synchronous RPC: Oban → FastAPI holds a socket open for the 2–30s of LLM inference, and workers serialize on a single request at a time. Fine for a laptop, wrong shape if this ever needs to scale.
+
+Ranked by learning-per-weekend:
+
+**Pick first — RabbitMQ + the claim-check pattern.**
+
+- Orchestrator publishes `{photo_id, file_path}` to a RabbitMQ queue. The file already lives on shared disk, so we skip Base64 entirely — that's a literal claim check, no S3 needed locally.
+- Python workers drop FastAPI and become plain `pika` consumer loops. No web server, no open ports. They pull work; they don't get pushed.
+- Results go back to Elixir via an AMQP consumer that updates the DB and broadcasts to LiveView.
+- Scaling becomes `docker compose up --scale worker=10`. Backpressure is just "the queue gets long." A worker crash → RabbitMQ redelivers the message. Same architectural shape as telemetry pipelines on Ankaa.
+
+The Python restructure in [ai_worker/src/fineshyt_ai/](ai_worker/src/fineshyt_ai/) was prep work for this. Every `domain/` function is already callable without FastAPI, so the migration is writing a new `transports/queue/` package, not rewriting the ML code.
+
+**Skip for now — gRPC / Protobuf.** Strict contracts are great, but schema churn while iterating on `PhotoMetadata` (it's been reshaped more than once) makes the codegen loop annoying. Revisit once the schema stabilizes.
+
+**Skip — Kafka / raw TCP.** Wrong tool for a solo laptop. You'd be debugging ZooKeeper or hand-rolled frame protocols instead of learning pipelines.
+
+**Other angles worth time once the broker is in:**
+
+- **Native macOS app** — SwiftUI shell over the same orchestrator HTTP API. Real file-system access (no uploads dance) and proper RAW thumbnails via `ImageIO`.
+- **ONNX → Core ML for CLIP on-device.** Export ViT-L-14 to Core ML and run embeddings on the Apple Neural Engine. Kills the 3GB Python RAM footprint for the embedding path and makes a native offline app viable.
+- **Active learning for ratings.** Surface the photos Ridge is least confident about (closest to the decision boundary) instead of picking randomly. Gets from 20 → 200 rated labels much faster, with better-shaped training data.
+- **Replace Ridge with a small MLP head** once there are 200+ ratings. A linear probe flattens out; a 2-layer net on frozen CLIP features can capture non-linear taste curves.
+- **Natural-language search** (see *Future work*) — CLIP's text encoder ships in the same checkpoint, so this is a ~50-line endpoint plus a search box, not a research project.
 
 ## LLM options
 
