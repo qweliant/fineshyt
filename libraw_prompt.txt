@@ -1,0 +1,145 @@
+Build a new Elixir library called :libraw — a Rustler NIF wrapping libraw for native camera RAW
+decoding in the BEAM. Push all work to the repo you are scoped to.
+
+
+WHAT TO BUILD
+=============
+
+A Mix project exposing two public functions:
+
+    LibRaw.decode(path, opts \\ [])
+    Returns {:ok, %{pixels: binary, width: integer, height: integer, colors: integer, bps: integer}}
+         or {:error, reason}
+    opts:
+      use_camera_wb   boolean, default true
+      no_auto_bright  boolean, default false
+      output_bps      8 or 16, default 8
+      gamma           :srgb | :linear | {g0, g1}, default :srgb
+
+    LibRaw.metadata(path)
+    Returns {:ok, %{camera_make: string, camera_model: string, captured_at: DateTime.t() or nil,
+                    iso: float, shutter: float, aperture: float, orientation: integer}}
+         or {:error, reason}
+
+Both NIFs must run on Dirty CPU Schedulers. Decoding takes 100-500ms, far over the 1ms NIF budget.
+
+
+PROJECT STRUCTURE
+=================
+
+    lib/
+      lib_raw.ex          public API: decode/2, metadata/1, gamma resolution, timestamp parsing
+      lib_raw/
+        nif.ex            use Rustler, otp_app: :libraw, crate: "libraw_nif" + NIF stubs
+    native/
+      libraw_nif/
+        Cargo.toml        deps: rustler = "0.33"; build-deps: cc = "1", pkg-config = "0.3"
+        build.rs          pkg_config::probe("libraw") for dynamic linking; cc::Build compiles wrapper.c
+        src/
+          lib.rs          rustler::init! and two #[rustler::nif(schedule = "DirtyCpu")] functions
+          wrapper.c       thin C shim with accessor functions (see below)
+          raw.rs          safe Rust RAII wrapper around libraw_data_t
+          error.rs        LibRawError enum
+
+
+KEY DESIGN DECISION: THE C SHIM
+================================
+
+Do NOT use bindgen or the libraw-sys crate. Instead write a wrapper.c that exposes thin accessor
+functions, compiled via the cc crate in build.rs. The C compiler handles all struct field offsets;
+Rust calls opaque C functions. This is resilient across libraw versions 0.20, 0.21, 0.22.
+
+wrapper.c must contain:
+
+    #include <libraw/libraw.h>
+
+    // param setters
+    void lrnif_set_output_bps(libraw_data_t *lr, int bps)        { lr->params.output_bps = bps; }
+    void lrnif_set_use_camera_wb(libraw_data_t *lr, int v)       { lr->params.use_camera_wb = v; }
+    void lrnif_set_no_auto_bright(libraw_data_t *lr, int v)      { lr->params.no_auto_bright = v; }
+    void lrnif_set_gamm(libraw_data_t *lr, double g0, double g1) { lr->params.gamm[0]=g0; lr->params.gamm[1]=g1; }
+
+    // metadata getters
+    const char* lrnif_get_make(libraw_data_t *lr)      { return lr->idata.make; }
+    const char* lrnif_get_model(libraw_data_t *lr)     { return lr->idata.model; }
+    time_t      lrnif_get_timestamp(libraw_data_t *lr) { return lr->other.timestamp; }
+    float       lrnif_get_iso(libraw_data_t *lr)       { return lr->other.iso_speed; }
+    float       lrnif_get_shutter(libraw_data_t *lr)   { return lr->other.shutter; }
+    float       lrnif_get_aperture(libraw_data_t *lr)  { return lr->other.aperture; }
+    int         lrnif_get_flip(libraw_data_t *lr)      { return lr->sizes.flip; }
+
+    // processed image accessors
+    unsigned short lrnif_image_height(libraw_processed_image_t *img)    { return img->height; }
+    unsigned short lrnif_image_width(libraw_processed_image_t *img)     { return img->width; }
+    unsigned short lrnif_image_colors(libraw_processed_image_t *img)    { return img->colors; }
+    unsigned short lrnif_image_bits(libraw_processed_image_t *img)      { return img->bits; }
+    unsigned int   lrnif_image_data_size(libraw_processed_image_t *img) { return img->data_size; }
+    unsigned char* lrnif_image_data(libraw_processed_image_t *img)      { return img->data; }
+
+
+BUILD.RS
+========
+
+    fn main() {
+        let libraw = pkg_config::Config::new()
+            .atleast_version("0.20")
+            .probe("libraw")
+            .expect("libraw >= 0.20 not found. Install: brew install libraw / apt install libraw-dev");
+
+        cc::Build::new()
+            .file("src/wrapper.c")
+            .includes(&libraw.include_paths)
+            .compile("libraw_wrapper");
+
+        // pkg_config already emits cargo:rustc-link-lib=raw (dynamic linking)
+    }
+
+
+RUST DECODE FLOW (raw.rs)
+=========================
+
+    libraw_init(0)
+    libraw_open_file(path)
+    set params via lrnif_set_* wrappers
+    libraw_unpack()
+    libraw_dcraw_process()
+    libraw_dcraw_make_mem_image()
+    copy img->data into OwnedBinary
+    libraw_dcraw_clear_mem(img)
+    libraw_recycle() + libraw_close()   <- RAII Drop on RawHandle struct
+
+RUST METADATA FLOW: same open, but skip unpack/process. Read fields via lrnif_get_* then close.
+
+
+RETURNING BINARY DATA FROM THE NIF
+===================================
+
+Use NewBinary / OwnedBinary for the pixel buffer. Return the decode result as a map built with
+rustler::types::map::map_new(env) plus sequential map_put calls. Return metadata as a
+#[derive(NifStruct)] struct (no binary field, so lifetimes are not a problem).
+
+
+MIX.EXS DEPENDENCIES
+=====================
+
+    {:rustler, "~> 0.33", runtime: false},
+    {:rustler_precompiled, "~> 0.8"},   # wire up before Hex publish
+    {:ex_doc, "~> 0.31", only: :dev, runtime: false}
+
+LGPL compliance: libraw is dynamically linked. Document brew install libraw / apt install libraw-dev
+as a runtime prerequisite in the README.
+
+
+NON-GOALS FOR THIS INITIAL BUILD
+=================================
+
+- rustler_precompiled cross-compilation matrix (add before Hex publish)
+- Vix/Image zero-copy integration (future)
+- Streaming/chunked output for large files (current approach copies to a single binary)
+
+
+INSTALL PREREQUISITE (document in README)
+==========================================
+
+    brew install libraw        # macOS
+    apt install libraw-dev     # Debian/Ubuntu
