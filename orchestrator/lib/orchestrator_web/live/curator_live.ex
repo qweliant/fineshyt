@@ -97,8 +97,24 @@ defmodule OrchestratorWeb.CuratorLive do
 
   @impl Phoenix.LiveView
   def handle_event("stop", _params, socket) do
-    Oban.cancel_all_jobs(from(j in Oban.Job, where: j.queue == "ai_jobs"))
-    {:noreply, assign(socket, status: :idle)}
+    # Pause both pipeline queues so executing workers can't sneak a follow-on
+    # job in (ConversionWorker enqueues ai_jobs; LocalBatchImportWorker
+    # enqueues conversion). Then cancel everything in flight, sweep stragglers
+    # after a brief delay, and resume so the next ingest works.
+    Oban.pause_queue(queue: :conversion)
+    Oban.pause_queue(queue: :ai_jobs)
+
+    Oban.cancel_all_jobs(
+      from(j in Oban.Job, where: j.queue in ["ai_jobs", "conversion"])
+    )
+
+    Process.send_after(self(), :stop_sweep, 250)
+
+    {:noreply, assign(socket,
+      status: :idle,
+      import_queued: 0,
+      import_processed: 0
+    )}
   end
 
   @impl Phoenix.LiveView
@@ -159,6 +175,17 @@ defmodule OrchestratorWeb.CuratorLive do
     {:noreply, socket
       |> assign(:import_processed, processed)
       |> assign(:status, if(done, do: :done, else: :ingesting))}
+  end
+
+  def handle_info(:stop_sweep, socket) do
+    Oban.cancel_all_jobs(
+      from(j in Oban.Job, where: j.queue in ["ai_jobs", "conversion"])
+    )
+
+    Oban.resume_queue(queue: :conversion)
+    Oban.resume_queue(queue: :ai_jobs)
+
+    {:noreply, socket}
   end
 
   def handle_info(_unhandled, socket), do: {:noreply, socket}
