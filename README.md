@@ -364,8 +364,8 @@ Same URLs as above (`localhost:4000`, `localhost:8000/docs`).
 
 ### Known Windows quirks
 
-- **Browse button is macOS-only.** It calls `osascript` to pop the native folder picker — won't work on Windows or Linux. Paste a path into the Directory field; the rest of the ingest flow is identical. Patches welcome.
-- **Quick-access path chips** (`/Volumes`, `~/Desktop`, …) are macOS-flavored and won't resolve as-is on Windows. Type a real absolute path like `D:\Photos\2024`.
+- **Browse button** uses PowerShell's `FolderBrowserDialog` on Windows, AppleScript on macOS, and `zenity` on Linux (if installed). If you don't have zenity on Linux, the button hides itself — paste a path instead.
+- **Quick-access chips** (Desktop / Downloads / Pictures) auto-resolve to the right absolute path per OS, so on Windows they point at `C:\Users\<you>\Desktop` etc. without you having to think about it.
 - **File paths get stored in the DB** as whatever absolute path the orchestrator saw at ingest time. Moving the photos directory or changing drive letters after the fact will break the gallery's file references — same gotcha as macOS, but Windows drive letters make it easier to hit.
 - **rawpy on Python 3.13.** At time of writing the latest rawpy wheels target up through 3.12. If `uv sync` complains, pin to 3.12: `uv python pin 3.12 && uv sync`.
 
