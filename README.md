@@ -183,11 +183,20 @@ Local inference is free and private but will make your fans spin.
 
 ## Ingesting photos
 
-Point it at a directory. It walks recursively and picks up TIFF, JPEG, PNG, WebP, and camera RAW files (CR2, CR3, NEF, ARW, DNG, etc. — needs `libraw` installed for RAW support). Set how many to sample and hit import in the gallery.
+Point it at a directory. It walks recursively and picks up TIFF, JPEG, PNG, WebP, and camera RAW files (CR2, CR3, NEF, ARW, DNG, etc.). RAW support comes from `rawpy`, which wraps `libraw`. Whether you need to install libraw separately depends on your platform:
 
 ```bash
-# macOS libraw for RAW file support
+# macOS — Apple Silicon wheels don't always bundle libraw cleanly,
+# so the safe move is to install it via Homebrew.
 brew install libraw
+
+# Linux — install the dev package, or rely on the manylinux wheel
+# (which usually bundles libraw statically).
+sudo apt install libraw-dev          # Debian / Ubuntu
+sudo dnf install LibRaw-devel        # Fedora
+
+# Windows — nothing to install. The `win_amd64` rawpy wheel bundles
+# libraw statically. `uv sync` pulls it down and you're done.
 ```
 
 Set `STATIC_UPLOADS_DIR` in `ai_worker/.env` to point at the orchestrator's static uploads folder:
@@ -242,6 +251,123 @@ make dev
 
 - Gallery + single upload: [localhost:4000](http://localhost:4000)
 - AI worker API docs: [localhost:8000/docs](http://localhost:8000/docs)
+
+## Running on Windows
+
+The whole stack — BEAM, Python, Postgres, pgvector, Ollama — works on Windows. Two paths, pick one. WSL2 is the smoother one because the Makefile and the rest of this repo assume bash; native Windows works but you skip the Makefile and run the underlying commands by hand.
+
+### Path A: WSL2 (recommended)
+
+This is the easy mode. Everything in this README above just works because it's Linux underneath.
+
+1. **Install WSL2 with Ubuntu.** PowerShell as admin:
+
+   ```powershell
+   wsl --install -d Ubuntu
+   ```
+
+   Reboot when it asks.
+
+2. **Install Docker Desktop for Windows** and turn on the WSL2 backend (Settings → Resources → WSL Integration → enable for your Ubuntu distro). Containers from inside Ubuntu now hit Docker on the host.
+
+3. **Inside the Ubuntu shell**, install the toolchain:
+
+   ```bash
+   # mise — manages Erlang/Elixir/Node versions
+   curl https://mise.run | sh
+   echo 'eval "$(~/.local/bin/mise activate bash)"' >> ~/.bashrc
+   exec bash
+
+   # uv — manages Python + the ai_worker venv
+   curl -LsSf https://astral.sh/uv/install.sh | sh
+
+   # libraw + build tools (RAW decoding + native compiles)
+   sudo apt update
+   sudo apt install -y build-essential libraw-dev make
+   ```
+
+4. **Clone the repo inside the Linux filesystem** (e.g. `~/code/fineshyt`), not under `/mnt/c/...`. File watching across the WSL/Windows boundary is slow and flaky; keeping the working tree on the Linux side avoids both.
+
+5. **Ollama.** Install [Ollama for Windows](https://ollama.com/download) on the host. From WSL it's reachable at `http://host.docker.internal:11434` or `http://localhost:11434` if you've enabled WSL's localhost forwarding (default on recent Windows). Then in `ai_worker/.env`:
+
+   ```bash
+   LLM_BASE_URL=http://host.docker.internal:11434/v1/
+   LLM_API_KEY=ollama
+   LLM_MODEL=llava
+   ```
+
+   Pull the model once: `ollama pull llava`.
+
+6. **Run it.** From there it's identical to macOS — `make setup` then `make dev`.
+
+### Path B: Native Windows (no WSL)
+
+Doable, but you'll be running commands by hand instead of `make`, and the Browse button in the gallery won't work (it shells out to AppleScript). Paste paths into the Directory field instead.
+
+**Prereqs:**
+
+- [Docker Desktop for Windows](https://www.docker.com/products/docker-desktop/)
+- [uv](https://docs.astral.sh/uv/getting-started/installation/) (PowerShell: `irm https://astral.sh/uv/install.ps1 | iex`)
+- Erlang + Elixir. Either:
+  - the official installers from [erlang.org](https://www.erlang.org/downloads) and [elixir-lang.org](https://elixir-lang.org/install.html#windows), or
+  - Scoop: `scoop install erlang elixir`
+- [Ollama for Windows](https://ollama.com/download), then `ollama pull llava`
+- Python 3.11 or 3.12 — `uv` will handle this for you. Avoid 3.13 until rawpy ships a wheel for it.
+
+**Setup (PowerShell, from the repo root):**
+
+```powershell
+# 1. Postgres + pgvector
+docker compose up -d
+
+# 2. Elixir side
+cd orchestrator
+mix local.hex --force
+mix local.rebar --force
+mix deps.get
+mix ecto.setup
+cd ..
+
+# 3. Python side — uv pulls the rawpy wheel which bundles libraw,
+#    so no separate libraw install is needed.
+cd ai_worker
+uv sync
+cd ..
+```
+
+**Configure the AI worker** — create `ai_worker/.env`:
+
+```dotenv
+LLM_BASE_URL=http://localhost:11434/v1/
+LLM_API_KEY=ollama
+LLM_MODEL=llava
+STATIC_UPLOADS_DIR=C:\path\to\fineshyt\orchestrator\priv\static\uploads
+```
+
+Backslashes are fine; Python's `pathlib` handles either separator.
+
+**Run it.** Two terminals:
+
+```powershell
+# terminal 1 — orchestrator
+cd orchestrator
+mix phx.server
+```
+
+```powershell
+# terminal 2 — ai worker
+cd ai_worker
+uv run fastapi dev src/main.py --reload
+```
+
+Same URLs as above (`localhost:4000`, `localhost:8000/docs`).
+
+### Known Windows quirks
+
+- **Browse button is macOS-only.** It calls `osascript` to pop the native folder picker — won't work on Windows or Linux. Paste a path into the Directory field; the rest of the ingest flow is identical. Patches welcome.
+- **Quick-access path chips** (`/Volumes`, `~/Desktop`, …) are macOS-flavored and won't resolve as-is on Windows. Type a real absolute path like `D:\Photos\2024`.
+- **File paths get stored in the DB** as whatever absolute path the orchestrator saw at ingest time. Moving the photos directory or changing drive letters after the fact will break the gallery's file references — same gotcha as macOS, but Windows drive letters make it easier to hit.
+- **rawpy on Python 3.13.** At time of writing the latest rawpy wheels target up through 3.12. If `uv sync` complains, pin to 3.12: `uv python pin 3.12 && uv sync`.
 
 ## Future work
 
