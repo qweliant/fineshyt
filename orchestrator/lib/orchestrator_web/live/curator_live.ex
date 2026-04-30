@@ -424,34 +424,39 @@ defmodule OrchestratorWeb.CuratorLive do
 
   # Quick-access chips, dynamically chosen per OS. Each entry is
   # `{label, absolute_path}` so we can show short names in the UI but
-  # autofill a real path the worker can resolve.
+  # autofill a real path the worker can resolve. When running under
+  # `docker compose up`, the user's photo library is bind-mounted at
+  # `/photos`; if that directory exists we surface it first.
   defp default_chips do
     home = System.user_home() || ""
 
-    case :os.type() do
-      {:win32, _} ->
-        [
-          {"Desktop", Path.join(home, "Desktop")},
-          {"Downloads", Path.join(home, "Downloads")},
-          {"Pictures", Path.join(home, "Pictures")}
-        ]
+    base =
+      case :os.type() do
+        {:win32, _} ->
+          [
+            {"Desktop", Path.join(home, "Desktop")},
+            {"Downloads", Path.join(home, "Downloads")},
+            {"Pictures", Path.join(home, "Pictures")}
+          ]
 
-      {:unix, :darwin} ->
-        [
-          {"/Volumes", "/Volumes"},
-          {"Desktop", Path.join(home, "Desktop")},
-          {"Downloads", Path.join(home, "Downloads")},
-          {"Pictures", Path.join(home, "Pictures")}
-        ]
+        {:unix, :darwin} ->
+          [
+            {"/Volumes", "/Volumes"},
+            {"Desktop", Path.join(home, "Desktop")},
+            {"Downloads", Path.join(home, "Downloads")},
+            {"Pictures", Path.join(home, "Pictures")}
+          ]
 
-      {:unix, _} ->
-        [
-          {"Desktop", Path.join(home, "Desktop")},
-          {"Downloads", Path.join(home, "Downloads")},
-          {"Pictures", Path.join(home, "Pictures")},
-          {"/mnt", "/mnt"}
-        ]
-    end
+        {:unix, _} ->
+          [
+            {"Desktop", Path.join(home, "Desktop")},
+            {"Downloads", Path.join(home, "Downloads")},
+            {"Pictures", Path.join(home, "Pictures")},
+            {"/mnt", "/mnt"}
+          ]
+      end
+
+    if File.dir?("/photos"), do: [{"/photos", "/photos"} | base], else: base
   end
 
   defp browse_supported? do

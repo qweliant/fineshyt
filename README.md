@@ -235,7 +235,28 @@ Approved means you've rated it *and* one of: rating ≥ 4, chef's-picked, or `pr
 
 ## Running it
 
-Prerequisites: [Mise](https://mise.jdx.dev/), [uv](https://github.com/astral-sh/uv), [Docker](https://www.docker.com/).
+Two install paths. Pick whichever matches how you want to use the app.
+
+### Option 1: Docker Compose (easiest, recommended for non-developers)
+
+Prerequisites: [Docker Desktop](https://www.docker.com/products/docker-desktop/) and [Ollama](https://ollama.com/download). After both are installed:
+
+```bash
+git clone https://github.com/qweliant/fineshyt.git
+cd fineshyt
+cp .env.example .env       # then edit .env to set PHOTO_LIBRARY + SECRET_KEY_BASE
+docker compose up
+```
+
+First run is 10–20 minutes (Docker pulls base images, builds the two service containers, the AI worker fetches its CLIP encoder ~2 GB). Subsequent runs start in seconds.
+
+In compose mode your photo library is bind-mounted read-only at `/photos` inside the containers, so the gallery's Directory field takes paths like `/photos/2024-spring` regardless of where the host folder actually lives.
+
+Photographers without a developer background should follow the [photographer's Windows install guide](https://qweliant.github.io/fineshyt/install-windows.html) — same install, more screenshots and hand-holding.
+
+### Option 2: Native dev install (for hacking on the code)
+
+Prerequisites: [Mise](https://mise.jdx.dev/), [uv](https://github.com/astral-sh/uv), [Docker](https://www.docker.com/) (just for Postgres+pgvector).
 
 First time:
 

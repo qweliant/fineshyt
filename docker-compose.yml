@@ -1,6 +1,8 @@
 # ⚠ WARNING: `docker compose down -v` DESTROYS the pgdata volume and all
 # database contents (photos, embeddings, scores). Use `docker compose down`
 # (without -v) to stop services safely. Back up first: ./scripts/backup.sh
+#
+# See .env.example for the variables this file expects.
 
 services:
   db:
@@ -17,6 +19,61 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d photo_curator_dev"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  orchestrator:
+    build: ./orchestrator
+    depends_on:
+      db:
+        condition: service_healthy
+      ai_worker:
+        condition: service_started
+    environment:
+      DATABASE_URL: ecto://postgres:postgres_password@db:5432/photo_curator_dev
+      SECRET_KEY_BASE: ${SECRET_KEY_BASE:?Set SECRET_KEY_BASE in .env — see .env.example}
+      PHX_HOST: ${PHX_HOST:-localhost}
+      PHX_SCHEME: http
+      PHX_URL_PORT: "4000"
+      PORT: "4000"
+      AI_WORKER_URL: http://ai_worker:8000
+    ports:
+      - "4000:4000"
+    volumes:
+      # Shared with ai_worker so the orchestrator can write converted JPEGs
+      # at a path the worker can read back.
+      - uploads:/app/priv/static/uploads
+      # User's photo library. Read-only — fineshyt never mutates source files.
+      - ${PHOTO_LIBRARY:?Set PHOTO_LIBRARY in .env — see .env.example}:/photos:ro
+
+  ai_worker:
+    build: ./ai_worker
+    environment:
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://host.docker.internal:11434/v1/}
+      LLM_API_KEY: ${LLM_API_KEY:-ollama}
+      LLM_MODEL: ${LLM_MODEL:-llava}
+      STATIC_UPLOADS_DIR: /app/priv/static/uploads
+    ports:
+      - "8000:8000"
+    volumes:
+      - uploads:/app/priv/static/uploads
+      - ${PHOTO_LIBRARY:?Set PHOTO_LIBRARY in .env — see .env.example}:/photos:ro
+      # CLIP model + HF cache. ~2GB on first run; persist so re-creating the
+      # container doesn't re-download.
+      - models:/cache
+      # Pickled Ridge preference model.
+      - preference:/root/.fineshyt
+    extra_hosts:
+      # Gives the container `host.docker.internal` on Linux too, so a single
+      # LLM_BASE_URL works across macOS/Windows/Linux for an Ollama running
+      # on the host.
+      - "host.docker.internal:host-gateway"
 
 volumes:
   pgdata:
+  uploads:
+  models:
+  preference:

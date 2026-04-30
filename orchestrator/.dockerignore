@@ -1,0 +1,14 @@
+_build/
+deps/
+.elixir_ls/
+.lexical/
+.fetch
+*.beam
+erl_crash.dump
+.git/
+.gitignore
+priv/static/uploads/
+priv/static/assets/
+.DS_Store
+test/
+cover/
