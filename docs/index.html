@@ -183,6 +183,39 @@
   }
   footer a { color: var(--muted); }
   footer a:hover { color: var(--ink); }
+
+  /* ---- Section nav rail ----------------------------------------- */
+  html { scroll-behavior: smooth; }
+  section { scroll-margin-top: 32px; }
+
+  .toc {
+    position: fixed;
+    top: 50%;
+    left: 36px;
+    transform: translateY(-50%);
+    z-index: 10;
+    font-family: "Inter", sans-serif;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.22em;
+  }
+  .toc a {
+    display: block;
+    padding: 9px 0 9px 14px;
+    color: var(--muted);
+    text-decoration: none;
+    border-left: 2px solid var(--line);
+    transition: color 0.15s, border-color 0.15s, padding-left 0.15s;
+  }
+  .toc a:hover {
+    color: var(--ink);
+    border-color: var(--ink);
+    padding-left: 18px;
+  }
+
+  @media (max-width: 1180px) {
+    .toc { display: none; }
+  }
 </style>
 </head>
 <body>
@@ -195,9 +228,17 @@
   </nav>
 </header>
 
+<aside class="toc" aria-label="Section navigation">
+  <a href="#hero">Top</a>
+  <a href="#features">What it does</a>
+  <a href="#why">Why fineshyt</a>
+  <a href="#install">Install</a>
+  <a href="#faq">FAQ</a>
+</aside>
+
 <main>
 
-  <section class="hero">
+  <section id="hero" class="hero">
     <h1>FINE.<br/>SHYT.</h1>
     <p class="lede">
       Find the keepers in your photo library. <em>Self-hosted</em>, AI-assisted
@@ -210,7 +251,7 @@
     </div>
   </section>
 
-  <section>
+  <section id="features">
     <span class="micro">What it does</span>
     <h2>Three jobs, one workflow.</h2>
     <p class="big">
@@ -248,7 +289,7 @@
     </div>
   </section>
 
-  <section>
+  <section id="why">
     <span class="micro">Why fineshyt</span>
     <h2>Built for photographers who own their workflow.</h2>
 
@@ -262,7 +303,7 @@
     </div>
   </section>
 
-  <section class="install">
+  <section id="install" class="install">
     <span class="micro" style="color:#a09c95;">Install</span>
     <h2>One command after Docker is installed.</h2>
     <p>
@@ -286,7 +327,7 @@ docker compose up</pre>
     </p>
   </section>
 
-  <section>
+  <section id="faq">
     <span class="micro">FAQ</span>
     <h2>Quick answers.</h2>
 

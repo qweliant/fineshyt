@@ -47,8 +47,12 @@ services:
       - "4000:4000"
     volumes:
       # Shared with ai_worker so the orchestrator can write converted JPEGs
-      # at a path the worker can read back.
-      - uploads:/app/priv/static/uploads
+      # at a path the worker can read back. If UPLOADS_DIR is unset, this
+      # resolves to the `uploads` named volume below; if set to a host path
+      # (e.g. ./data/uploads or /Users/you/fineshyt-cache), it's a bind-mount
+      # and you can browse the converted JPEGs directly from your file
+      # manager.
+      - ${UPLOADS_DIR:-uploads}:/app/priv/static/uploads
       # User's photo library. Read-only — fineshyt never mutates source files.
       - ${PHOTO_LIBRARY:?Set PHOTO_LIBRARY in .env — see .env.example}:/photos:ro
 
@@ -62,7 +66,7 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - uploads:/app/priv/static/uploads
+      - ${UPLOADS_DIR:-uploads}:/app/priv/static/uploads
       - ${PHOTO_LIBRARY:?Set PHOTO_LIBRARY in .env — see .env.example}:/photos:ro
       # CLIP model + HF cache. ~2GB on first run; persist so re-creating the
       # container doesn't re-download.

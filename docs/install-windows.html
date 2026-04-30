@@ -230,8 +230,18 @@ cd fineshyt</pre>
 </p>
 <pre>PHOTO_LIBRARY=C:\Users\YourName\Pictures</pre>
 <p>
-  Use your real path. Backslashes are fine. Don't put quotes around it.
+  Use your real path. Backslashes are fine. Don't put quotes around it,
+  even if the path has spaces.
 </p>
+
+<div class="note">
+  <b>Photos on an external drive?</b> Use the drive letter directly:
+  <code>PHOTO_LIBRARY=D:\Photos</code> or <code>PHOTO_LIBRARY=E:\Wedding-2024</code>.
+  Docker Desktop on Windows shares all attached drives with WSL2
+  automatically — no extra configuration needed. Just don't unplug the
+  drive while fineshyt is running, or you'll have to restart the
+  containers (<code>docker compose down</code>, then <code>docker compose up</code>) once the drive is back.
+</div>
 
 <h3>5b. SECRET_KEY_BASE</h3>
 <p>

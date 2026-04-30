@@ -44,3 +44,9 @@ erl_crash.dump
 /assets/node_modules/
 /priv/static/assets/
 /priv/static/cache_manifest.json
+
+# User-ingested JPEGs. These live on a Docker volume at runtime — they
+# must NOT ship inside the image. Without this exclusion, every rebuild
+# uploads ~Nx GB of photos into the build context and bloats Docker
+# Desktop's disk allocation until Postgres can't write its lock file.
+/priv/static/uploads/
