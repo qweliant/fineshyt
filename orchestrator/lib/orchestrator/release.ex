@@ -1,10 +1,8 @@
 defmodule Orchestrator.Release do
   @moduledoc """
-  Tasks invoked from a release. The container entrypoint calls
-  `Orchestrator.Release.migrate/0` before starting the server, so a
-  fresh `docker compose up` brings a working DB schema up automatically.
+  Used for executing DB release tasks when run in production without Mix
+  installed.
   """
-
   @app :orchestrator
 
   def migrate do
@@ -25,6 +23,8 @@ defmodule Orchestrator.Release do
   end
 
   defp load_app do
-    Application.load(@app)
+    # Many platforms require SSL when connecting to the database
+    Application.ensure_all_started(:ssl)
+    Application.ensure_loaded(@app)
   end
 end

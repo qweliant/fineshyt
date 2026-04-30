@@ -34,12 +34,15 @@ services:
         condition: service_started
     environment:
       DATABASE_URL: ecto://postgres:postgres_password@db:5432/photo_curator_dev
-      SECRET_KEY_BASE: ${SECRET_KEY_BASE:?Set SECRET_KEY_BASE in .env — see .env.example}
+      SECRET_KEY_BASE: ${SECRET_KEY_BASE:?Set SECRET_KEY_BASE in .env — run `make compose-init` to generate one}
       PHX_HOST: ${PHX_HOST:-localhost}
       PHX_SCHEME: http
       PHX_URL_PORT: "4000"
       PORT: "4000"
       AI_WORKER_URL: http://ai_worker:8000
+    # Run migrations before starting the server. Both scripts come from
+    # rel/overlays/bin/ in the canonical Phoenix release layout.
+    command: ["sh", "-c", "/app/bin/migrate && /app/bin/server"]
     ports:
       - "4000:4000"
     volumes:

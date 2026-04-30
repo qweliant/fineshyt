@@ -239,13 +239,25 @@ Two install paths. Pick whichever matches how you want to use the app.
 
 ### Option 1: Docker Compose (easiest, recommended for non-developers)
 
-Prerequisites: [Docker Desktop](https://www.docker.com/products/docker-desktop/) and [Ollama](https://ollama.com/download). After both are installed:
+Prerequisites: [Docker Desktop](https://www.docker.com/products/docker-desktop/) and [Ollama](https://ollama.com/download).
+
+**macOS / Linux / WSL** (Git Bash + make on Windows works too):
+
+```bash
+git clone https://github.com/qweliant/fineshyt.git
+cd fineshyt
+make compose
+```
+
+`make compose` creates `.env` from the template, generates a `SECRET_KEY_BASE` for you, and brings everything up. The first run will fail with a message asking you to set `PHOTO_LIBRARY` in `.env` — point it at the folder where your photos live, then re-run.
+
+**Manual flow** (no make required, works in any shell):
 
 ```bash
 git clone https://github.com/qweliant/fineshyt.git
 cd fineshyt
 cp .env.example .env       # then edit .env to set PHOTO_LIBRARY + SECRET_KEY_BASE
-docker compose up
+docker compose up --build
 ```
 
 First run is 10–20 minutes (Docker pulls base images, builds the two service containers, the AI worker fetches its CLIP encoder ~2 GB). Subsequent runs start in seconds.
