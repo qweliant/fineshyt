@@ -210,20 +210,104 @@
 </ol>
 
 <h2><span class="step-num">4</span> Download fineshyt</h2>
-<p>Open PowerShell and pick a folder to clone into. Documents is fine:</p>
-<pre>cd $HOME\Documents
-git clone https://github.com/qweliant/fineshyt.git
-cd fineshyt</pre>
-<p>You should now be inside the <code>fineshyt</code> folder. Type <code>ls</code> and you should see <code>docker-compose.yml</code> in the listing.</p>
+<p>
+  This step uses <b>PowerShell</b> — Windows' built-in text-based command
+  prompt. You probably haven't opened it before. That's fine; you only
+  need three commands.
+</p>
+
+<h3>4a. Open PowerShell</h3>
+<ol>
+  <li>Press the <b>Windows key</b> on your keyboard (or click the Start button).</li>
+  <li>Type <b>PowerShell</b>.</li>
+  <li>Click <b>Windows PowerShell</b> when it appears at the top of the menu. (Don't click "PowerShell ISE" — that's a different tool.)</li>
+</ol>
+<p>
+  A blue or black window opens with a blinking cursor and a line that
+  ends in <code>&gt;</code>. That's the prompt — it's waiting for you to
+  type a command and press Enter.
+</p>
+
+<div class="note">
+  <b>If you see "Command Prompt" instead of "PowerShell" in the title
+  bar:</b> that's a different tool. Close it and search for "PowerShell"
+  specifically. The commands below assume PowerShell.
+</div>
+
+<h3>4b. Move into your Documents folder</h3>
+<p>Type this command and press Enter:</p>
+<pre>cd $HOME\Documents</pre>
+<p>
+  <code>cd</code> is short for "change directory" — it moves you into a
+  folder. <code>$HOME</code> is a shortcut PowerShell understands as
+  "your user folder" (the same place your Documents, Pictures, and
+  Downloads live). So this whole line means: <em>go into the
+  Documents folder.</em>
+</p>
+<p>
+  <b>What success looks like:</b> the prompt changes to end with
+  <code>Documents&gt;</code>. No error messages. If you see
+  <code>cannot find path</code>, you typed it wrong; try again exactly
+  as shown above.
+</p>
+
+<h3>4c. Download (clone) fineshyt</h3>
+<p>Type this and press Enter:</p>
+<pre>git clone https://github.com/qweliant/fineshyt.git</pre>
+<p>
+  <code>git clone</code> downloads a copy of the fineshyt project from
+  GitHub onto your machine. It creates a new folder called
+  <code>fineshyt</code> inside your Documents.
+</p>
+<p>
+  <b>What success looks like:</b> several lines like <code>Cloning into
+  'fineshyt'...</code>, <code>Receiving objects: 100%</code>, and
+  finally a fresh prompt. Takes about 10–30 seconds depending on your
+  internet.
+</p>
+
+<h3>4d. Step into the fineshyt folder</h3>
+<pre>cd fineshyt</pre>
+<p>
+  Now you're inside the project folder. The prompt should end with
+  <code>fineshyt&gt;</code>.
+</p>
+<p>
+  Quick sanity check — type <code>ls</code> and press Enter. You should
+  see a list of files including <code>docker-compose.yml</code>,
+  <code>Makefile</code>, and a folder called <code>orchestrator</code>.
+  If you see those, step 4 is done.
+</p>
 
 <h2><span class="step-num">5</span> Configure two things</h2>
-<p>fineshyt reads its settings from a file called <code>.env</code>. Copy the template and fill in two values.</p>
+<p>
+  fineshyt reads its settings from a file called <code>.env</code>. The
+  project ships with a template called <code>.env.example</code> — you'll
+  copy it, then fill in two values.
+</p>
+
+<h3>5a. Make a working copy of the template</h3>
+<p>In PowerShell, still inside the <code>fineshyt</code> folder:</p>
 <pre>copy .env.example .env</pre>
+<p>
+  <code>copy</code> duplicates a file. This makes <code>.env</code>
+  (without the <code>.example</code>) — that's the file fineshyt will
+  actually read.
+</p>
+<p>
+  <b>What success looks like:</b> PowerShell prints
+  <code>1 file(s) copied.</code> and gives you a fresh prompt.
+</p>
 
-<p>Now open <code>.env</code> in Notepad:</p>
+<h3>5b. Open .env in Notepad</h3>
 <pre>notepad .env</pre>
+<p>
+  Notepad opens with the <code>.env</code> file. You'll see comments
+  (lines starting with <code>#</code>) and a few empty
+  <code>NAME=</code> lines. You only need to fill in two of them.
+</p>
 
-<h3>5a. PHOTO_LIBRARY</h3>
+<h3>5c. Set PHOTO_LIBRARY</h3>
 <p>
   Set this to the folder on your computer where your photos live. fineshyt
   will see this folder (and all subfolders) inside the app.
@@ -255,7 +339,7 @@ cd fineshyt</pre>
   Docker volume.
 </div>
 
-<h3>5b. SECRET_KEY_BASE</h3>
+<h3>5d. Set SECRET_KEY_BASE</h3>
 <p>
   This is a random string used internally by the web app. Generate one in
   PowerShell with:
@@ -302,6 +386,13 @@ cd fineshyt</pre>
   Set a sample size, hit <b>Ingest</b>, and watch the activity log fill up.
   When it's done, head to the Gallery to start rating.
 </p>
+
+<div class="note">
+  <b>Now what?</b> The
+  <a href="using-fineshyt.html">how-to-use guide</a> walks through the
+  full workflow: importing photos, rating them, watching the MATCH
+  badges appear, handling burst sequences, and exporting your favourites.
+</div>
 
 <hr/>
 

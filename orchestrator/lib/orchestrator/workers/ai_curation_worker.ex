@@ -106,7 +106,7 @@ defmodule Orchestrator.Workers.AiCurationWorker do
 
           form_fields = [file: {image_binary, filename: basename, content_type: "image/jpeg"}]
 
-          case Req.post("http://127.0.0.1:8000/api/v1/curate",
+          case Req.post(Orchestrator.AiWorker.url("/api/v1/curate"),
                  form_multipart: form_fields,
                  receive_timeout: 300_000
                ) do

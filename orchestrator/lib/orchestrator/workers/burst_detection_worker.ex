@@ -58,7 +58,7 @@ defmodule Orchestrator.Workers.BurstDetectionWorker do
           end)
       }
 
-      case Req.post("http://127.0.0.1:8000/api/v1/detect_bursts",
+      case Req.post(Orchestrator.AiWorker.url("/api/v1/detect_bursts"),
              json: payload,
              receive_timeout: 120_000
            ) do

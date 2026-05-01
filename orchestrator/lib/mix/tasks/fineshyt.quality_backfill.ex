@@ -95,7 +95,7 @@ defmodule Mix.Tasks.Fineshyt.QualityBackfill do
   end
 
   defp call_quality_endpoint(file_path) do
-    case Req.post("http://127.0.0.1:8000/api/v1/quality_scores",
+    case Req.post(Orchestrator.AiWorker.url("/api/v1/quality_scores"),
            json: %{file_path: file_path},
            receive_timeout: 30_000
          ) do

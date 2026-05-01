@@ -90,7 +90,7 @@ defmodule Mix.Tasks.Fineshyt.ExifBackfill do
   end
 
   defp call_exif_endpoint(file_path) do
-    case Req.post("http://127.0.0.1:8000/api/v1/exif",
+    case Req.post(Orchestrator.AiWorker.url("/api/v1/exif"),
            json: %{file_path: file_path},
            receive_timeout: 10_000
          ) do

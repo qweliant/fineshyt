@@ -1,0 +1,41 @@
+#!/bin/sh
+# Reconciles two paths inside the container so the gallery can serve
+# every uploaded photo, regardless of when it was ingested.
+#
+# Why this exists:
+#   * Plug.Static is configured `from: :orchestrator`, which in a Mix
+#     release resolves via :code.priv_dir/1 to
+#     /app/lib/orchestrator-<vsn>/priv/static/uploads.
+#   * The compose file bind-mounts the user's host uploads folder at
+#     /app/priv/static/uploads — a different path Phoenix never reads.
+#   * Without this script, photos written before the bind-mount existed
+#     (or to either path on different boots) appear orphaned because
+#     they sit on one side of the divide and Phoenix reads the other.
+#
+# Fix: at every boot, ensure the release-priv uploads dir is a symlink
+# pointing at the bind-mount. Idempotent — safe on every boot.
+set -eu
+
+SRC=$(echo /app/lib/orchestrator-*/priv/static/uploads)
+DEST=/app/priv/static/uploads
+
+mkdir -p "$DEST"
+
+# Already a symlink → done.
+if [ -L "$SRC" ]; then
+  exit 0
+fi
+
+# Real directory from a prior boot: drain its contents into the
+# bind-mount, then replace it with a symlink. Anything that races into
+# $SRC during the move will be picked up by the next boot.
+if [ -d "$SRC" ]; then
+  if [ -n "$(ls -A "$SRC" 2>/dev/null || true)" ]; then
+    mv "$SRC"/* "$DEST"/ 2>/dev/null || true
+  fi
+  rmdir "$SRC" 2>/dev/null || true
+fi
+
+mkdir -p "$(dirname "$SRC")"
+ln -s "$DEST" "$SRC"
+echo "→ symlinked $SRC → $DEST"

@@ -239,6 +239,8 @@ Two install paths. Pick whichever matches how you want to use the app.
 
 ### Option 1: Docker Compose (easiest, recommended for non-developers)
 
+> **Photographers, not developers**: skip the README and follow the dedicated guides at [qweliant.github.io/fineshyt](https://qweliant.github.io/fineshyt/) — there's a [step-by-step Windows install](https://qweliant.github.io/fineshyt/install-windows.html) and a [how-to-use walkthrough](https://qweliant.github.io/fineshyt/using-fineshyt.html). The rest of this README is the developer-facing reference.
+
 Prerequisites: [Docker Desktop](https://www.docker.com/products/docker-desktop/) and [Ollama](https://ollama.com/download).
 
 **macOS / Linux / WSL** (Git Bash + make on Windows works too):

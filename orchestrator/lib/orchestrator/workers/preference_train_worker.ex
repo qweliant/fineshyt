@@ -85,7 +85,7 @@ defmodule Orchestrator.Workers.PreferenceTrainWorker do
           end)
       }
 
-      case Req.post("http://127.0.0.1:8000/api/v1/preference/train",
+      case Req.post(Orchestrator.AiWorker.url("/api/v1/preference/train"),
              json: payload,
              receive_timeout: 120_000
            ) do
@@ -130,7 +130,7 @@ defmodule Orchestrator.Workers.PreferenceTrainWorker do
       rows ->
         embeddings = Enum.map(rows, fn {_id, vec} -> Pgvector.to_list(vec) end)
 
-        case Req.post("http://127.0.0.1:8000/api/v1/preference/score",
+        case Req.post(Orchestrator.AiWorker.url("/api/v1/preference/score"),
                json: %{embeddings: embeddings},
                receive_timeout: 60_000
              ) do

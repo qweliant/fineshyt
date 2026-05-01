@@ -20,6 +20,12 @@ if System.get_env("PHX_SERVER") do
   config :orchestrator, OrchestratorWeb.Endpoint, server: true
 end
 
+# AI worker base URL. Read by Orchestrator.AiWorker.url/1. In docker
+# compose, the orchestrator container reaches the ai_worker container
+# via the compose-network DNS name. In native dev both run on the host.
+config :orchestrator, :ai_worker_url,
+  System.get_env("AI_WORKER_URL", "http://127.0.0.1:8000")
+
 config :orchestrator, OrchestratorWeb.Endpoint,
   http: [port: String.to_integer(System.get_env("PORT", "4000"))]
 

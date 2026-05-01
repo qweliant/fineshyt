@@ -44,9 +44,15 @@ services:
       # a clickable chip in the gallery's Directory field. Empty in
       # single-drive mode (the `/photos` chip covers it instead).
       PHOTO_LIBRARIES: ${PHOTO_LIBRARIES:-}
-    # Run migrations before starting the server. Both scripts come from
-    # rel/overlays/bin/ in the canonical Phoenix release layout.
-    command: ["sh", "-c", "/app/bin/migrate && /app/bin/server"]
+    # Boot sequence:
+    #   1. setup-uploads-symlink — reconciles the release-priv path Phoenix
+    #      reads from with the /app/priv/static/uploads bind-mount the user
+    #      sees on disk, so old + new ingests land in one place.
+    #   2. migrate — runs any pending Ecto migrations idempotently.
+    #   3. server — starts Phoenix.
+    # All three scripts come from rel/overlays/bin/ in the release layout.
+    command:
+      ["sh", "-c", "/app/bin/setup-uploads-symlink && /app/bin/migrate && /app/bin/server"]
     ports:
       - "4000:4000"
     volumes:
