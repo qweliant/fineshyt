@@ -264,6 +264,18 @@ First run is 10–20 minutes (Docker pulls base images, builds the two service c
 
 In compose mode your photo library is bind-mounted read-only at `/photos` inside the containers, so the gallery's Directory field takes paths like `/photos/2024-spring` regardless of where the host folder actually lives.
 
+#### Multi-drive setup
+
+Photographers with photos across several drives can set `PHOTO_LIBRARIES` instead of (or in addition to) `PHOTO_LIBRARY` in `.env`:
+
+```env
+PHOTO_LIBRARIES=/Volumes/Drive1:/Volumes/Backup-2024:/Users/me/Pictures
+```
+
+`make compose-init` reads that list and generates a `docker-compose.override.yml` that mounts each drive at its real host path inside the container — so in the gallery you type the actual path (`/Volumes/Drive1/Wedding-2024`) instead of a `/photos/...` translation. Each drive also shows up as a clickable chip in the gallery's Directory field automatically.
+
+The override file is per-user (gitignored) and regenerated whenever you re-run `make compose-init`.
+
 Photographers without a developer background should follow the [photographer's Windows install guide](https://qweliant.github.io/fineshyt/install-windows.html) — same install, more screenshots and hand-holding.
 
 ### Option 2: Native dev install (for hacking on the code)

@@ -313,13 +313,26 @@
     </p>
     <pre>git clone https://github.com/qweliant/fineshyt.git
 cd fineshyt
-cp .env.example .env       # then edit .env to set PHOTO_LIBRARY + SECRET_KEY_BASE
-docker compose up</pre>
+make compose       # creates .env, generates a secret, builds, starts</pre>
     <p>
+      First run, edit <code>.env</code> to point <code>PHOTO_LIBRARY</code> at
+      the folder where your photos live, then re-run <code>make compose</code>.
       Open <a href="http://localhost:4000">http://localhost:4000</a> when
-      it's done starting up. The first run downloads ML models (~3 GB) — go
+      it's done starting up. The first build downloads ML models (~3 GB) — go
       get coffee.
     </p>
+
+    <p style="margin-top: 28px;">
+      <b class="sans">Photos on multiple drives?</b> Set <code>PHOTO_LIBRARIES</code>
+      in <code>.env</code> instead — colon-separated:
+    </p>
+    <pre>PHOTO_LIBRARIES=/Volumes/Drive1:/Volumes/Backup-2024:/Users/me/Pictures</pre>
+    <p>
+      Each drive gets its own clickable chip in the gallery's Directory
+      field, and you type real paths (<code>/Volumes/Drive1/Wedding-2024</code>)
+      instead of a translated <code>/photos/...</code> path.
+    </p>
+
     <p style="margin-top: 26px;">
       Step-by-step Windows guide with screenshots:
       <a href="install-windows.html">install-windows.html</a> ·

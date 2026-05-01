@@ -40,6 +40,10 @@ services:
       PHX_URL_PORT: "4000"
       PORT: "4000"
       AI_WORKER_URL: http://ai_worker:8000
+      # Read by the LiveView's `default_chips/0` to surface each drive as
+      # a clickable chip in the gallery's Directory field. Empty in
+      # single-drive mode (the `/photos` chip covers it instead).
+      PHOTO_LIBRARIES: ${PHOTO_LIBRARIES:-}
     # Run migrations before starting the server. Both scripts come from
     # rel/overlays/bin/ in the canonical Phoenix release layout.
     command: ["sh", "-c", "/app/bin/migrate && /app/bin/server"]

@@ -422,15 +422,45 @@ defmodule OrchestratorWeb.CuratorLive do
 
   # ---- Cross-platform helpers ----------------------------------------
 
-  # Quick-access chips, dynamically chosen per OS. Each entry is
-  # `{label, absolute_path}` so we can show short names in the UI but
-  # autofill a real path the worker can resolve. When running under
-  # `docker compose up`, the user's photo library is bind-mounted at
-  # `/photos`; if that directory exists we surface it first.
+  # Quick-access chips, dynamically built per OS and per environment.
+  #
+  # Each chip is `{label, absolute_path}` so we can show short labels in
+  # the UI while autofilling a real path the worker can resolve. We
+  # always filter out paths that don't exist on the running host — chips
+  # that lead to "directory not found" errors are worse than no chip.
+  #
+  # Chip ordering, highest priority first:
+  #   1. Each entry from PHOTO_LIBRARIES (multi-drive Docker mode), so
+  #      a photographer with several drives sees each as a clickable chip.
+  #   2. /photos (single-drive Docker mode bind-mount).
+  #   3. OS-default user folders (Desktop / Downloads / Pictures, plus
+  #      /Volumes on macOS or /mnt on Linux).
   defp default_chips do
+    multi_drive_chips() ++ photos_chip() ++ os_default_chips()
+  end
+
+  defp multi_drive_chips do
+    case System.get_env("PHOTO_LIBRARIES") do
+      nil -> []
+      "" -> []
+      paths ->
+        paths
+        |> String.split(":", trim: true)
+        |> Enum.map(&String.trim/1)
+        |> Enum.reject(&(&1 == ""))
+        |> Enum.filter(&File.dir?/1)
+        |> Enum.map(fn path -> {Path.basename(path), path} end)
+    end
+  end
+
+  defp photos_chip do
+    if File.dir?("/photos"), do: [{"/photos", "/photos"}], else: []
+  end
+
+  defp os_default_chips do
     home = System.user_home() || ""
 
-    base =
+    raw =
       case :os.type() do
         {:win32, _} ->
           [
@@ -456,7 +486,7 @@ defmodule OrchestratorWeb.CuratorLive do
           ]
       end
 
-    if File.dir?("/photos"), do: [{"/photos", "/photos"} | base], else: base
+    Enum.filter(raw, fn {_label, path} -> File.dir?(path) end)
   end
 
   defp browse_supported? do

@@ -243,6 +243,18 @@ cd fineshyt</pre>
   containers (<code>docker compose down</code>, then <code>docker compose up</code>) once the drive is back.
 </div>
 
+<div class="note">
+  <b>Photos on multiple drives?</b> The cleanest workflow on Windows is to
+  cull one drive at a time — when you want to switch, edit
+  <code>PHOTO_LIBRARY</code> in <code>.env</code> and run
+  <code>docker compose up</code> again. Drive letters and Docker's WSL2
+  filesystem don't combine cleanly enough for the multi-drive
+  <code>PHOTO_LIBRARIES</code> workflow that macOS and Linux users get;
+  the ratings and metadata fineshyt already learned about your photos
+  persist across drive switches because the database lives in its own
+  Docker volume.
+</div>
+
 <h3>5b. SECRET_KEY_BASE</h3>
 <p>
   This is a random string used internally by the web app. Generate one in

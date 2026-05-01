@@ -118,10 +118,22 @@ compose-init:
 			*)      sed -i    "s|^SECRET_KEY_BASE=.*|SECRET_KEY_BASE=$$SECRET|" .env ;; \
 		esac; \
 	fi
+	@# Multi-drive mode: if PHOTO_LIBRARIES is set, auto-fill PHOTO_LIBRARY
+	@# from the first entry so the base compose file's `${PHOTO_LIBRARY:?}`
+	@# validation passes, then generate the override file.
+	@if grep -q '^PHOTO_LIBRARIES=.\+' .env && ! grep -q '^PHOTO_LIBRARY=.\+' .env; then \
+		FIRST=$$(grep -E '^PHOTO_LIBRARIES=' .env | head -1 | cut -d= -f2- | cut -d: -f1); \
+		printf "$(CINNA)$(BOLD)→ auto-filling PHOTO_LIBRARY from PHOTO_LIBRARIES[0]: $$FIRST$(RESET)\n"; \
+		case "$$(uname -s)" in \
+			Darwin) sed -i '' "s|^PHOTO_LIBRARY=.*|PHOTO_LIBRARY=$$FIRST|" .env ;; \
+			*)      sed -i    "s|^PHOTO_LIBRARY=.*|PHOTO_LIBRARY=$$FIRST|" .env ;; \
+		esac; \
+	fi
 	@if ! grep -q '^PHOTO_LIBRARY=.\+' .env; then \
-		printf "$(KUROMI)$(BOLD)\n!! PHOTO_LIBRARY is empty in .env. Edit .env and set it to the folder where your photos live, then re-run.\n!! example: PHOTO_LIBRARY=$$HOME/Pictures$(RESET)\n\n"; \
+		printf "$(KUROMI)$(BOLD)\n!! No photo paths configured. Edit .env and set ONE of:\n!!   PHOTO_LIBRARY=$$HOME/Pictures                                  (one drive)\n!!   PHOTO_LIBRARIES=/Volumes/DriveA:/Volumes/DriveB                (multiple)\n$(RESET)\n"; \
 		exit 1; \
 	fi
+	@./scripts/generate-compose-override.sh
 	@printf "$(KEROPPI)$(BOLD)→ .env ready.$(RESET)\n"
 
 compose-up:
