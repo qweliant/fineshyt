@@ -69,7 +69,7 @@ defmodule Orchestrator.Workers.EmbeddingWorker do
       true ->
         Logger.info("Embedding photo #{photo_id} (#{basename})...")
 
-        case Req.post("http://127.0.0.1:8000/api/v1/embed",
+        case Req.post(Orchestrator.AiWorker.url("/api/v1/embed"),
                json: %{file_path: photo.file_path},
                receive_timeout: 120_000
              ) do

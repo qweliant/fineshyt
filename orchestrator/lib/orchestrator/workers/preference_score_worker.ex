@@ -38,7 +38,7 @@ defmodule Orchestrator.Workers.PreferenceScoreWorker do
       true ->
         embedding = Pgvector.to_list(photo.clip_embedding)
 
-        case Req.post("http://127.0.0.1:8000/api/v1/preference/score",
+        case Req.post(Orchestrator.AiWorker.url("/api/v1/preference/score"),
                json: %{embeddings: [embedding]},
                receive_timeout: 30_000
              ) do

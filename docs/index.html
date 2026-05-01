@@ -1,0 +1,384 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>fineshyt — find the keepers in your photo library</title>
+<meta name="description" content="Self-hosted, AI-assisted photo culling that learns your taste. Free, private, runs on your own machine." />
+<meta property="og:title" content="fineshyt — find the keepers in your photo library" />
+<meta property="og:description" content="Self-hosted, AI-assisted photo culling that learns your taste. Free, private, runs on your own machine." />
+<meta property="og:type" content="website" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700;900&family=Source+Serif+4:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --bg: #fcfbf9;
+    --ink: #111111;
+    --muted: #7a7a7a;
+    --line: #e5e5e5;
+    --accent: #b94900;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "Source Serif 4", Georgia, serif;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    line-height: 1.55;
+  }
+  ::selection { background: var(--ink); color: var(--bg); }
+
+  .sans { font-family: "Inter", system-ui, sans-serif; }
+  .micro {
+    font-family: "Inter", sans-serif;
+    text-transform: uppercase;
+    letter-spacing: 0.4em;
+    font-size: 10px;
+    color: var(--muted);
+  }
+
+  header {
+    border-bottom: 1px solid var(--line);
+    padding: 18px 32px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  header .links a {
+    font-family: "Inter", sans-serif;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
+    color: var(--muted);
+    text-decoration: none;
+    border-bottom: 1px solid var(--line);
+    padding-bottom: 2px;
+    margin-left: 22px;
+  }
+  header .links a:hover { color: var(--ink); border-color: var(--ink); }
+
+  main { max-width: 880px; margin: 0 auto; padding: 96px 32px 120px; }
+
+  .hero h1 {
+    font-family: "Inter", sans-serif;
+    font-weight: 900;
+    font-size: clamp(3rem, 9vw, 6.25rem);
+    letter-spacing: -0.02em;
+    line-height: 0.95;
+    margin: 0 0 28px;
+  }
+  .hero .lede {
+    font-size: 1.35rem;
+    color: var(--muted);
+    font-style: italic;
+    max-width: 32em;
+    margin: 0 0 56px;
+  }
+  .hero .lede em { color: var(--ink); font-style: normal; }
+
+  section { margin-top: 96px; }
+  section > .micro { display: block; margin-bottom: 28px; }
+  section h2 {
+    font-family: "Inter", sans-serif;
+    font-weight: 700;
+    font-size: 1.65rem;
+    letter-spacing: -0.01em;
+    margin: 0 0 20px;
+  }
+  section p { margin: 0 0 16px; max-width: 60ch; }
+  section p.big { font-size: 1.15rem; }
+
+  .grid-3 {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 32px;
+    margin-top: 24px;
+  }
+  @media (max-width: 720px) {
+    .grid-3 { grid-template-columns: 1fr; }
+  }
+  .card {
+    border: 1px solid var(--line);
+    padding: 24px;
+    background: white;
+  }
+  .card h3 {
+    font-family: "Inter", sans-serif;
+    font-size: 0.95rem;
+    margin: 0 0 12px;
+    letter-spacing: -0.005em;
+  }
+  .card p {
+    font-size: 0.95rem;
+    color: #444;
+    margin: 0;
+  }
+
+  .compare {
+    border: 1px solid var(--line);
+    background: white;
+    padding: 24px 28px;
+    margin-top: 16px;
+  }
+  .compare ul { margin: 0; padding-left: 1.1em; }
+  .compare li { margin: 8px 0; font-size: 1rem; }
+  .compare li b { font-family: "Inter", sans-serif; font-weight: 600; }
+
+  .install {
+    background: var(--ink);
+    color: var(--bg);
+    padding: 40px 36px;
+    margin-top: 32px;
+  }
+  .install h2 { color: var(--bg); }
+  .install p { color: #d8d6d3; }
+  .install code, pre {
+    font-family: "JetBrains Mono", "Menlo", monospace;
+    font-size: 0.92rem;
+  }
+  pre {
+    background: #1c1c1c;
+    border: 1px solid #2c2c2c;
+    padding: 18px 20px;
+    overflow-x: auto;
+    color: #f0eee8;
+    margin: 18px 0;
+  }
+  .install ol { margin: 0 0 0 1.2em; padding: 0; }
+  .install li { margin: 14px 0; }
+  .install a { color: #f5b27c; text-decoration: underline; text-underline-offset: 3px; }
+  .install a:hover { color: #ffb784; }
+
+  .cta {
+    margin-top: 48px;
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  .btn {
+    font-family: "Inter", sans-serif;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.25em;
+    padding: 14px 26px;
+    text-decoration: none;
+    transition: all 0.15s;
+    border: 1px solid var(--ink);
+  }
+  .btn.primary { background: var(--ink); color: var(--bg); }
+  .btn.primary:hover { background: #2a2a2a; }
+  .btn.secondary { color: var(--ink); }
+  .btn.secondary:hover { background: var(--ink); color: var(--bg); }
+
+  footer {
+    border-top: 1px solid var(--line);
+    padding: 32px;
+    color: var(--muted);
+    font-size: 12px;
+    font-family: "Inter", sans-serif;
+    text-align: center;
+  }
+  footer a { color: var(--muted); }
+  footer a:hover { color: var(--ink); }
+
+  /* ---- Section nav rail ----------------------------------------- */
+  html { scroll-behavior: smooth; }
+  section { scroll-margin-top: 32px; }
+
+  .toc {
+    position: fixed;
+    top: 50%;
+    left: 36px;
+    transform: translateY(-50%);
+    z-index: 10;
+    font-family: "Inter", sans-serif;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.22em;
+  }
+  .toc a {
+    display: block;
+    padding: 9px 0 9px 14px;
+    color: var(--muted);
+    text-decoration: none;
+    border-left: 2px solid var(--line);
+    transition: color 0.15s, border-color 0.15s, padding-left 0.15s;
+  }
+  .toc a:hover {
+    color: var(--ink);
+    border-color: var(--ink);
+    padding-left: 18px;
+  }
+
+  @media (max-width: 1180px) {
+    .toc { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <span class="micro">fineshyt · archival system</span>
+  <nav class="links">
+    <a href="install-windows.html">Install</a>
+    <a href="using-fineshyt.html">How to use</a>
+    <a href="https://github.com/qweliant/fineshyt">GitHub</a>
+  </nav>
+</header>
+
+<aside class="toc" aria-label="Section navigation">
+  <a href="#hero">Top</a>
+  <a href="#features">What it does</a>
+  <a href="#why">Why fineshyt</a>
+  <a href="#install">Install</a>
+  <a href="using-fineshyt.html">How to use</a>
+  <a href="#faq">FAQ</a>
+</aside>
+
+<main>
+
+  <section id="hero" class="hero">
+    <h1>FINE.<br/>SHYT.</h1>
+    <p class="lede">
+      Find the keepers in your photo library. <em>Self-hosted</em>, AI-assisted
+      culling that learns <em>your</em> taste — not a generic "good photo" template.
+      Free. Private. Runs on your own machine.
+    </p>
+    <div class="cta">
+      <a href="install-windows.html" class="btn primary">Install on Windows →</a>
+      <a href="using-fineshyt.html" class="btn secondary">How to use it →</a>
+      <a href="https://github.com/qweliant/fineshyt" class="btn secondary">View on GitHub</a>
+    </div>
+  </section>
+
+  <section id="features">
+    <span class="micro">What it does</span>
+    <h2>Three jobs, one workflow.</h2>
+    <p class="big">
+      Point fineshyt at a folder of photos. It looks at each one, sorts the
+      obvious bursts, and asks you to rate the ones it isn't sure about. The
+      more you rate, the better it gets at surfacing photos you'd actually
+      keep.
+    </p>
+
+    <div class="grid-3">
+      <div class="card">
+        <h3>Technical scoring</h3>
+        <p>
+          Every photo gets a sharpness score (focus check) and an exposure
+          score (clipped highlights/shadows) computed on the full-resolution
+          original. Sort by either, independent of style.
+        </p>
+      </div>
+      <div class="card">
+        <h3>Burst detection</h3>
+        <p>
+          When you fired off ten frames in three seconds, fineshyt groups
+          them, highlights the sharpest, and lets you keep one and reject
+          the rest in a single click.
+        </p>
+      </div>
+      <div class="card">
+        <h3>Personalized ranking</h3>
+        <p>
+          You rate photos 1-5 stars. A model trained on those ratings drifts
+          toward the kind of work <em>you</em> actually like. Photos that
+          match get a MATCH badge in the gallery.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <section id="why">
+    <span class="micro">Why fineshyt</span>
+    <h2>Built for photographers who own their workflow.</h2>
+
+    <div class="compare">
+      <ul>
+        <li><b>Local-first.</b> Your photos never leave your machine. No cloud upload, no subscription, no rate limits.</li>
+        <li><b>Learns your taste.</b> Most culling tools score against a generic "good photo" model. fineshyt's preference model is trained on <em>your</em> ratings, so its definition of a keeper is yours.</li>
+        <li><b>Reads RAW + TIFF.</b> CR2, CR3, NEF, ARW, DNG, RAF, ORF, DNG, plus 16-bit TIFFs — opened natively, not pre-converted.</li>
+        <li><b>Open source.</b> MIT-licensed, self-hostable, hackable. No vendor lock-in.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section id="install" class="install">
+    <span class="micro" style="color:#a09c95;">Install</span>
+    <h2>One command after Docker is installed.</h2>
+    <p>
+      The fineshyt install assumes <a href="https://www.docker.com/products/docker-desktop/">Docker Desktop</a>
+      and <a href="https://ollama.com/download">Ollama</a> are on your machine
+      (both have one-click installers). After that:
+    </p>
+    <pre>git clone https://github.com/qweliant/fineshyt.git
+cd fineshyt
+make compose       # creates .env, generates a secret, builds, starts</pre>
+    <p>
+      First run, edit <code>.env</code> to point <code>PHOTO_LIBRARY</code> at
+      the folder where your photos live, then re-run <code>make compose</code>.
+      Open <a href="http://localhost:4000">http://localhost:4000</a> when
+      it's done starting up. The first build downloads ML models (~3 GB) — go
+      get coffee.
+    </p>
+
+    <p style="margin-top: 28px;">
+      <b class="sans">Photos on multiple drives?</b> Set <code>PHOTO_LIBRARIES</code>
+      in <code>.env</code> instead — colon-separated:
+    </p>
+    <pre>PHOTO_LIBRARIES=/Volumes/Drive1:/Volumes/Backup-2024:/Users/me/Pictures</pre>
+    <p>
+      Each drive gets its own clickable chip in the gallery's Directory
+      field, and you type real paths (<code>/Volumes/Drive1/Wedding-2024</code>)
+      instead of a translated <code>/photos/...</code> path.
+    </p>
+
+    <p style="margin-top: 26px;">
+      Step-by-step Windows guide:
+      <a href="install-windows.html">install-windows.html</a> ·
+      Once it's running, the
+      <a href="using-fineshyt.html">how-to-use guide</a> walks you through
+      importing photos and rating them ·
+      Other platforms: <a href="https://github.com/qweliant/fineshyt#running-it">README</a>
+    </p>
+  </section>
+
+  <section id="faq">
+    <span class="micro">FAQ</span>
+    <h2>Quick answers.</h2>
+
+    <p><b class="sans">Does it modify my photos?</b><br/>
+    No. The source directory is mounted read-only. fineshyt makes resized JPEG
+    copies for the AI worker, the originals are never touched.</p>
+
+    <p style="margin-top: 24px;"><b class="sans">Does it work offline?</b><br/>
+    Yes, with Ollama as the LLM. The first run pulls models (Ollama's
+    LLaVA + a CLIP image encoder), after that the whole pipeline is local.</p>
+
+    <p style="margin-top: 24px;"><b class="sans">Hardware requirements?</b><br/>
+    16 GB RAM is comfortable. 8 GB works but you'll feel it. Apple Silicon,
+    modern Intel/AMD, or any GPU Ollama supports. SSD strongly recommended
+    if your library is large.</p>
+
+    <p style="margin-top: 24px;"><b class="sans">How many photos before it gets useful?</b><br/>
+    The taste model needs ~30 ratings to start producing useful scores and
+    ~150 to feel sharp. Burst detection and technical scores work on photo
+    one.</p>
+
+    <p style="margin-top: 24px;"><b class="sans">Where do I report bugs / suggest features?</b><br/>
+    <a href="https://github.com/qweliant/fineshyt/issues">GitHub Issues</a>.
+    Or email — see the README.</p>
+  </section>
+
+</main>
+
+<footer>
+  built by <a href="https://qwelian.com">Qwelian D. Tanner</a> ·
+  <a href="https://github.com/qweliant/fineshyt">source</a> · MIT licensed
+</footer>
+
+</body>
+</html>

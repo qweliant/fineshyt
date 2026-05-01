@@ -1,4 +1,4 @@
-.PHONY: dev db-up db-down setup export reset start-phoenix start-ai
+.PHONY: dev db-up db-down setup export reset start-phoenix start-ai compose compose-init compose-up compose-down compose-build compose-logs
 
 CINNA  := \033[38;5;153m
 KUROMI := \033[38;5;135m
@@ -90,6 +90,63 @@ reset: db-up
 	@printf "⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠣⣀⣀⡴⠤⠄⠴⠁\n"
 	@printf "$(RESET)\n"
 	@cd orchestrator && mix ecto.reset
+
+## ---- Compose distribution -----------------------------------------------
+##
+## `make compose` is the one-command flow for self-hosters: bootstrap a .env
+## with a fresh SECRET_KEY_BASE, build images, and start everything.
+## PHOTO_LIBRARY is the only value the user has to fill in by hand — we
+## can't guess where their photos live.
+
+compose: compose-init
+	@docker compose up --build
+
+compose-init:
+	@if [ ! -f .env ]; then \
+		printf "$(CINNA)$(BOLD)→ creating .env from .env.example...$(RESET)\n"; \
+		cp .env.example .env; \
+	fi
+	@if ! grep -q '^SECRET_KEY_BASE=.\+' .env; then \
+		printf "$(CINNA)$(BOLD)→ generating SECRET_KEY_BASE...$(RESET)\n"; \
+		SECRET=$$(cd orchestrator && mix phx.gen.secret 2>/dev/null || openssl rand -base64 48 | tr -d '\n'); \
+		if [ -z "$$SECRET" ]; then \
+			printf "$(KUROMI)✗ couldn't generate a secret. install elixir/openssl or set SECRET_KEY_BASE manually in .env$(RESET)\n"; \
+			exit 1; \
+		fi; \
+		case "$$(uname -s)" in \
+			Darwin) sed -i '' "s|^SECRET_KEY_BASE=.*|SECRET_KEY_BASE=$$SECRET|" .env ;; \
+			*)      sed -i    "s|^SECRET_KEY_BASE=.*|SECRET_KEY_BASE=$$SECRET|" .env ;; \
+		esac; \
+	fi
+	@# Multi-drive mode: if PHOTO_LIBRARIES is set, auto-fill PHOTO_LIBRARY
+	@# from the first entry so the base compose file's `${PHOTO_LIBRARY:?}`
+	@# validation passes, then generate the override file.
+	@if grep -q '^PHOTO_LIBRARIES=.\+' .env && ! grep -q '^PHOTO_LIBRARY=.\+' .env; then \
+		FIRST=$$(grep -E '^PHOTO_LIBRARIES=' .env | head -1 | cut -d= -f2- | cut -d: -f1); \
+		printf "$(CINNA)$(BOLD)→ auto-filling PHOTO_LIBRARY from PHOTO_LIBRARIES[0]: $$FIRST$(RESET)\n"; \
+		case "$$(uname -s)" in \
+			Darwin) sed -i '' "s|^PHOTO_LIBRARY=.*|PHOTO_LIBRARY=$$FIRST|" .env ;; \
+			*)      sed -i    "s|^PHOTO_LIBRARY=.*|PHOTO_LIBRARY=$$FIRST|" .env ;; \
+		esac; \
+	fi
+	@if ! grep -q '^PHOTO_LIBRARY=.\+' .env; then \
+		printf "$(KUROMI)$(BOLD)\n!! No photo paths configured. Edit .env and set ONE of:\n!!   PHOTO_LIBRARY=$$HOME/Pictures                                  (one drive)\n!!   PHOTO_LIBRARIES=/Volumes/DriveA:/Volumes/DriveB                (multiple)\n$(RESET)\n"; \
+		exit 1; \
+	fi
+	@./scripts/generate-compose-override.sh
+	@printf "$(KEROPPI)$(BOLD)→ .env ready.$(RESET)\n"
+
+compose-up:
+	@docker compose up -d
+
+compose-down:
+	@docker compose down
+
+compose-build:
+	@docker compose build
+
+compose-logs:
+	@docker compose logs -f
 
 export:
 	@printf "$(KITTY)$(BOLD)"

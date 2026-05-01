@@ -56,7 +56,7 @@ defmodule Orchestrator.Workers.ConversionWorker do
 
     Logger.info("Converting #{Path.basename(file_path)}...")
 
-    case Req.post("http://127.0.0.1:8000/api/v1/convert",
+    case Req.post(Orchestrator.AiWorker.url("/api/v1/convert"),
            json: %{file_path: file_path},
            # rawpy on a large RAW file can take up to 60s
            receive_timeout: 60_000

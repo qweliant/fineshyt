@@ -235,7 +235,54 @@ Approved means you've rated it *and* one of: rating ≥ 4, chef's-picked, or `pr
 
 ## Running it
 
-Prerequisites: [Mise](https://mise.jdx.dev/), [uv](https://github.com/astral-sh/uv), [Docker](https://www.docker.com/).
+Two install paths. Pick whichever matches how you want to use the app.
+
+### Option 1: Docker Compose (easiest, recommended for non-developers)
+
+> **Photographers, not developers**: skip the README and follow the dedicated guides at [qweliant.github.io/fineshyt](https://qweliant.github.io/fineshyt/) — there's a [step-by-step Windows install](https://qweliant.github.io/fineshyt/install-windows.html) and a [how-to-use walkthrough](https://qweliant.github.io/fineshyt/using-fineshyt.html). The rest of this README is the developer-facing reference.
+
+Prerequisites: [Docker Desktop](https://www.docker.com/products/docker-desktop/) and [Ollama](https://ollama.com/download).
+
+**macOS / Linux / WSL** (Git Bash + make on Windows works too):
+
+```bash
+git clone https://github.com/qweliant/fineshyt.git
+cd fineshyt
+make compose
+```
+
+`make compose` creates `.env` from the template, generates a `SECRET_KEY_BASE` for you, and brings everything up. The first run will fail with a message asking you to set `PHOTO_LIBRARY` in `.env` — point it at the folder where your photos live, then re-run.
+
+**Manual flow** (no make required, works in any shell):
+
+```bash
+git clone https://github.com/qweliant/fineshyt.git
+cd fineshyt
+cp .env.example .env       # then edit .env to set PHOTO_LIBRARY + SECRET_KEY_BASE
+docker compose up --build
+```
+
+First run is 10–20 minutes (Docker pulls base images, builds the two service containers, the AI worker fetches its CLIP encoder ~2 GB). Subsequent runs start in seconds.
+
+In compose mode your photo library is bind-mounted read-only at `/photos` inside the containers, so the gallery's Directory field takes paths like `/photos/2024-spring` regardless of where the host folder actually lives.
+
+#### Multi-drive setup
+
+Photographers with photos across several drives can set `PHOTO_LIBRARIES` instead of (or in addition to) `PHOTO_LIBRARY` in `.env`:
+
+```env
+PHOTO_LIBRARIES=/Volumes/Drive1:/Volumes/Backup-2024:/Users/me/Pictures
+```
+
+`make compose-init` reads that list and generates a `docker-compose.override.yml` that mounts each drive at its real host path inside the container — so in the gallery you type the actual path (`/Volumes/Drive1/Wedding-2024`) instead of a `/photos/...` translation. Each drive also shows up as a clickable chip in the gallery's Directory field automatically.
+
+The override file is per-user (gitignored) and regenerated whenever you re-run `make compose-init`.
+
+Photographers without a developer background should follow the [photographer's Windows install guide](https://qweliant.github.io/fineshyt/install-windows.html) — same install, more screenshots and hand-holding.
+
+### Option 2: Native dev install (for hacking on the code)
+
+Prerequisites: [Mise](https://mise.jdx.dev/), [uv](https://github.com/astral-sh/uv), [Docker](https://www.docker.com/) (just for Postgres+pgvector).
 
 First time:
 
@@ -251,6 +298,41 @@ make dev
 
 - Gallery + single upload: [localhost:4000](http://localhost:4000)
 - AI worker API docs: [localhost:8000/docs](http://localhost:8000/docs)
+
+### Makefile reference
+
+Every target in [Makefile](Makefile). Run from the repo root.
+
+**Native dev** (Mise/uv/Docker on host, Phoenix and ai_worker run as bare processes):
+
+| Target | What it does |
+| --- | --- |
+| `make setup` | One-time setup — boots the db, runs `mix deps.get`, `mix ecto.setup`, `uv sync` |
+| `make dev` | Boots db, then runs `mix phx.server` and the FastAPI worker in parallel (foreground, two log streams) |
+| `make start-phoenix` | Phoenix only (`mix phx.server` in `orchestrator/`) — invoked by `make dev` |
+| `make start-ai` | ai_worker only (`uv run fastapi dev src/main.py --reload` in `ai_worker/`) — invoked by `make dev` |
+| `make db-up` | Start just the Postgres+pgvector container in the background |
+| `make db-down` | `docker compose down` — stops services, preserves the `pgdata` volume |
+| `make reset` | `mix ecto.reset` — drops and recreates the db schema (loses all data) |
+
+**Docker compose distribution** (everything runs in containers; for self-hosters who don't want a dev toolchain on the host):
+
+| Target | What it does |
+| --- | --- |
+| `make compose` | The one-command flow. Calls `compose-init` then `docker compose up --build`. Use this for first-time setup and routine starts. |
+| `make compose-init` | Idempotent bootstrap. Creates `.env` from `.env.example` if missing. Generates `SECRET_KEY_BASE` via `mix phx.gen.secret` (falls back to `openssl rand`). If `PHOTO_LIBRARIES` is set but `PHOTO_LIBRARY` isn't, fills `PHOTO_LIBRARY` from the first multi-drive entry. Runs `scripts/generate-compose-override.sh` to materialize the multi-drive bind-mounts. Bails if no photo paths are configured. |
+| `make compose-up` | `docker compose up -d` — detached, skips rebuild. Use after the first `make compose` when you don't need rebuilds. |
+| `make compose-down` | `docker compose down` — stops services, preserves `pgdata`, `uploads`, `models`, `preference` volumes. |
+| `make compose-build` | `docker compose build` — rebuild images without starting them. |
+| `make compose-logs` | `docker compose logs -f` — tail all service logs. |
+
+**Misc:**
+
+| Target | What it does |
+| --- | --- |
+| `make export TARGET=/path/to/dir` | Run `mix fineshyt.export --target $(TARGET)` to write approved photos + `photos.json` manifest into the given directory. |
+
+> ⚠ **Never run** `docker compose down -v`, `docker volume prune`, or `docker system prune --volumes` — any of those wipe the `pgdata` volume and lose all ratings, embeddings, and AI metadata. To free disk safely, use `docker builder prune -a -f` and `docker image prune -a -f` (those only touch unused build cache and orphan images).
 
 ## Running on Windows
 
@@ -364,8 +446,8 @@ Same URLs as above (`localhost:4000`, `localhost:8000/docs`).
 
 ### Known Windows quirks
 
-- **Browse button is macOS-only.** It calls `osascript` to pop the native folder picker — won't work on Windows or Linux. Paste a path into the Directory field; the rest of the ingest flow is identical. Patches welcome.
-- **Quick-access path chips** (`/Volumes`, `~/Desktop`, …) are macOS-flavored and won't resolve as-is on Windows. Type a real absolute path like `D:\Photos\2024`.
+- **Browse button** uses PowerShell's `FolderBrowserDialog` on Windows, AppleScript on macOS, and `zenity` on Linux (if installed). If you don't have zenity on Linux, the button hides itself — paste a path instead.
+- **Quick-access chips** (Desktop / Downloads / Pictures) auto-resolve to the right absolute path per OS, so on Windows they point at `C:\Users\<you>\Desktop` etc. without you having to think about it.
 - **File paths get stored in the DB** as whatever absolute path the orchestrator saw at ingest time. Moving the photos directory or changing drive letters after the fact will break the gallery's file references — same gotcha as macOS, but Windows drive letters make it easier to hit.
 - **rawpy on Python 3.13.** At time of writing the latest rawpy wheels target up through 3.12. If `uv sync` complains, pin to 3.12: `uv python pin 3.12 && uv sync`.
 
