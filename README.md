@@ -299,6 +299,41 @@ make dev
 - Gallery + single upload: [localhost:4000](http://localhost:4000)
 - AI worker API docs: [localhost:8000/docs](http://localhost:8000/docs)
 
+### Makefile reference
+
+Every target in [Makefile](Makefile). Run from the repo root.
+
+**Native dev** (Mise/uv/Docker on host, Phoenix and ai_worker run as bare processes):
+
+| Target | What it does |
+| --- | --- |
+| `make setup` | One-time setup — boots the db, runs `mix deps.get`, `mix ecto.setup`, `uv sync` |
+| `make dev` | Boots db, then runs `mix phx.server` and the FastAPI worker in parallel (foreground, two log streams) |
+| `make start-phoenix` | Phoenix only (`mix phx.server` in `orchestrator/`) — invoked by `make dev` |
+| `make start-ai` | ai_worker only (`uv run fastapi dev src/main.py --reload` in `ai_worker/`) — invoked by `make dev` |
+| `make db-up` | Start just the Postgres+pgvector container in the background |
+| `make db-down` | `docker compose down` — stops services, preserves the `pgdata` volume |
+| `make reset` | `mix ecto.reset` — drops and recreates the db schema (loses all data) |
+
+**Docker compose distribution** (everything runs in containers; for self-hosters who don't want a dev toolchain on the host):
+
+| Target | What it does |
+| --- | --- |
+| `make compose` | The one-command flow. Calls `compose-init` then `docker compose up --build`. Use this for first-time setup and routine starts. |
+| `make compose-init` | Idempotent bootstrap. Creates `.env` from `.env.example` if missing. Generates `SECRET_KEY_BASE` via `mix phx.gen.secret` (falls back to `openssl rand`). If `PHOTO_LIBRARIES` is set but `PHOTO_LIBRARY` isn't, fills `PHOTO_LIBRARY` from the first multi-drive entry. Runs `scripts/generate-compose-override.sh` to materialize the multi-drive bind-mounts. Bails if no photo paths are configured. |
+| `make compose-up` | `docker compose up -d` — detached, skips rebuild. Use after the first `make compose` when you don't need rebuilds. |
+| `make compose-down` | `docker compose down` — stops services, preserves `pgdata`, `uploads`, `models`, `preference` volumes. |
+| `make compose-build` | `docker compose build` — rebuild images without starting them. |
+| `make compose-logs` | `docker compose logs -f` — tail all service logs. |
+
+**Misc:**
+
+| Target | What it does |
+| --- | --- |
+| `make export TARGET=/path/to/dir` | Run `mix fineshyt.export --target $(TARGET)` to write approved photos + `photos.json` manifest into the given directory. |
+
+> ⚠ **Never run** `docker compose down -v`, `docker volume prune`, or `docker system prune --volumes` — any of those wipe the `pgdata` volume and lose all ratings, embeddings, and AI metadata. To free disk safely, use `docker builder prune -a -f` and `docker image prune -a -f` (those only touch unused build cache and orphan images).
+
 ## Running on Windows
 
 The whole stack — BEAM, Python, Postgres, pgvector, Ollama — works on Windows. Two paths, pick one. WSL2 is the smoother one because the Makefile and the rest of this repo assume bash; native Windows works but you skip the Makefile and run the underlying commands by hand.
