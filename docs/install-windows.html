@@ -139,32 +139,39 @@
   }
   footer a { color: var(--muted); }
 
-  /* ---- Docs page tabs (cross-page nav) -------------------------- */
-  .docs-tabs {
-    border-bottom: 1px solid var(--line);
-    padding: 0 32px;
-    display: flex;
-    gap: 28px;
-    background: var(--bg);
-    overflow-x: auto;
-  }
-  .docs-tabs a {
+  /* ---- Section nav rail ----------------------------------------- */
+  html { scroll-behavior: smooth; }
+  h2 { scroll-margin-top: 32px; }
+
+  .toc {
+    position: fixed;
+    top: 50%;
+    left: 36px;
+    transform: translateY(-50%);
+    z-index: 10;
     font-family: "Inter", sans-serif;
-    font-size: 11px;
+    font-size: 10px;
     text-transform: uppercase;
     letter-spacing: 0.22em;
+    max-height: 80vh;
+    overflow-y: auto;
+  }
+  .toc a {
+    display: block;
+    padding: 9px 0 9px 14px;
     color: var(--muted);
     text-decoration: none;
-    padding: 14px 0;
-    border-bottom: 2px solid transparent;
-    margin-bottom: -1px;
-    transition: color 0.15s, border-color 0.15s;
-    white-space: nowrap;
+    border-left: 2px solid var(--line);
+    transition: color 0.15s, border-color 0.15s, padding-left 0.15s;
   }
-  .docs-tabs a:hover { color: var(--ink); }
-  .docs-tabs a[aria-current="page"] {
+  .toc a:hover {
     color: var(--ink);
     border-color: var(--ink);
+    padding-left: 18px;
+  }
+
+  @media (max-width: 1180px) {
+    .toc { display: none; }
   }
 </style>
 </head>
@@ -174,15 +181,21 @@
   <a class="brand" href="index.html">fineshyt</a>
   <nav>
     <a href="index.html">Home</a>
+    <a href="using-fineshyt.html">How to use</a>
     <a href="https://github.com/qweliant/fineshyt">GitHub</a>
   </nav>
 </header>
 
-<nav class="docs-tabs" aria-label="Documentation pages">
-  <a href="index.html">Overview</a>
-  <a href="install-windows.html" aria-current="page">Install on Windows</a>
-  <a href="using-fineshyt.html">How to use</a>
-</nav>
+<aside class="toc" aria-label="Section navigation">
+  <a href="#step-1">1. Docker Desktop</a>
+  <a href="#step-2">2. Ollama</a>
+  <a href="#step-3">3. Git</a>
+  <a href="#step-4">4. Download</a>
+  <a href="#step-5">5. Configure</a>
+  <a href="#step-6">6. Start</a>
+  <a href="#step-7">7. Open</a>
+  <a href="#troubleshooting">Troubleshooting</a>
+</aside>
 
 <main>
 
@@ -205,7 +218,7 @@
 
 <hr/>
 
-<h2><span class="step-num">1</span> Install Docker Desktop</h2>
+<h2 id="step-1"><span class="step-num">1</span> Install Docker Desktop</h2>
 <p>
   Docker is a tool that lets fineshyt run as a self-contained package
   without you having to install Elixir, Python, Postgres, and a dozen other
@@ -221,7 +234,7 @@
   You don't need a Docker account — close the sign-in prompt if it bugs you.
 </p>
 
-<h2><span class="step-num">2</span> Install Ollama</h2>
+<h2 id="step-2"><span class="step-num">2</span> Install Ollama</h2>
 <p>
   Ollama runs the AI vision model (LLaVA) that describes what's in each
   photo. fineshyt talks to it locally — nothing leaves your machine.
@@ -234,7 +247,7 @@
   <li>This downloads about 4&nbsp;GB. When it says <code>success</code>, you're done.</li>
 </ol>
 
-<h2><span class="step-num">3</span> Install Git</h2>
+<h2 id="step-3"><span class="step-num">3</span> Install Git</h2>
 <p>
   Git is how you'll download the fineshyt source. The tiny installer takes 90 seconds.
 </p>
@@ -243,7 +256,7 @@
   <li>Run the installer. You can accept every default — none of them matter for fineshyt.</li>
 </ol>
 
-<h2><span class="step-num">4</span> Download fineshyt</h2>
+<h2 id="step-4"><span class="step-num">4</span> Download fineshyt</h2>
 <p>
   This step uses <b>PowerShell</b> — Windows' built-in text-based command
   prompt. You probably haven't opened it before. That's fine; you only
@@ -313,7 +326,7 @@
   If you see those, step 4 is done.
 </p>
 
-<h2><span class="step-num">5</span> Configure two things</h2>
+<h2 id="step-5"><span class="step-num">5</span> Configure two things</h2>
 <p>
   fineshyt reads its settings from a file called <code>.env</code>. The
   project ships with a template called <code>.env.example</code> — you'll
@@ -387,7 +400,7 @@
   uses to sign session cookies — needed even for a localhost-only install.
 </div>
 
-<h2><span class="step-num">6</span> Start fineshyt</h2>
+<h2 id="step-6"><span class="step-num">6</span> Start fineshyt</h2>
 <p>Back in PowerShell (still in the <code>fineshyt</code> folder):</p>
 <pre>docker compose up</pre>
 <p>
@@ -401,7 +414,7 @@
   you're up.
 </p>
 
-<h2><span class="step-num">7</span> Open it in your browser</h2>
+<h2 id="step-7"><span class="step-num">7</span> Open it in your browser</h2>
 <p>
   Go to <a href="http://localhost:4000">http://localhost:4000</a>.
 </p>

@@ -216,34 +216,6 @@
   @media (max-width: 1180px) {
     .toc { display: none; }
   }
-
-  /* ---- Docs page tabs (cross-page nav) -------------------------- */
-  .docs-tabs {
-    border-bottom: 1px solid var(--line);
-    padding: 0 32px;
-    display: flex;
-    gap: 28px;
-    background: var(--bg);
-    overflow-x: auto;
-  }
-  .docs-tabs a {
-    font-family: "Inter", sans-serif;
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 0.22em;
-    color: var(--muted);
-    text-decoration: none;
-    padding: 14px 0;
-    border-bottom: 2px solid transparent;
-    margin-bottom: -1px;
-    transition: color 0.15s, border-color 0.15s;
-    white-space: nowrap;
-  }
-  .docs-tabs a:hover { color: var(--ink); }
-  .docs-tabs a[aria-current="page"] {
-    color: var(--ink);
-    border-color: var(--ink);
-  }
 </style>
 </head>
 <body>
@@ -256,12 +228,6 @@
     <a href="https://github.com/qweliant/fineshyt">GitHub</a>
   </nav>
 </header>
-
-<nav class="docs-tabs" aria-label="Documentation pages">
-  <a href="index.html" aria-current="page">Overview</a>
-  <a href="install-windows.html">Install on Windows</a>
-  <a href="using-fineshyt.html">How to use</a>
-</nav>
 
 <aside class="toc" aria-label="Section navigation">
   <a href="#hero">Top</a>
