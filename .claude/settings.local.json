@@ -15,7 +15,8 @@
       "Bash(uv run python -c ':*)",
       "Bash(uv run --active python -c ' *)",
       "Bash(yes)",
-      "Bash(mix phx.gen.release --docker)"
+      "Bash(mix phx.gen.release --docker)",
+      "Bash(docker compose *)"
     ]
   }
 }

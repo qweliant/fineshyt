@@ -66,6 +66,11 @@ defmodule Orchestrator.Workers.ConversionWorker do
 
         %{
           "file_path" => jpeg_path,
+          # The original RAW/source path travels through the pipeline so
+          # AiCurationWorker can locate the XMP sidecar (which lives next
+          # to the source, not the converted JPEG) and persist it on the
+          # photo row for round-trip writes.
+          "source_path" => file_path,
           "ref" => ref,
           "source" => source,
           "project" => project,

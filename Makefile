@@ -99,7 +99,7 @@ reset: db-up
 ## can't guess where their photos live.
 
 compose: compose-init
-	@docker compose up --build
+	@docker compose --profile compose up --build
 
 compose-init:
 	@if [ ! -f .env ]; then \
@@ -137,16 +137,16 @@ compose-init:
 	@printf "$(KEROPPI)$(BOLD)→ .env ready.$(RESET)\n"
 
 compose-up:
-	@docker compose up -d
+	@docker compose --profile compose up -d
 
 compose-down:
-	@docker compose down
+	@docker compose --profile compose down
 
 compose-build:
-	@docker compose build
+	@docker compose --profile compose build
 
 compose-logs:
-	@docker compose logs -f
+	@docker compose --profile compose logs -f
 
 export:
 	@printf "$(KITTY)$(BOLD)"

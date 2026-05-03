@@ -80,6 +80,14 @@ defmodule Orchestrator.Photos.Photo do
     field :curation_status, :string, default: "complete"
     field :failure_reason, :string
 
+    # XMP sidecar tracking. `source_path` is the original RAW/source file
+    # the JPEG was converted from — XMP sidecars sit next to it as
+    # `<source>.xmp`. `sidecar_synced_at` records the last time
+    # Fine.Shyt wrote the sidecar so we can skip-if-newer when the user's
+    # editor has touched it since.
+    field :source_path, :string
+    field :sidecar_synced_at, :naive_datetime
+
     timestamps()
   end
 
@@ -112,7 +120,8 @@ defmodule Orchestrator.Photos.Photo do
       :technical_score, :sharpness_score, :exposure_score,
       :clip_embedding, :preference_score, :preference_model_version,
       :subject, :artistic_mood, :lighting_critique, :content_type, :suggested_tags,
-      :user_rating, :project, :captured_at, :burst_group, :curation_status, :failure_reason
+      :user_rating, :project, :captured_at, :burst_group, :curation_status, :failure_reason,
+      :source_path, :sidecar_synced_at
     ])
     |> validate_inclusion(:user_rating, 1..5, message: "must be between 1 and 5")
     |> validate_required([:file_path])

@@ -26,6 +26,11 @@ services:
       retries: 10
 
   orchestrator:
+    # Profile-gated: only starts on `docker compose --profile compose up`
+    # (i.e. via `make compose`). Bare `docker compose up -d` (called by
+    # `make dev`) starts only the `db` service, so native dev doesn't
+    # collide with a containerised orchestrator on port 4000.
+    profiles: ["compose"]
     build: ./orchestrator
     depends_on:
       db:
@@ -67,6 +72,9 @@ services:
       - ${PHOTO_LIBRARY:?Set PHOTO_LIBRARY in .env — see .env.example}:/photos:ro
 
   ai_worker:
+    # Profile-gated for the same reason as `orchestrator` above — keeps
+    # native dev's port 8000 free for the locally-run FastAPI.
+    profiles: ["compose"]
     build: ./ai_worker
     environment:
       LLM_BASE_URL: ${LLM_BASE_URL:-http://host.docker.internal:11434/v1/}

@@ -26,6 +26,15 @@ end
 config :orchestrator, :ai_worker_url,
   System.get_env("AI_WORKER_URL", "http://127.0.0.1:8000")
 
+# XMP sidecar behavior. Read by Orchestrator.Sidecars.mode/0.
+#   "off"        — read and write both disabled
+#   "read"       — read existing sidecars to seed metadata on ingest
+#                  (default; safe — never modifies user files)
+#   "read-write" — read on ingest AND write Fine.Shyt's metadata back
+#                  as XMP after curation completes
+config :orchestrator, :sidecar_mode,
+  System.get_env("FINESHYT_SIDECAR_MODE", "read")
+
 config :orchestrator, OrchestratorWeb.Endpoint,
   http: [port: String.to_integer(System.get_env("PORT", "4000"))]
 

@@ -51,8 +51,6 @@ defmodule OrchestratorWeb.CuratorLive do
       |> assign(:import_failed_count, 0)
       |> assign(:import_error, nil)
       |> assign(:activity_log, activity_log)
-      |> assign(:dir_chips, default_chips())
-      |> assign(:can_browse, browse_supported?())
 
     {:ok, socket}
   end
@@ -64,23 +62,15 @@ defmodule OrchestratorWeb.CuratorLive do
 
   @impl Phoenix.LiveView
   def handle_event("browse_directory", _params, socket) do
-    case open_folder_dialog() do
-      {:ok, path} -> {:noreply, assign(socket, dir_path: path)}
-      :error      -> {:noreply, socket}
+    case System.cmd("osascript", ["-e", ~s[POSIX path of (choose folder with prompt "Select a folder to ingest")]], stderr_to_stdout: false) do
+      {path, 0} -> {:noreply, assign(socket, dir_path: String.trim(path, " /\n"))}
+      _         -> {:noreply, socket}
     end
   end
 
   @impl Phoenix.LiveView
   def handle_event("ingest", params, socket) do
-    # Expand `~` and normalize separators so the worker's File.dir? check
-    # actually finds paths typed by the user (or pasted from a Windows
-    # explorer with backslashes).
-    dir_path =
-      params
-      |> Map.get("dir_path", "")
-      |> String.trim()
-      |> expand_user_path()
-
+    dir_path = params |> Map.get("dir_path", "") |> String.trim()
     project = params |> Map.get("project", "") |> String.trim()
     sample = case Integer.parse(Map.get(params, "sample", "50")) do
       {n, _} when n > 0 -> n
@@ -270,29 +260,26 @@ defmodule OrchestratorWeb.CuratorLive do
                   ×
                 </button>
               <% end %>
-              <%= if @can_browse do %>
-                <button
-                  type="button"
-                  phx-click="browse_directory"
-                  class="px-4 py-4 font-sans text-[10px] uppercase tracking-widest text-gray-400 hover:text-[#111111] border-l border-gray-200 hover:bg-gray-50 transition-colors shrink-0"
-                >
-                  Browse
-                </button>
-              <% end %>
+              <button
+                type="button"
+                phx-click="browse_directory"
+                class="px-4 py-4 font-sans text-[10px] uppercase tracking-widest text-gray-400 hover:text-[#111111] border-l border-gray-200 hover:bg-gray-50 transition-colors shrink-0"
+              >
+                Browse
+              </button>
             </div>
           </div>
 
           <%!-- Quick-access suggestions --%>
           <div class="flex gap-2 mb-8 flex-wrap">
-            <%= for {label, path} <- @dir_chips do %>
+            <%= for path <- ["/Volumes", "~/Desktop", "~/Downloads", "~/Pictures"] do %>
               <button
                 type="button"
                 phx-click="set_path"
                 phx-value-dir_path={path}
-                title={path}
                 class="font-mono text-[10px] text-gray-400 border border-gray-200 px-2.5 py-1 hover:border-gray-500 hover:text-gray-700 transition-colors"
               >
-                <%= label %>
+                <%= path %>
               </button>
             <% end %>
           </div>
@@ -418,144 +405,5 @@ defmodule OrchestratorWeb.CuratorLive do
       </div>
     </div>
     """
-  end
-
-  # ---- Cross-platform helpers ----------------------------------------
-
-  # Quick-access chips, dynamically built per OS and per environment.
-  #
-  # Each chip is `{label, absolute_path}` so we can show short labels in
-  # the UI while autofilling a real path the worker can resolve. We
-  # always filter out paths that don't exist on the running host — chips
-  # that lead to "directory not found" errors are worse than no chip.
-  #
-  # Chip ordering, highest priority first:
-  #   1. Each entry from PHOTO_LIBRARIES (multi-drive Docker mode), so
-  #      a photographer with several drives sees each as a clickable chip.
-  #   2. /photos (single-drive Docker mode bind-mount).
-  #   3. OS-default user folders (Desktop / Downloads / Pictures, plus
-  #      /Volumes on macOS or /mnt on Linux).
-  defp default_chips do
-    multi_drive_chips() ++ photos_chip() ++ os_default_chips()
-  end
-
-  defp multi_drive_chips do
-    case System.get_env("PHOTO_LIBRARIES") do
-      nil -> []
-      "" -> []
-      paths ->
-        paths
-        |> String.split(":", trim: true)
-        |> Enum.map(&String.trim/1)
-        |> Enum.reject(&(&1 == ""))
-        |> Enum.filter(&File.dir?/1)
-        |> Enum.map(fn path -> {Path.basename(path), path} end)
-    end
-  end
-
-  defp photos_chip do
-    if File.dir?("/photos"), do: [{"/photos", "/photos"}], else: []
-  end
-
-  defp os_default_chips do
-    home = System.user_home() || ""
-
-    raw =
-      case :os.type() do
-        {:win32, _} ->
-          [
-            {"Desktop", Path.join(home, "Desktop")},
-            {"Downloads", Path.join(home, "Downloads")},
-            {"Pictures", Path.join(home, "Pictures")}
-          ]
-
-        {:unix, :darwin} ->
-          [
-            {"/Volumes", "/Volumes"},
-            {"Desktop", Path.join(home, "Desktop")},
-            {"Downloads", Path.join(home, "Downloads")},
-            {"Pictures", Path.join(home, "Pictures")}
-          ]
-
-        {:unix, _} ->
-          [
-            {"Desktop", Path.join(home, "Desktop")},
-            {"Downloads", Path.join(home, "Downloads")},
-            {"Pictures", Path.join(home, "Pictures")},
-            {"/mnt", "/mnt"}
-          ]
-      end
-
-    Enum.filter(raw, fn {_label, path} -> File.dir?(path) end)
-  end
-
-  defp browse_supported? do
-    case :os.type() do
-      {:unix, :darwin} -> true
-      {:win32, _} -> true
-      {:unix, _} -> System.find_executable("zenity") != nil
-    end
-  end
-
-  # Pop a native folder picker per-OS. Returns `{:ok, path}` on selection,
-  # `:error` on cancel or unsupported platform.
-  defp open_folder_dialog do
-    case :os.type() do
-      {:unix, :darwin} -> mac_folder_dialog()
-      {:win32, _}      -> windows_folder_dialog()
-      {:unix, _}       -> linux_folder_dialog()
-    end
-  end
-
-  defp mac_folder_dialog do
-    script = ~s[POSIX path of (choose folder with prompt "Select a folder to ingest")]
-
-    case System.cmd("osascript", ["-e", script], stderr_to_stdout: false) do
-      {path, 0} -> {:ok, path |> String.trim() |> String.trim_trailing("/")}
-      _         -> :error
-    end
-  end
-
-  defp windows_folder_dialog do
-    # FolderBrowserDialog requires single-threaded apartment (-STA) and the
-    # System.Windows.Forms assembly. Output is just the selected path on
-    # stdout, or empty on cancel.
-    script = """
-    Add-Type -AssemblyName System.Windows.Forms | Out-Null
-    $d = New-Object System.Windows.Forms.FolderBrowserDialog
-    $d.Description = 'Select a folder to ingest'
-    if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-      Write-Output $d.SelectedPath
-    }
-    """
-
-    case System.cmd("powershell", ["-NoProfile", "-STA", "-Command", script], stderr_to_stdout: false) do
-      {output, 0} ->
-        case String.trim(output) do
-          "" -> :error
-          path -> {:ok, path}
-        end
-
-      _ ->
-        :error
-    end
-  end
-
-  defp linux_folder_dialog do
-    case System.cmd("zenity", ["--file-selection", "--directory", "--title=Select a folder to ingest"], stderr_to_stdout: false) do
-      {path, 0} -> {:ok, String.trim(path)}
-      _         -> :error
-    end
-  rescue
-    ErlangError -> :error
-  end
-
-  # Expand `~` and normalize separators. Empty string passes through so the
-  # form-validation branch in `handle_event("ingest", ...)` still fires.
-  defp expand_user_path(""), do: ""
-
-  defp expand_user_path(path) do
-    path
-    |> Path.expand()
   end
 end

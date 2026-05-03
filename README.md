@@ -205,6 +205,32 @@ Set `STATIC_UPLOADS_DIR` in `ai_worker/.env` to point at the orchestrator's stat
 STATIC_UPLOADS_DIR=/path/to/fineshyt/orchestrator/priv/static/uploads
 ```
 
+### XMP sidecar metadata (experimental)
+
+Fine.Shyt can read and write [XMP sidecars](https://qweliant.github.io/fineshyt/using-fineshyt.html) — the universal interchange format every serious photo editor (Lightroom, darktable, Capture One, Bridge) uses. This makes Fine.Shyt round-trip with whatever editing tool the user already has, without requiring any vendor SDK.
+
+On ingest, if a `.xmp` sidecar exists next to a source RAW, Fine.Shyt will:
+
+- import `xmp:Rating` → `user_rating` (so years of Lightroom history seed the preference model)
+- merge `dc:subject` keywords into `suggested_tags`
+
+Behavior controlled by `FINESHYT_SIDECAR_MODE`:
+
+| Value | Effect |
+| --- | --- |
+| `off` | No sidecar reads or writes |
+| `read` (default) | Read existing sidecars on ingest; never write back. Safe by default — does not modify any user files. |
+| `read-write` | Read on ingest **and** write Fine.Shyt's metadata back to the sidecar after curation. Writes are skipped if the sidecar's mtime is newer than the last sync (the user's editor has touched it since), so concurrent editing doesn't clobber. |
+
+Requires `exiftool` on PATH. The orchestrator Docker image bundles it; for native dev install:
+
+```bash
+brew install exiftool                  # macOS
+sudo apt install libimage-exiftool-perl # Debian / Ubuntu
+```
+
+Custom `fineshyt:` XMP namespace is used for fields no standard covers (`fineshyt:PreferenceScore`, `fineshyt:ArtisticMood`, etc.). Standard fields (`xmp:Rating`, `dc:subject`) are reused so other editors pick them up automatically.
+
 ## Backfill tasks
 
 For existing photos that predate a feature, there are one-shot mix tasks:

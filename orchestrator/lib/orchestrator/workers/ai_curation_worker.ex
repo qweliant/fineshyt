@@ -79,11 +79,17 @@ defmodule Orchestrator.Workers.AiCurationWorker do
 
     source = Map.get(args, "source", "upload")
     project = Map.get(args, "project")
+    source_path = Map.get(args, "source_path")
     technical_score = Map.get(args, "technical_score")
     sharpness_score = Map.get(args, "sharpness_score")
     exposure_score = Map.get(args, "exposure_score")
     captured_at = parse_captured_at(Map.get(args, "captured_at"))
     basename = Path.basename(file_path)
+
+    # Read the XMP sidecar next to the original source file (if any) so
+    # we can seed user_rating + suggested_tags from prior editor history.
+    # Always safe: read-only file ops, never modifies the original.
+    sidecar_meta = read_sidecar(source_path)
 
     uploads_dir = Path.join([:code.priv_dir(:orchestrator), "static", "uploads"])
     dest = Path.join(uploads_dir, basename)
@@ -113,11 +119,18 @@ defmodule Orchestrator.Workers.AiCurationWorker do
             {:ok, %Req.Response{status: 200, body: metadata}} ->
               Photos.delete_failed_if_exists(dest)
 
+              # Merge AI-extracted tags with any existing keywords from the
+              # sidecar — gives users continuity from their prior editor's
+              # tagging history.
+              merged_tags =
+                merge_tags(metadata["suggested_tags"], Map.get(sidecar_meta, :keywords))
+
               insert_result =
                 Photos.create_photo(%{
                   file_path: dest,
                   url: "/uploads/#{basename}",
                   source: source,
+                  source_path: source_path,
                   project: project,
                   technical_score: technical_score,
                   sharpness_score: sharpness_score,
@@ -126,7 +139,8 @@ defmodule Orchestrator.Workers.AiCurationWorker do
                   artistic_mood: metadata["artistic_mood"],
                   lighting_critique: metadata["lighting_critique"],
                   content_type: metadata["content_type"],
-                  suggested_tags: metadata["suggested_tags"],
+                  suggested_tags: merged_tags,
+                  user_rating: Map.get(sidecar_meta, :rating),
                   captured_at: captured_at,
                   curation_status: "complete"
                 })
@@ -134,9 +148,13 @@ defmodule Orchestrator.Workers.AiCurationWorker do
               # Kick off CLIP embedding in the background. Embedding failures
               # are non-fatal for curation — the photo is already usable.
               case insert_result do
-                {:ok, %{id: photo_id}} ->
+                {:ok, %{id: photo_id} = photo} ->
                   Orchestrator.Workers.EmbeddingWorker.new(%{photo_id: photo_id})
                   |> Oban.insert()
+
+                  # Write our metadata back into the sidecar (no-op unless
+                  # FINESHYT_SIDECAR_MODE=read-write). Failure is non-fatal.
+                  write_sidecar_back(source_path, photo)
 
                 _ ->
                   :noop
@@ -246,4 +264,51 @@ defmodule Orchestrator.Workers.AiCurationWorker do
     end
   end
   defp parse_captured_at(_), do: nil
+
+  # ---- XMP sidecar helpers --------------------------------------------
+
+  # No source path → no sidecar to read. (Single-upload flow doesn't have
+  # one.) Returns an empty map so downstream Map.get/3 calls just return
+  # the defaults.
+  defp read_sidecar(nil), do: %{}
+
+  defp read_sidecar(source_path) do
+    case Orchestrator.Sidecars.read(source_path) do
+      {:ok, meta} -> meta
+      :none -> %{}
+      {:error, reason} ->
+        Logger.warning("XMP sidecar read failed for #{source_path}: #{inspect(reason)}")
+        %{}
+    end
+  end
+
+  # No source path → can't write a sidecar (single-upload, no original on
+  # disk to sit beside).
+  defp write_sidecar_back(nil, _photo), do: :ok
+
+  defp write_sidecar_back(source_path, photo) do
+    case Orchestrator.Sidecars.write(source_path, photo) do
+      {:ok, synced_at} ->
+        # Persist the timestamp so the next write knows when we last
+        # touched the sidecar (for skip-if-newer conflict policy).
+        photo
+        |> Ecto.Changeset.change(%{sidecar_synced_at: synced_at})
+        |> Orchestrator.Repo.update()
+
+      :skipped ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("XMP sidecar write failed for #{source_path}: #{inspect(reason)}")
+        :ok
+    end
+  end
+
+  # Combine AI-suggested tags with sidecar-imported keywords. Either
+  # side may be nil; result is a deduped list (or [] if both empty).
+  defp merge_tags(ai_tags, sidecar_keywords) do
+    [ai_tags || [], sidecar_keywords || []]
+    |> List.flatten()
+    |> Enum.uniq()
+  end
 end
