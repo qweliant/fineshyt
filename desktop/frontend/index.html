@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Fine.Shyt</title>
+<style>
+  :root {
+    --bg: #fcfbf9;
+    --ink: #111111;
+    --muted: #7a7a7a;
+    --line: #e5e5e5;
+    --accent: #b94900;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "Source Serif 4", Georgia, serif;
+    -webkit-font-smoothing: antialiased;
+    height: 100%;
+  }
+  body {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 32px;
+  }
+  h1 {
+    font-family: "Inter", system-ui, sans-serif;
+    font-weight: 900;
+    font-size: clamp(2.5rem, 7vw, 5rem);
+    letter-spacing: -0.02em;
+    line-height: 0.95;
+    margin: 0 0 24px;
+  }
+  .micro {
+    font-family: "Inter", system-ui, sans-serif;
+    text-transform: uppercase;
+    letter-spacing: 0.4em;
+    font-size: 10px;
+    color: var(--muted);
+    margin: 0 0 56px;
+  }
+  .status {
+    font-style: italic;
+    color: var(--muted);
+    font-size: 1.05rem;
+    margin: 0 0 24px;
+    max-width: 36em;
+  }
+  .spinner {
+    width: 8px;
+    height: 8px;
+    background: var(--ink);
+    border-radius: 50%;
+    margin: 0 auto;
+    animation: pulse 1.2s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 0.3; transform: scale(0.85); }
+    50%      { opacity: 1;   transform: scale(1); }
+  }
+  .error {
+    border-left: 3px solid var(--accent);
+    background: #fff7f0;
+    padding: 18px 22px;
+    margin: 24px auto 0;
+    max-width: 40em;
+    text-align: left;
+    font-family: "JetBrains Mono", "Menlo", monospace;
+    font-size: 0.85rem;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    color: #5a1f00;
+    display: none;
+  }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+  <span class="micro">fineshyt · archival system</span>
+  <h1>FINE.<br/>SHYT.</h1>
+  <p id="status" class="status">Starting services… first launch can take a minute or two.</p>
+  <div id="spinner" class="spinner"></div>
+  <pre id="error" class="error"></pre>
+
+  <script type="module">
+    // Tauri 2 emits events from Rust via window.__TAURI_INTERNALS__.
+    // We use the standard event API exposed when withGlobalTauri is true,
+    // OR fall back to a simple polling fetch — whichever the runtime gives us.
+    function showError(message) {
+      document.getElementById("status").textContent = "Couldn't start fineshyt.";
+      document.getElementById("spinner").classList.add("hidden");
+      const err = document.getElementById("error");
+      err.textContent = message;
+      err.style.display = "block";
+    }
+
+    async function setupTauriListeners() {
+      // Wait for the Tauri JS shim to initialize.
+      const start = Date.now();
+      while (!window.__TAURI__ && Date.now() - start < 3000) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+
+      if (window.__TAURI__?.event?.listen) {
+        const { listen } = window.__TAURI__.event;
+        await listen("services-ready", () => {
+          // Rust will navigate the webview directly via window.navigate()
+          // — this listener is just a backup signal.
+          window.location.href = "http://localhost:4000";
+        });
+        await listen("services-failed", (e) => {
+          showError(String(e.payload || "unknown error"));
+        });
+      }
+    }
+
+    setupTauriListeners();
+  </script>
+</body>
+</html>

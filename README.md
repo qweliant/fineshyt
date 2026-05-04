@@ -358,6 +358,13 @@ Every target in [Makefile](Makefile). Run from the repo root.
 | --- | --- |
 | `make export TARGET=/path/to/dir` | Run `mix fineshyt.export --target $(TARGET)` to write approved photos + `photos.json` manifest into the given directory. |
 
+**Desktop shell** (experimental, lives on the `experimental-tauri-native` branch):
+
+| Target | What it does |
+| --- | --- |
+| `make desktop-dev` | Compile and launch the Tauri 2.x shell in dev mode. Window opens, runs `make compose-init && docker compose up`, polls for Phoenix on :4000, then navigates to `localhost:4000`. On quit, runs `docker compose down`. Requires Rust + Cargo. See [desktop/README.md](desktop/README.md). |
+| `make desktop-build` | Install `tauri-cli` if missing, then `cargo tauri build` for a release binary. Bundle is currently disabled (`bundle.active: false`); flip on once we want shippable artifacts. |
+
 > ⚠ **Never run** `docker compose down -v`, `docker volume prune`, or `docker system prune --volumes` — any of those wipe the `pgdata` volume and lose all ratings, embeddings, and AI metadata. To free disk safely, use `docker builder prune -a -f` and `docker image prune -a -f` (those only touch unused build cache and orphan images).
 
 ## Running on Windows

@@ -1,0 +1,14 @@
+# Tauri build output
+src-tauri/target/
+src-tauri/gen/
+src-tauri/Cargo.lock
+
+# Bundled assets cache
+.tauri/
+
+# OS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/

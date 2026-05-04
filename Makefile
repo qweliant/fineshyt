@@ -1,4 +1,4 @@
-.PHONY: dev db-up db-down setup export reset start-phoenix start-ai compose compose-init compose-up compose-down compose-build compose-logs
+.PHONY: dev db-up db-down setup export reset start-phoenix start-ai compose compose-init compose-up compose-down compose-build compose-logs desktop-dev desktop-build
 
 CINNA  := \033[38;5;153m
 KUROMI := \033[38;5;135m
@@ -147,6 +147,26 @@ compose-build:
 
 compose-logs:
 	@docker compose --profile compose logs -f
+
+## ---- Desktop shell (experimental, phase C1) -----------------------------
+##
+## A minimal Tauri 2.x window that wraps the Phoenix LiveView UI. The shell
+## handles lifecycle only — it spawns `make compose` on launch, polls until
+## :4000 answers, then navigates the webview to localhost:4000. On quit it
+## runs `docker compose down` to leave the system clean. Backend code is
+## unchanged. See desktop/README.md for the full picture and the C2+
+## roadmap.
+
+desktop-dev:
+	@printf "$(CINNA)$(BOLD)→ launching desktop shell in dev mode...$(RESET)\n"
+	@cd desktop/src-tauri && cargo run
+
+desktop-build:
+	@printf "$(CINNA)$(BOLD)→ building desktop binary (release)...$(RESET)\n"
+	@command -v cargo-tauri >/dev/null 2>&1 || \
+		(printf "$(CINNA)→ installing tauri-cli (one time)...$(RESET)\n" && \
+		 cargo install tauri-cli --version "^2.0" --locked)
+	@cd desktop/src-tauri && cargo tauri build
 
 export:
 	@printf "$(KITTY)$(BOLD)"
