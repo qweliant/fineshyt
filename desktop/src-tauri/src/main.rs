@@ -33,7 +33,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
-use tauri::{AppHandle, Emitter, Manager, Url};
+use tauri::{AppHandle, Emitter, Manager};
 
 /// Where Phoenix listens. The Rust shell never overrides this — it has to
 /// match what Phoenix actually binds to (4000 in dev, configurable in
@@ -71,9 +71,12 @@ fn main() {
         .expect("fineshyt-desktop: failed to launch tauri app");
 }
 
-/// The setup-and-launch sequence. Runs to completion or emits a failure
-/// event with the offending error string.
+/// The setup-and-launch sequence. Runs to completion (the splash JS
+/// polls Phoenix and navigates itself when it's up — no Rust-side
+/// navigation needed) or emits a failure event so the splash can render
+/// a useful error message.
 fn run_startup_pipeline(app: &AppHandle) {
+    eprintln!("[fineshyt-desktop] startup: resolving repo root");
     let repo = match repo_root() {
         Ok(p) => p,
         Err(e) => {
@@ -82,6 +85,10 @@ fn run_startup_pipeline(app: &AppHandle) {
         }
     };
 
+    eprintln!(
+        "[fineshyt-desktop] startup: running `make compose-init` in {}",
+        repo.display()
+    );
     if let Err(e) = run_compose_init(&repo) {
         emit_failure(
             app,
@@ -96,6 +103,7 @@ fn run_startup_pipeline(app: &AppHandle) {
         return;
     }
 
+    eprintln!("[fineshyt-desktop] startup: running `docker compose --profile compose up -d --build`");
     if let Err(e) = run_compose_up(&repo) {
         emit_failure(
             app,
@@ -108,6 +116,9 @@ fn run_startup_pipeline(app: &AppHandle) {
         return;
     }
 
+    eprintln!(
+        "[fineshyt-desktop] startup: waiting for Phoenix on {PHOENIX_HOST}:{PHOENIX_PORT}"
+    );
     if let Err(e) = wait_for_phoenix() {
         emit_failure(
             app,
@@ -122,21 +133,15 @@ fn run_startup_pipeline(app: &AppHandle) {
         return;
     }
 
-    // Phoenix is up. Navigate the splash window to the live UI.
-    if let Some(window) = app.get_webview_window("main") {
-        let url: Url = format!("http://{PHOENIX_HOST}:{PHOENIX_PORT}/")
-            .parse()
-            .expect("hardcoded URL parses");
-
-        if let Err(e) = window.navigate(url) {
-            emit_failure(app, format!("couldn't navigate webview: {e}"));
-            return;
-        }
-    }
-
-    // Belt-and-suspenders: also fire the JS-side event in case the splash
-    // wants to do anything specific before the navigation lands.
-    let _ = app.emit("services-ready", ());
+    eprintln!(
+        "[fineshyt-desktop] startup: Phoenix is up; the splash will detect it and navigate."
+    );
+    // We deliberately don't try `WebviewWindow::navigate` here: on
+    // macOS WKWebView the cross-origin nav from `tauri://localhost/...`
+    // to `http://localhost:4000/` silently no-ops in some Tauri 2
+    // builds. The splash polls Phoenix itself and uses a regular
+    // `window.location.href` redirect once it answers, which is
+    // bulletproof. Rust just gets out of the way.
 }
 
 /// Resolves the repo root from CARGO_MANIFEST_DIR (which points at

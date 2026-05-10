@@ -90,9 +90,28 @@
   <pre id="error" class="error"></pre>
 
   <script type="module">
-    // Tauri 2 emits events from Rust via window.__TAURI_INTERNALS__.
-    // We use the standard event API exposed when withGlobalTauri is true,
-    // OR fall back to a simple polling fetch — whichever the runtime gives us.
+    // Two paths to redirect once Phoenix is up:
+    //
+    //   1. Primary: this splash polls http://localhost:4000/ via fetch
+    //      every second. As soon as any response comes back (200, CORS
+    //      error, anything that means *something* is listening), we
+    //      redirect via window.location.href. This works regardless of
+    //      whether Tauri events fire correctly — it just uses the
+    //      browser's own navigation, which is bulletproof.
+    //
+    //   2. Backup: listen for the `services-failed` event from Rust so
+    //      we can show a useful error message if startup blew up before
+    //      Phoenix even booted.
+    //
+    // Originally we relied on a Rust-side `window.navigate(url)` call
+    // and a `services-ready` event, but on macOS WKWebView the
+    // cross-origin navigate from `tauri://localhost/...` to
+    // `http://localhost:4000/` silently no-ops in some Tauri 2 builds.
+    // Polling sidesteps that whole class of issue.
+
+    const PHOENIX_URL = "http://localhost:4000/";
+    const POLL_INTERVAL_MS = 1000;
+
     function showError(message) {
       document.getElementById("status").textContent = "Couldn't start fineshyt.";
       document.getElementById("spinner").classList.add("hidden");
@@ -101,8 +120,25 @@
       err.style.display = "block";
     }
 
-    async function setupTauriListeners() {
-      // Wait for the Tauri JS shim to initialize.
+    async function pollAndNavigate() {
+      while (true) {
+        try {
+          // `no-cors` lets fetch resolve even if Phoenix doesn't send
+          // CORS headers — we only care that it answered.
+          await fetch(PHOENIX_URL, { mode: "no-cors", cache: "no-store" });
+          window.location.href = PHOENIX_URL;
+          return;
+        } catch (_) {
+          // Network error — Phoenix not listening yet. Wait + retry.
+          await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+        }
+      }
+    }
+
+    async function setupTauriFailureListener() {
+      // Only try Tauri's event API if it's actually exposed; otherwise
+      // we just rely on the polling path above and the user will see
+      // the spinner forever if startup truly blew up. Acceptable for C1.
       const start = Date.now();
       while (!window.__TAURI__ && Date.now() - start < 3000) {
         await new Promise((r) => setTimeout(r, 50));
@@ -110,18 +146,14 @@
 
       if (window.__TAURI__?.event?.listen) {
         const { listen } = window.__TAURI__.event;
-        await listen("services-ready", () => {
-          // Rust will navigate the webview directly via window.navigate()
-          // — this listener is just a backup signal.
-          window.location.href = "http://localhost:4000";
-        });
         await listen("services-failed", (e) => {
           showError(String(e.payload || "unknown error"));
         });
       }
     }
 
-    setupTauriListeners();
+    setupTauriFailureListener();
+    pollAndNavigate();
   </script>
 </body>
 </html>
