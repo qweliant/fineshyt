@@ -11,8 +11,35 @@ defmodule Orchestrator.MixProject do
       aliases: aliases(),
       deps: deps(),
       compilers: [:phoenix_live_view] ++ Mix.compilers(),
-      listeners: [Phoenix.CodeReloader]
+      listeners: [Phoenix.CodeReloader],
+      releases: releases()
     ]
+  end
+
+  # Release configuration. We use a custom :prune_user_data step to strip
+  # priv/static/uploads from the release artifact — that directory holds
+  # the user's ingested JPEGs and easily reaches several GB, which would
+  # otherwise bloat every release we ship as a Tauri sidecar (phase C2+).
+  # The runtime relocates uploads to a user-writable path anyway (see
+  # STATIC_UPLOADS_DIR in config/runtime.exs), so the bundled copies are
+  # both stale and irrelevant.
+  defp releases do
+    [
+      orchestrator: [
+        steps: [:assemble, &prune_user_data/1]
+      ]
+    ]
+  end
+
+  defp prune_user_data(%Mix.Release{path: release_path, version: vsn} = release) do
+    uploads_dir =
+      Path.join([release_path, "lib", "orchestrator-#{vsn}", "priv", "static", "uploads"])
+
+    if File.exists?(uploads_dir) do
+      File.rm_rf!(uploads_dir)
+    end
+
+    release
   end
 
   # Configuration for the OTP application.

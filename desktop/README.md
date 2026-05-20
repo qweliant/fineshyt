@@ -1,37 +1,65 @@
 # Fine.Shyt Desktop Shell (experimental)
 
-> Living on branch `experimental-tauri-native`. Phase C1 of the native packaging plan — see `~/.claude/plans/qwelians-laptop-fineshyt-windows-and-doc-quiet-hanrahan.md` for the full roadmap.
+> Living on branch `experimental-tauri-native`. Currently **phase C2** of the native packaging plan — see `~/.claude/plans/qwelians-laptop-fineshyt-windows-and-doc-quiet-hanrahan.md` for the full roadmap.
 
-A minimal Tauri 2.x shell that wraps Fine.Shyt's existing Phoenix LiveView UI in a native window. The shell is responsible for **lifecycle only** — spawning the docker-compose service stack on launch, polling for Phoenix to come up, and stopping services cleanly on quit. The UI itself is unchanged.
+A Tauri 2.x shell that wraps Fine.Shyt's existing Phoenix LiveView UI in a native window. The shell is responsible for **lifecycle**: spawning a containerised Postgres + Python ai_worker, spawning a **native Elixir release** for the orchestrator itself, polling Phoenix, and tearing it all down on quit. The UI itself is unchanged.
 
 ## Why this exists
 
 Photographers shouldn't have to open PowerShell, run `git clone`, paste `make compose`, and remember to `docker compose down` later. They should double-click an app. This is the smallest viable shell that delivers that experience without rewriting any backend code.
 
+## Phase status
+
+| Phase | Status | What runs natively | What's still Docker |
+| --- | --- | --- | --- |
+| C1 | done (superseded) | nothing | db, orchestrator, ai_worker |
+| **C2** | **current** | **orchestrator (Elixir release)** | db, ai_worker |
+| C3 | not started | + Postgres (via SQLite migration) | ai_worker |
+| C4 | not started | + ai_worker (PyInstaller/uv-freeze) | — |
+| C5 | not started | + Ollama (embedded llama.cpp) | — |
+
 ## What it does NOT do (yet)
 
-- Bundle Postgres, Phoenix, Python, or Ollama internally — those are still external. Docker is still required as a host prereq.
-- Handle first-run config (PHOTO_LIBRARY, SECRET_KEY_BASE) interactively — that's still done by editing `.env` per the README. First-run wizard is a phase-2 concern.
+- Bundle Postgres or the Python ai_worker — those are still containerised. Docker is still a host prereq.
+- Bundle Ollama — still an external host install.
+- Handle first-run config (PHOTO_LIBRARY, SECRET_KEY_BASE) interactively — edit `.env` per the root README. First-run wizard is a later phase.
 - Code-sign or auto-update — dev builds only.
-
-If C1 feels right, phase C2 starts replacing those pieces one at a time.
 
 ## Prerequisites
 
 - Rust toolchain (`rustup`, `cargo`) — `cargo --version` should work.
-- Node.js — only needed if you want to use `cargo tauri` CLI for production builds. Dev mode (`cargo run`) doesn't require it.
-- Docker Desktop and Ollama installed on the host (same as `make compose`).
-- The repo's normal `.env` set up with `PHOTO_LIBRARY` and `SECRET_KEY_BASE` (run `make compose-init` once at the repo root if you haven't).
+- Node.js — only needed if you want to use `cargo tauri` CLI for packaged builds. Dev mode (`cargo run`) doesn't require it.
+- Docker Desktop and Ollama installed on the host.
+- A built Phoenix release at `orchestrator/_build/prod/rel/orchestrator/bin/server`. Build it with `make release` from the repo root.
+- The repo's normal `.env` set up (run `make compose-init` once at the repo root).
 
 ## Run in dev mode
 
-From the repo root:
+From the repo root, two commands the first time:
 
 ```bash
-make desktop-dev
+make release        # build the Elixir release (one-time, ~1 min)
+make desktop-dev    # compile + launch the Tauri shell
 ```
 
-This compiles the Rust shell and launches it. On first run, expect ~1 minute for Cargo to fetch and compile Tauri's deps. The window opens with a splash, then navigates to `http://localhost:4000` once Phoenix is up.
+Subsequent launches: just `make desktop-dev`. If you've changed Elixir code, re-run `make release` first to rebuild.
+
+The boot flow you'll see in the terminal:
+
+```text
+[fineshyt-desktop] startup: resolving repo root
+[fineshyt-desktop] startup: running `make compose-init` in ...
+[fineshyt-desktop] startup: starting db + ai_worker via `--profile c2`
+[fineshyt-desktop] startup: locating release binary
+[fineshyt-desktop] startup: reading SECRET_KEY_BASE from .env
+[fineshyt-desktop] startup: running orchestrator migrations
+[fineshyt-desktop] startup: spawning native orchestrator release
+... Phoenix log lines, including "Running OrchestratorWeb.Endpoint" ...
+[fineshyt-desktop] startup: waiting for Phoenix on 127.0.0.1:4000
+[fineshyt-desktop] startup: Phoenix is up; splash will detect and navigate.
+```
+
+The splash window then redirects itself to `http://localhost:4000` and you see the gallery.
 
 ## Build a redistributable binary
 
@@ -43,7 +71,7 @@ This installs `tauri-cli` if missing, then runs `cargo tauri build` to produce a
 
 ## How it works
 
-```
+```text
 desktop/
 ├── frontend/                       splash page shown before Phoenix is ready
 │   └── index.html

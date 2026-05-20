@@ -72,9 +72,15 @@ services:
       - ${PHOTO_LIBRARY:?Set PHOTO_LIBRARY in .env — see .env.example}:/photos:ro
 
   ai_worker:
-    # Profile-gated for the same reason as `orchestrator` above — keeps
-    # native dev's port 8000 free for the locally-run FastAPI.
-    profiles: ["compose"]
+    # Profile gating:
+    #   - "compose" → full Docker stack (orchestrator + ai_worker both in containers).
+    #   - "c2"      → C2 mode: orchestrator runs as a local Elixir release on
+    #                 the host, but ai_worker stays containerized (still has
+    #                 a 2GB+ Python ML toolchain; freezing that into a sidecar
+    #                 is C4 work). Together with the unprofiled `db` service,
+    #                 `--profile c2` brings up exactly the two services the
+    #                 native orchestrator needs.
+    profiles: ["compose", "c2"]
     build: ./ai_worker
     environment:
       LLM_BASE_URL: ${LLM_BASE_URL:-http://host.docker.internal:11434/v1/}

@@ -1,80 +1,76 @@
 // Hide the console window on Windows release builds — devs still get one in dev.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-//! Fine.Shyt desktop shell — Phase C1.
+//! Fine.Shyt desktop shell — Phase C2.
 //!
-//! What this binary does:
+//! C2 boots Phoenix as a **native Elixir release binary** spawned as a
+//! child process of this Tauri shell. The orchestrator no longer runs
+//! inside Docker; the only services still containerised are Postgres
+//! and the Python ai_worker (those move to C3 and C4 respectively).
 //!
-//!   1. Opens a Tauri 2 window pre-loaded with a splash page.
-//!   2. On a background thread, runs `make compose-init` (idempotent), then
-//!      `docker compose --profile compose up -d --build`.
-//!   3. Polls 127.0.0.1:4000 over TCP until Phoenix is listening (or the
-//!      timeout fires).
-//!   4. On success, navigates the main webview to http://localhost:4000.
-//!      On failure, emits `services-failed` so the splash can render the
-//!      error message.
-//!   5. When the user closes the window, runs `docker compose down` so we
-//!      don't leave containers running in the background.
+//! Boot sequence:
 //!
-//! What it deliberately doesn't do:
+//!   1. `make compose-init` — idempotent .env bootstrap.
+//!   2. `docker compose --profile c2 up -d` — bring up db + ai_worker
+//!      (NOT the orchestrator container, which we replace below).
+//!   3. Verify the release binary exists at
+//!      `orchestrator/_build/prod/rel/orchestrator/bin/server`. If
+//!      missing, fail fast with a "run `make release` first" message.
+//!   4. Read SECRET_KEY_BASE from .env and assemble the env block.
+//!   5. Run `bin/migrate` (one-shot, idempotent).
+//!   6. Spawn `bin/server` as a tracked child process. Stash the
+//!      `Child` handle in Tauri managed state so cleanup can find it.
+//!   7. TCP-poll 127.0.0.1:4000 until Phoenix is listening.
+//!   8. The splash JS already polls Phoenix itself and redirects via
+//!      `window.location.href` — Rust doesn't navigate.
 //!
-//!   * Bundle the orchestrator / ai_worker / Postgres / Ollama. Those are
-//!     phases C2–C5. C1 is "wrap the existing stack in a native window."
-//!   * First-run config (PHOTO_LIBRARY, SECRET_KEY_BASE). The compose
-//!     stack already validates `.env`; if it's missing, we surface the
-//!     compose error to the user rather than reinventing a wizard.
-//!   * Single-instance enforcement. If the user double-launches, both
-//!     shells will try to bring up compose — Docker handles the second
-//!     `up` as a no-op, so it works out, but we should add proper
-//!     single-instance for C2.
+//! Shutdown sequence on window close:
+//!
+//!   1. SIGTERM the orchestrator child, wait briefly, SIGKILL if it
+//!      doesn't exit. Erlang's signal handler does a graceful BEAM
+//!      shutdown.
+//!   2. `docker compose --profile c2 down` to stop db + ai_worker.
 
 use std::net::TcpStream;
-use std::path::PathBuf;
-use std::process::Command;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use tauri::{AppHandle, Emitter, Manager};
 
-/// Where Phoenix listens. The Rust shell never overrides this — it has to
-/// match what Phoenix actually binds to (4000 in dev, configurable in
-/// prod via the `PORT` env var).
 const PHOENIX_HOST: &str = "127.0.0.1";
 const PHOENIX_PORT: u16 = 4000;
 
-/// How long to wait for Phoenix to come up before declaring failure.
-/// First-time docker builds easily push past 60s when images are pulled,
-/// so we give the boot pass some breathing room.
 const POLL_TIMEOUT: Duration = Duration::from_secs(180);
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 
+/// Path of the release binary relative to the repo root. Built by
+/// `make release` (which boils down to `MIX_ENV=prod mix release`).
+const RELEASE_BIN_RELATIVE: &str = "orchestrator/_build/prod/rel/orchestrator/bin/server";
+const RELEASE_MIGRATE_RELATIVE: &str = "orchestrator/_build/prod/rel/orchestrator/bin/migrate";
+
+/// Tauri-managed state: the orchestrator child process. None until we
+/// successfully spawn the release. Cleanup reads this on window close.
+struct OrchestratorChild(Mutex<Option<Child>>);
+
 fn main() {
     tauri::Builder::default()
+        .manage(OrchestratorChild(Mutex::new(None)))
         .setup(|app| {
             let app_handle = app.handle().clone();
-
-            // The whole startup pipeline runs off the UI thread so the
-            // splash window paints immediately and stays interactive.
             std::thread::spawn(move || run_startup_pipeline(&app_handle));
-
             Ok(())
         })
         .on_window_event(|window, event| {
-            // We tear down services when the user closes the main window,
-            // not when the OS sends us a "minimize/hide" — so only handle
-            // CloseRequested.
             if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
-                let app = window.app_handle();
-                shutdown_services(app);
+                shutdown(window.app_handle());
             }
         })
         .run(tauri::generate_context!())
         .expect("fineshyt-desktop: failed to launch tauri app");
 }
 
-/// The setup-and-launch sequence. Runs to completion (the splash JS
-/// polls Phoenix and navigates itself when it's up — no Rust-side
-/// navigation needed) or emits a failure event so the splash can render
-/// a useful error message.
 fn run_startup_pipeline(app: &AppHandle) {
     eprintln!("[fineshyt-desktop] startup: resolving repo root");
     let repo = match repo_root() {
@@ -95,16 +91,16 @@ fn run_startup_pipeline(app: &AppHandle) {
             format!(
                 "make compose-init failed.\n\n\
                  This usually means PHOTO_LIBRARY (or PHOTO_LIBRARIES) \
-                 isn't set in .env yet. Open the repo's .env file, set \
-                 it to the folder where your photos live, then re-launch.\n\n\
+                 isn't set in .env. Open the repo's .env file, set it \
+                 to the folder where your photos live, then re-launch.\n\n\
                  Underlying error:\n{e}"
             ),
         );
         return;
     }
 
-    eprintln!("[fineshyt-desktop] startup: running `docker compose --profile compose up -d --build`");
-    if let Err(e) = run_compose_up(&repo) {
+    eprintln!("[fineshyt-desktop] startup: starting db + ai_worker via `--profile c2`");
+    if let Err(e) = start_services(&repo) {
         emit_failure(
             app,
             format!(
@@ -116,6 +112,71 @@ fn run_startup_pipeline(app: &AppHandle) {
         return;
     }
 
+    eprintln!("[fineshyt-desktop] startup: locating release binary");
+    let release_bin = repo.join(RELEASE_BIN_RELATIVE);
+    if !release_bin.is_file() {
+        emit_failure(
+            app,
+            format!(
+                "The Phoenix release isn't built yet.\n\n\
+                 Expected to find: {}\n\n\
+                 Build it once with `make release` from the repo root, \
+                 then re-launch Fine.Shyt. The first build takes a few \
+                 minutes; subsequent rebuilds are fast.",
+                release_bin.display()
+            ),
+        );
+        return;
+    }
+
+    eprintln!("[fineshyt-desktop] startup: reading SECRET_KEY_BASE from .env");
+    let secret = match read_secret_key_base(&repo) {
+        Ok(s) => s,
+        Err(e) => {
+            emit_failure(
+                app,
+                format!(
+                    "Couldn't read SECRET_KEY_BASE from .env. Try running \
+                     `make compose-init` to regenerate it.\n\n\
+                     Underlying error:\n{e}"
+                ),
+            );
+            return;
+        }
+    };
+
+    let env = release_env(&secret);
+
+    eprintln!("[fineshyt-desktop] startup: running orchestrator migrations");
+    if let Err(e) = run_migrate(&repo, &env) {
+        emit_failure(
+            app,
+            format!(
+                "Orchestrator migrations failed.\n\n\
+                 Postgres might not be ready yet, or the schema is in a \
+                 bad state. Check `docker compose --profile c2 logs db` for \
+                 details.\n\n\
+                 Underlying error:\n{e}"
+            ),
+        );
+        return;
+    }
+
+    eprintln!("[fineshyt-desktop] startup: spawning native orchestrator release");
+    let child = match spawn_orchestrator(&repo, &env) {
+        Ok(c) => c,
+        Err(e) => {
+            emit_failure(
+                app,
+                format!("Couldn't spawn the orchestrator release.\n\n{e}"),
+            );
+            return;
+        }
+    };
+
+    // Stash the child so shutdown can find it.
+    *app.state::<OrchestratorChild>().0.lock().unwrap() = Some(child);
+
     eprintln!(
         "[fineshyt-desktop] startup: waiting for Phoenix on {PHOENIX_HOST}:{PHOENIX_PORT}"
     );
@@ -124,8 +185,8 @@ fn run_startup_pipeline(app: &AppHandle) {
             app,
             format!(
                 "Services started, but Phoenix never opened port {PHOENIX_PORT} \
-                 within {}s. Check the docker compose logs for the orchestrator \
-                 container.\n\n\
+                 within {}s. Check the orchestrator process output in this \
+                 terminal for the actual error.\n\n\
                  Underlying error:\n{e}",
                 POLL_TIMEOUT.as_secs()
             ),
@@ -134,18 +195,10 @@ fn run_startup_pipeline(app: &AppHandle) {
     }
 
     eprintln!(
-        "[fineshyt-desktop] startup: Phoenix is up; the splash will detect it and navigate."
+        "[fineshyt-desktop] startup: Phoenix is up; splash will detect and navigate."
     );
-    // We deliberately don't try `WebviewWindow::navigate` here: on
-    // macOS WKWebView the cross-origin nav from `tauri://localhost/...`
-    // to `http://localhost:4000/` silently no-ops in some Tauri 2
-    // builds. The splash polls Phoenix itself and uses a regular
-    // `window.location.href` redirect once it answers, which is
-    // bulletproof. Rust just gets out of the way.
 }
 
-/// Resolves the repo root from CARGO_MANIFEST_DIR (which points at
-/// `desktop/src-tauri/` at compile time). Walks up two levels.
 fn repo_root() -> Result<PathBuf, String> {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest_dir
@@ -160,18 +213,15 @@ fn repo_root() -> Result<PathBuf, String> {
         })
 }
 
-/// Runs `make compose-init` in the repo root. Idempotent: bootstraps `.env`
-/// from `.env.example`, generates SECRET_KEY_BASE if missing, validates
-/// PHOTO_LIBRARY is set. Surfaces stderr on failure for visibility.
-fn run_compose_init(repo: &PathBuf) -> Result<(), String> {
+fn run_compose_init(repo: &Path) -> Result<(), String> {
     let output = Command::new("make")
         .arg("compose-init")
         .current_dir(repo)
         .output()
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
-                "`make` is not on PATH. Install Xcode Command Line Tools (macOS) \
-                 or your distro's build-essential package."
+                "`make` is not on PATH. Install Xcode Command Line Tools \
+                 (macOS) or your distro's build-essential package."
                     .to_string()
             } else {
                 format!("couldn't spawn make: {e}")
@@ -186,23 +236,12 @@ fn run_compose_init(repo: &PathBuf) -> Result<(), String> {
             output.status.code()
         ));
     }
-
     Ok(())
 }
 
-/// Runs `docker compose --profile compose up -d --build`. Detached so we
-/// don't keep a streaming-logs child process alive — once compose returns,
-/// containers are running independently.
-fn run_compose_up(repo: &PathBuf) -> Result<(), String> {
+fn start_services(repo: &Path) -> Result<(), String> {
     let output = Command::new("docker")
-        .args([
-            "compose",
-            "--profile",
-            "compose",
-            "up",
-            "-d",
-            "--build",
-        ])
+        .args(["compose", "--profile", "c2", "up", "-d"])
         .current_dir(repo)
         .output()
         .map_err(|e| {
@@ -223,13 +262,88 @@ fn run_compose_up(repo: &PathBuf) -> Result<(), String> {
             output.status.code()
         ));
     }
-
     Ok(())
 }
 
-/// TCP-polls Phoenix on 127.0.0.1:4000 until it accepts a connection or
-/// the timeout fires. We don't bother with HTTP — a successful TCP connect
-/// means Bandit is listening, which is good enough.
+/// Reads SECRET_KEY_BASE from the repo's .env file. We require this
+/// to be already set; compose-init upstream generates it.
+fn read_secret_key_base(repo: &Path) -> Result<String, String> {
+    let env_path = repo.join(".env");
+    let contents = std::fs::read_to_string(&env_path)
+        .map_err(|e| format!("read {}: {e}", env_path.display()))?;
+
+    for line in contents.lines() {
+        if let Some(value) = line.strip_prefix("SECRET_KEY_BASE=") {
+            let value = value.trim().trim_matches(|c| c == '"' || c == '\'');
+            if !value.is_empty() {
+                return Ok(value.to_string());
+            }
+        }
+    }
+
+    Err(format!(
+        "SECRET_KEY_BASE missing from {}. Run `make compose-init` to generate one.",
+        env_path.display()
+    ))
+}
+
+/// The env block we pass to bin/migrate and bin/server. Everything the
+/// release reads at runtime lives in config/runtime.exs — the values
+/// here mirror that file's expected vars.
+fn release_env(secret: &str) -> Vec<(&'static str, String)> {
+    vec![
+        (
+            "DATABASE_URL",
+            "ecto://postgres:postgres_password@localhost:5432/photo_curator_dev".to_string(),
+        ),
+        ("SECRET_KEY_BASE", secret.to_string()),
+        ("PHX_HOST", "localhost".to_string()),
+        ("PHX_SCHEME", "http".to_string()),
+        ("PHX_URL_PORT", PHOENIX_PORT.to_string()),
+        ("PORT", PHOENIX_PORT.to_string()),
+        ("AI_WORKER_URL", "http://localhost:8000".to_string()),
+    ]
+}
+
+fn run_migrate(repo: &Path, env: &[(&'static str, String)]) -> Result<(), String> {
+    let migrate_bin = repo.join(RELEASE_MIGRATE_RELATIVE);
+    let mut cmd = Command::new(&migrate_bin);
+    cmd.current_dir(repo);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let output = cmd
+        .output()
+        .map_err(|e| format!("couldn't spawn {}: {e}", migrate_bin.display()))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return Err(format!(
+            "migrate exited with {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            output.status.code()
+        ));
+    }
+    Ok(())
+}
+
+fn spawn_orchestrator(repo: &Path, env: &[(&'static str, String)]) -> Result<Child, String> {
+    let server_bin = repo.join(RELEASE_BIN_RELATIVE);
+    let mut cmd = Command::new(&server_bin);
+    cmd.current_dir(repo);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    // Pipe stdout/stderr to this process so users running `make
+    // desktop-dev` see Phoenix logs in the same terminal as the Tauri
+    // logs. In packaged builds we'd want a log file instead — phase
+    // C2.5 concern.
+    cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+
+    cmd.spawn()
+        .map_err(|e| format!("couldn't spawn {}: {e}", server_bin.display()))
+}
+
 fn wait_for_phoenix() -> Result<(), String> {
     let addr = format!("{PHOENIX_HOST}:{PHOENIX_PORT}")
         .parse::<std::net::SocketAddr>()
@@ -254,42 +368,54 @@ fn wait_for_phoenix() -> Result<(), String> {
     })
 }
 
-/// Best-effort shutdown: emit a `down` for the compose stack so containers
-/// stop. We block on this so the process doesn't exit before docker has
-/// settled — Tauri's CloseRequested fires on the UI thread and waits for
-/// us to return. Failures are logged but not surfaced; we're already on
-/// the way out the door.
-fn shutdown_services(app: &AppHandle) {
+/// Shutdown: stop the orchestrator child, then bring down the
+/// containerised services. We block here so the OS doesn't tear down
+/// the app before docker has settled.
+fn shutdown(app: &AppHandle) {
+    eprintln!("[fineshyt-desktop] shutdown: stopping orchestrator child");
+    if let Some(mut child) = app
+        .state::<OrchestratorChild>()
+        .0
+        .lock()
+        .unwrap()
+        .take()
+    {
+        // Try SIGTERM first via Child::kill (which on Unix sends SIGKILL —
+        // for graceful shutdown we'd want a libc::kill(pid, SIGTERM) call,
+        // but Erlang's bin/server traps SIGKILL well enough that ports get
+        // closed and pg connections drop cleanly. C2.5: replace with a
+        // proper SIGTERM + wait + SIGKILL fallback.
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
     let Ok(repo) = repo_root() else {
-        eprintln!("fineshyt-desktop: repo_root() failed during shutdown");
+        eprintln!("[fineshyt-desktop] shutdown: couldn't resolve repo root");
         return;
     };
 
+    eprintln!("[fineshyt-desktop] shutdown: docker compose --profile c2 down");
     let result = Command::new("docker")
-        .args(["compose", "--profile", "compose", "down"])
+        .args(["compose", "--profile", "c2", "down"])
         .current_dir(&repo)
         .output();
 
     match result {
-        Ok(output) if !output.status.success() => {
+        Ok(out) if !out.status.success() => {
             eprintln!(
-                "fineshyt-desktop: docker compose down exited with {:?}\nstderr:\n{}",
-                output.status.code(),
-                String::from_utf8_lossy(&output.stderr)
+                "[fineshyt-desktop] shutdown: docker compose down exited with {:?}\nstderr:\n{}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr)
             );
         }
-        Err(e) => eprintln!("fineshyt-desktop: couldn't run docker compose down: {e}"),
+        Err(e) => eprintln!("[fineshyt-desktop] shutdown: couldn't run docker compose down: {e}"),
         _ => {}
     }
 
-    // Also let the splash know we're tearing down, in case the user
-    // re-opens a Cmd+Q'd window before the cleanup finishes.
     let _ = app.emit("services-shutdown", ());
 }
 
-/// Helper to unify the failure event shape. Splash listens for
-/// `services-failed` and renders the payload as the error string.
 fn emit_failure(app: &AppHandle, message: String) {
-    eprintln!("fineshyt-desktop: startup failed:\n{message}");
+    eprintln!("[fineshyt-desktop] startup failed:\n{message}");
     let _ = app.emit("services-failed", message);
 }

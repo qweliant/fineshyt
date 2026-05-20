@@ -1,4 +1,4 @@
-.PHONY: dev db-up db-down setup export reset start-phoenix start-ai compose compose-init compose-up compose-down compose-build compose-logs desktop-dev desktop-build
+.PHONY: dev db-up db-down setup export reset start-phoenix start-ai compose compose-init compose-up compose-down compose-build compose-logs desktop-dev desktop-build release c2-services c2-services-down c2-run
 
 CINNA  := \033[38;5;153m
 KUROMI := \033[38;5;135m
@@ -167,6 +167,64 @@ desktop-build:
 		(printf "$(CINNA)→ installing tauri-cli (one time)...$(RESET)\n" && \
 		 cargo install tauri-cli --version "^2.0" --locked)
 	@cd desktop/src-tauri && cargo tauri build
+
+## ---- Phase C2 — Elixir release as a local sidecar -----------------------
+##
+## C2 drops the orchestrator out of Docker and runs it as a native Elixir
+## release on the host. db and ai_worker stay containerized (those move
+## later in C3 and C4). Use `make release` to build the release artifact,
+## `make c2-services` to bring up db + ai_worker, and `make c2-run` to
+## start everything in one go for testing without Tauri in the loop.
+
+release:
+	@printf "$(CINNA)$(BOLD)→ building Phoenix release (MIX_ENV=prod)...$(RESET)\n"
+	@cd orchestrator && \
+		MIX_ENV=prod mix deps.get --only prod && \
+		MIX_ENV=prod mix compile && \
+		MIX_ENV=prod mix assets.deploy && \
+		MIX_ENV=prod mix release --overwrite
+	@printf "$(KEROPPI)$(BOLD)→ release ready at orchestrator/_build/prod/rel/orchestrator/$(RESET)\n"
+
+c2-services:
+	@printf "$(KEROPPI)$(BOLD)→ starting db + ai_worker (orchestrator runs locally in C2 mode)...$(RESET)\n"
+	@docker compose --profile c2 up -d
+	@docker compose --profile c2 ps
+
+c2-services-down:
+	@printf "$(KUROMI)$(BOLD)→ stopping db + ai_worker...$(RESET)\n"
+	@docker compose --profile c2 down
+
+c2-run: c2-services
+	@printf "$(CINNA)$(BOLD)→ starting native orchestrator release (Ctrl+C to stop)...$(RESET)\n"
+	@if [ ! -x orchestrator/_build/prod/rel/orchestrator/bin/server ]; then \
+		printf "$(KUROMI)✗ release not built yet. Run 'make release' first.$(RESET)\n"; \
+		exit 1; \
+	fi
+	@if [ ! -f .env ]; then \
+		printf "$(KUROMI)✗ .env missing. Run 'make compose-init' first.$(RESET)\n"; \
+		exit 1; \
+	fi
+	@SECRET=$$(grep '^SECRET_KEY_BASE=' .env | cut -d= -f2-); \
+	if [ -z "$$SECRET" ]; then \
+		printf "$(KUROMI)✗ SECRET_KEY_BASE missing in .env. Run 'make compose-init'.$(RESET)\n"; \
+		exit 1; \
+	fi; \
+	DATABASE_URL='ecto://postgres:postgres_password@localhost:5432/photo_curator_dev' \
+	SECRET_KEY_BASE="$$SECRET" \
+	PHX_HOST=localhost \
+	PHX_SCHEME=http \
+	PHX_URL_PORT=4000 \
+	PORT=4000 \
+	AI_WORKER_URL=http://localhost:8000 \
+	./orchestrator/_build/prod/rel/orchestrator/bin/migrate && \
+	DATABASE_URL='ecto://postgres:postgres_password@localhost:5432/photo_curator_dev' \
+	SECRET_KEY_BASE="$$SECRET" \
+	PHX_HOST=localhost \
+	PHX_SCHEME=http \
+	PHX_URL_PORT=4000 \
+	PORT=4000 \
+	AI_WORKER_URL=http://localhost:8000 \
+	./orchestrator/_build/prod/rel/orchestrator/bin/server
 
 export:
 	@printf "$(KITTY)$(BOLD)"
