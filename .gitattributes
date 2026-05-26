@@ -1,0 +1,21 @@
+# Force LF on files that *must* have Unix line endings to work inside
+# Linux containers (shell scripts, Makefile, anything the orchestrator's
+# docker entrypoint shells out to). Without this, a clone on Windows with
+# the default `core.autocrlf=true` turns LF into CRLF, the kernel reads
+# `#!/bin/sh\r` as the interpreter path, fails with ENOENT, and Docker
+# reports it as `setup-uploads-symlink: not found` (exit 127).
+
+* text=auto
+
+# Shell scripts — always LF, regardless of host OS.
+*.sh text eol=lf
+
+# Phoenix release overlay binaries (migrate, server, setup-uploads-symlink,
+# and any future scripts dropped into the release's bin/ dir).
+rel/overlays/bin/* text eol=lf
+
+# Build / dev helper scripts kept at the repo root.
+scripts/* text eol=lf
+
+# Makefile is invoked by docker entrypoints in compose mode; same risk.
+Makefile text eol=lf
