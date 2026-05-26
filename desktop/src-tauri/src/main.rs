@@ -145,7 +145,7 @@ fn run_startup_pipeline(app: &AppHandle) {
         }
     };
 
-    let env = release_env(&secret);
+    let env = release_env(&repo, &secret);
 
     eprintln!("[fineshyt-desktop] startup: running orchestrator migrations");
     if let Err(e) = run_migrate(&repo, &env) {
@@ -290,7 +290,24 @@ fn read_secret_key_base(repo: &Path) -> Result<String, String> {
 /// The env block we pass to bin/migrate and bin/server. Everything the
 /// release reads at runtime lives in config/runtime.exs — the values
 /// here mirror that file's expected vars.
-fn release_env(secret: &str) -> Vec<(&'static str, String)> {
+///
+/// `STATIC_UPLOADS_DIR` is the most C2-specific one. We point it at the
+/// repo's existing `orchestrator/priv/static/uploads` so:
+///   - the user's existing ~12k photo JPEGs are served immediately
+///     (no Docker bind-mount gymnastics)
+///   - new ingests write to the same path, matching native dev's layout
+///   - swapping into a packaged-app future where uploads need to live
+///     in `~/Library/Application Support/Fine.Shyt/uploads` is a
+///     one-line change here.
+fn release_env(repo: &Path, secret: &str) -> Vec<(&'static str, String)> {
+    let uploads_dir = repo
+        .join("orchestrator")
+        .join("priv")
+        .join("static")
+        .join("uploads")
+        .to_string_lossy()
+        .into_owned();
+
     vec![
         (
             "DATABASE_URL",
@@ -302,6 +319,7 @@ fn release_env(secret: &str) -> Vec<(&'static str, String)> {
         ("PHX_URL_PORT", PHOENIX_PORT.to_string()),
         ("PORT", PHOENIX_PORT.to_string()),
         ("AI_WORKER_URL", "http://localhost:8000".to_string()),
+        ("STATIC_UPLOADS_DIR", uploads_dir),
     ]
 }
 

@@ -209,6 +209,7 @@ c2-run: c2-services
 		printf "$(KUROMI)✗ SECRET_KEY_BASE missing in .env. Run 'make compose-init'.$(RESET)\n"; \
 		exit 1; \
 	fi; \
+	UPLOADS=$$(pwd)/orchestrator/priv/static/uploads; \
 	DATABASE_URL='ecto://postgres:postgres_password@localhost:5432/photo_curator_dev' \
 	SECRET_KEY_BASE="$$SECRET" \
 	PHX_HOST=localhost \
@@ -216,6 +217,7 @@ c2-run: c2-services
 	PHX_URL_PORT=4000 \
 	PORT=4000 \
 	AI_WORKER_URL=http://localhost:8000 \
+	STATIC_UPLOADS_DIR="$$UPLOADS" \
 	./orchestrator/_build/prod/rel/orchestrator/bin/migrate && \
 	DATABASE_URL='ecto://postgres:postgres_password@localhost:5432/photo_curator_dev' \
 	SECRET_KEY_BASE="$$SECRET" \
@@ -224,6 +226,7 @@ c2-run: c2-services
 	PHX_URL_PORT=4000 \
 	PORT=4000 \
 	AI_WORKER_URL=http://localhost:8000 \
+	STATIC_UPLOADS_DIR="$$UPLOADS" \
 	./orchestrator/_build/prod/rel/orchestrator/bin/server
 
 export:

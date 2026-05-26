@@ -35,6 +35,16 @@ config :orchestrator, :ai_worker_url,
 config :orchestrator, :sidecar_mode,
   System.get_env("FINESHYT_SIDECAR_MODE", "read")
 
+# Where converted JPEGs live on disk. AiCurationWorker writes new
+# uploads here; Plug.Static serves /uploads/* from here (via a
+# symlink installed at boot, see Orchestrator.Application). When
+# unset, defaults to the release's priv/static/uploads — fine for
+# native dev but wrong for packaged builds where the release dir
+# is read-only. In Tauri C2 mode the shell points this at the
+# repo's existing uploads dir so the user's photo history is
+# preserved.
+config :orchestrator, :uploads_dir, System.get_env("STATIC_UPLOADS_DIR")
+
 config :orchestrator, OrchestratorWeb.Endpoint,
   http: [port: String.to_integer(System.get_env("PORT", "4000"))]
 
