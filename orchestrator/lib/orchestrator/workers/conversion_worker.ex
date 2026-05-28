@@ -12,8 +12,11 @@ defmodule Orchestrator.Workers.ConversionWorker do
 
   ## Flow
 
-    1. POST `{file_path}` to `http://127.0.0.1:8000/api/v1/convert` with a
-       60s timeout (rawpy on a large RAW file can take that long).
+    1. Read the source bytes locally and upload them (multipart) to
+       `http://127.0.0.1:8000/api/v1/convert` with a 60s timeout (rawpy on a
+       large RAW file can take that long). Uploading bytes rather than a path
+       means the worker container never needs filesystem access to the
+       source — which matters when photos live on a drive Docker can't mount.
     2. On HTTP 200, enqueue an `AiCurationWorker` job pointing at the
        returned `jpeg_path`, carrying through `ref`, `source`, and
        `project`.
@@ -56,16 +59,59 @@ defmodule Orchestrator.Workers.ConversionWorker do
 
     Logger.info("Converting #{Path.basename(file_path)}...")
 
+    # Read the source bytes here (the native orchestrator can read any path
+    # the host can, including external drives Docker Desktop can't bind-mount)
+    # and upload them, rather than handing the worker a path it can't resolve.
+    # The basename carries the extension the worker uses to pick its RAW vs
+    # PIL decode path.
+    case File.read(file_path) do
+      {:ok, image_binary} ->
+        upload_and_convert(job, image_binary, file_path, ref, source, project)
+
+      {:error, posix} ->
+        Logger.error("Could not read source file #{Path.basename(file_path)}: #{inspect(posix)}")
+
+        record_error(job, Path.basename(file_path), "Read failed: #{inspect(posix)}",
+          detail: %{file_path: file_path, posix: inspect(posix)}
+        )
+
+        {:error, "read failed: #{inspect(posix)}"}
+    end
+  end
+
+  defp upload_and_convert(job, image_binary, file_path, ref, source, project) do
+    form_fields = [
+      file:
+        {image_binary,
+         filename: Path.basename(file_path), content_type: "application/octet-stream"}
+    ]
+
     case Req.post(Orchestrator.AiWorker.url("/api/v1/convert"),
-           json: %{file_path: file_path},
+           form_multipart: form_fields,
            # rawpy on a large RAW file can take up to 60s
            receive_timeout: 60_000
          ) do
       {:ok, %Req.Response{status: 200, body: %{"jpeg_path" => jpeg_path} = body}} ->
         Logger.info("Converted #{Path.basename(file_path)} → #{Path.basename(jpeg_path)}")
 
+        # `jpeg_path` is the ai_worker's *own* view of the file
+        # (`/app/priv/static/uploads/...`). The worker physically wrote it
+        # into the shared uploads volume, which on the orchestrator side is
+        # `priv/static/uploads` (a symlink to the same host dir in C2 native
+        # mode, the identical bind-mount in full compose mode). So resolve
+        # the file against our own uploads dir by basename — in compose mode
+        # this equals `jpeg_path`; in native mode it maps the container path
+        # to the path we can actually read.
+        local_jpeg_path =
+          Path.join([
+            :code.priv_dir(:orchestrator),
+            "static",
+            "uploads",
+            Path.basename(jpeg_path)
+          ])
+
         %{
-          "file_path" => jpeg_path,
+          "file_path" => local_jpeg_path,
           # The original RAW/source path travels through the pipeline so
           # AiCurationWorker can locate the XMP sidecar (which lives next
           # to the source, not the converted JPEG) and persist it on the

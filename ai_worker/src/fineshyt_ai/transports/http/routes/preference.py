@@ -1,14 +1,12 @@
 """Preference endpoints — CLIP embedding + Ridge train/score."""
 
-from pathlib import Path
-
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, File, HTTPException, UploadFile
 
 from fineshyt_ai.domain import embed as embed_domain
 from fineshyt_ai.domain import preference as preference_domain
 from fineshyt_ai.domain.preference import NoModelTrainedError, NotEnoughSamplesError
 from fineshyt_ai.errors import error_detail, status_for
-from fineshyt_ai.schemas.embed import EmbedRequest, EmbedResponse
+from fineshyt_ai.schemas.embed import EmbedResponse
 from fineshyt_ai.schemas.preference import (
     PreferenceScoreRequest,
     PreferenceScoreResponse,
@@ -20,16 +18,20 @@ router = APIRouter(prefix="/api/v1", tags=["Preference"])
 
 
 @router.post("/embed", response_model=EmbedResponse)
-def embed_file(request: EmbedRequest):
-    path = Path(request.file_path)
-    if not path.is_file():
-        raise HTTPException(status_code=404, detail=f"File not found: {request.file_path}")
+async def embed_file(file: UploadFile = File(...)):
+    """Return a CLIP embedding for an uploaded image.
+
+    Receives the image bytes as a multipart upload (the orchestrator reads
+    the converted JPEG off its own uploads dir and streams it) so this
+    container never needs filesystem access to resolve the path.
+    """
+    data = await file.read()
     try:
-        return embed_domain.embed(path)
+        return embed_domain.embed(data, file.filename or "")
     except Exception as e:
         raise HTTPException(
             status_code=status_for(e),
-            detail=error_detail("embed", e, file_path=str(path)),
+            detail=error_detail("embed", e, filename=file.filename),
         )
 
 

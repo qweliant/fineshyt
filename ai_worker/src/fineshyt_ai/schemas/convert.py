@@ -3,10 +3,6 @@
 from pydantic import BaseModel
 
 
-class ConvertRequest(BaseModel):
-    file_path: str
-
-
 class ConvertResponse(BaseModel):
     jpeg_path: str
     technical_score: int

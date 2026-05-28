@@ -62,12 +62,16 @@ if [ -n "$MISSING" ]; then
   exit 1
 fi
 
-# Write the override file. Both services need the same set of mounts since
-# they share file paths via the database.
+# Write the override file. Only the orchestrator service needs these
+# mounts: in full `compose` mode it runs containerized and reads source
+# files off disk to stream them to the ai_worker. The ai_worker itself is
+# filesystem-independent (it receives source bytes as multipart uploads),
+# so it gets no photo-library mounts — emitting them would just risk the
+# `mkdir /host_mnt/...: file exists` collisions seen with exFAT drives.
 #
 # Skip any path that equals PHOTO_LIBRARY — the base compose.yml already
-# emits a path-mirrored bind-mount for it, and Docker rejects the
-# resulting duplicate mount with `mkdir /host_mnt/...: file exists`.
+# emits a path-mirrored bind-mount for it on the orchestrator, and Docker
+# rejects the resulting duplicate mount with `mkdir /host_mnt/...: file exists`.
 {
   echo "$GENERATED_HEADER"
   echo "# regenerated automatically by 'make compose-init' whenever"
@@ -76,13 +80,6 @@ fi
   echo "  orchestrator:"
   echo "    volumes:"
   IFS=:
-  for path in $PHOTO_LIBRARIES_VALUE; do
-    [ -z "$path" ] && continue
-    [ "$path" = "$PHOTO_LIBRARY_VALUE" ] && continue
-    echo "      - $path:$path:ro"
-  done
-  echo "  ai_worker:"
-  echo "    volumes:"
   for path in $PHOTO_LIBRARIES_VALUE; do
     [ -z "$path" ] && continue
     [ "$path" = "$PHOTO_LIBRARY_VALUE" ] && continue

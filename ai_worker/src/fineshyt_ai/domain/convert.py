@@ -4,6 +4,7 @@ Also exposes the narrower `quality_scores` and `exif` operations used by
 backfill tasks.
 """
 
+from io import BytesIO
 from pathlib import Path
 
 from fineshyt_ai.config import STATIC_UPLOADS_DIR
@@ -14,21 +15,27 @@ from fineshyt_ai.imaging.quality import compute_quality_scores
 from fineshyt_ai.schemas.convert import ConvertResponse, ExifResponse, QualityScoresResponse
 
 
-def convert(path: Path) -> ConvertResponse:
+def convert(data: bytes, filename: str) -> ConvertResponse:
     """Open → score → resize → write JPEG → return the new path + scores.
+
+    Takes the source bytes + original filename (uploaded by the orchestrator)
+    rather than a path, so the source file never needs to be readable from
+    inside this container — it may live on a drive Docker can't bind-mount.
+    The filename's extension drives RAW-vs-PIL backend selection.
 
     Quality scoring runs on the full-resolution source before downsize —
     the 1440 JPEG has already lost the high-frequency detail that
     sharpness relies on. EXIF is read from the source too, before
     conversion strips it.
     """
-    captured_at = extract_captured_at(path)
-    img = open_as_pil(path)
+    ext = Path(filename).suffix.lower()
+    captured_at = extract_captured_at(BytesIO(data), ext)
+    img = open_as_pil(BytesIO(data), ext)
     scores = compute_quality_scores(img)
     img = resize_to_long_edge(img, 1440)
 
     STATIC_UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
-    out = unique_output_path(STATIC_UPLOADS_DIR, path.stem)
+    out = unique_output_path(STATIC_UPLOADS_DIR, Path(filename).stem)
     img.save(out, "JPEG", quality=82, optimize=True)
 
     return ConvertResponse(
@@ -42,12 +49,14 @@ def convert(path: Path) -> ConvertResponse:
 
 def exif(path: Path) -> ExifResponse:
     """Read EXIF DateTimeOriginal from `path` — used by the backfill task."""
-    return ExifResponse(captured_at=extract_captured_at(path))
+    with open(path, "rb") as fp:
+        return ExifResponse(captured_at=extract_captured_at(fp, path.suffix.lower()))
 
 
 def quality_scores(path: Path) -> QualityScoresResponse:
     """Compute technical scores from `path` — used by the backfill task."""
-    img = open_as_pil(path)
+    with open(path, "rb") as fp:
+        img = open_as_pil(fp, path.suffix.lower())
     scores = compute_quality_scores(img)
     return QualityScoresResponse(
         technical_score=scores["overall"],

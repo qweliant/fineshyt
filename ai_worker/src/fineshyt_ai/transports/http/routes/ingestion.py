@@ -2,12 +2,11 @@
 
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, File, HTTPException, UploadFile
 
 from fineshyt_ai.domain import convert as convert_domain
 from fineshyt_ai.errors import error_detail
 from fineshyt_ai.schemas.convert import (
-    ConvertRequest,
     ConvertResponse,
     ExifRequest,
     ExifResponse,
@@ -19,16 +18,22 @@ router = APIRouter(prefix="/api/v1", tags=["Ingestion"])
 
 
 @router.post("/convert", response_model=ConvertResponse)
-def convert_file(request: ConvertRequest):
-    path = Path(request.file_path)
-    if not path.is_file():
-        raise HTTPException(status_code=404, detail=f"File not found: {request.file_path}")
+async def convert_file(file: UploadFile = File(...)):
+    """Convert an uploaded source image to a resized JPEG + scores.
+
+    Receives the source bytes as a multipart upload (the orchestrator reads
+    the original off disk — which may be a drive Docker can't mount — and
+    streams it here) so this container never needs filesystem access to the
+    user's photo library. The filename carries the extension used to pick the
+    RAW vs PIL decode path.
+    """
+    data = await file.read()
     try:
-        return convert_domain.convert(path)
+        return convert_domain.convert(data, file.filename or "")
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=error_detail("convert", e, file_path=str(path)),
+            detail=error_detail("convert", e, filename=file.filename),
         )
 
 

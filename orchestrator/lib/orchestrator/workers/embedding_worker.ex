@@ -13,8 +13,11 @@ defmodule Orchestrator.Workers.EmbeddingWorker do
   ## Flow
 
     1. Load the photo by id and bail if the file is gone.
-    2. POST `{file_path}` to `http://127.0.0.1:8000/api/v1/embed` with a
-       120s timeout (first call pays the ~900MB CLIP model load).
+    2. Upload the converted JPEG bytes (multipart) to
+       `http://127.0.0.1:8000/api/v1/embed` with a 120s timeout (first call
+       pays the ~900MB CLIP model load). Uploading bytes rather than a path
+       keeps the worker filesystem-independent — `photo.file_path` is a host
+       path the containerized worker can't resolve in C2 native mode.
     3. On HTTP 200, persist `clip_embedding` via `Photos.override_curation/2`.
     4. Enqueue follow-up preference work. A retrain only makes sense
        when this photo contributes a new training sample, i.e. it has a
@@ -59,7 +62,11 @@ defmodule Orchestrator.Workers.EmbeddingWorker do
     cond do
       not File.exists?(photo.file_path) ->
         Logger.warning("EmbeddingWorker: file missing for photo #{photo_id} (#{photo.file_path})")
-        record_error(job, basename, "file missing: #{photo.file_path}", detail: %{photo_id: photo_id})
+
+        record_error(job, basename, "file missing: #{photo.file_path}",
+          detail: %{photo_id: photo_id}
+        )
+
         {:error, "file missing"}
 
       not is_nil(photo.clip_embedding) ->
@@ -69,8 +76,18 @@ defmodule Orchestrator.Workers.EmbeddingWorker do
       true ->
         Logger.info("Embedding photo #{photo_id} (#{basename})...")
 
+        # Upload the converted JPEG bytes rather than handing the worker a
+        # path: in C2 native mode `photo.file_path` is a host path the
+        # containerized worker can't resolve. The orchestrator can always
+        # read its own uploads dir, so it streams the bytes instead.
+        image_binary = File.read!(photo.file_path)
+
+        form_fields = [
+          file: {image_binary, filename: basename, content_type: "image/jpeg"}
+        ]
+
         case Req.post(Orchestrator.AiWorker.url("/api/v1/embed"),
-               json: %{file_path: photo.file_path},
+               form_multipart: form_fields,
                receive_timeout: 120_000
              ) do
           {:ok, %Req.Response{status: 200, body: %{"embedding" => embedding}}} ->
@@ -82,27 +99,45 @@ defmodule Orchestrator.Workers.EmbeddingWorker do
                 :ok
 
               {:error, changeset} ->
-                Logger.error("EmbeddingWorker: failed to persist embedding: #{inspect(changeset.errors)}")
-                record_error(job, basename, "persist failed", detail: %{errors: inspect(changeset.errors)})
+                Logger.error(
+                  "EmbeddingWorker: failed to persist embedding: #{inspect(changeset.errors)}"
+                )
+
+                record_error(job, basename, "persist failed",
+                  detail: %{errors: inspect(changeset.errors)}
+                )
+
                 {:error, "persist failed"}
             end
 
           {:ok, %Req.Response{status: status, body: body}} ->
             detail = get_in(body, ["detail"]) || "status #{status}"
             Logger.error("Embed API failed for photo #{photo_id}: #{inspect(detail)}")
-            record_error(job, basename, "API #{status}: #{inspect(detail)}", status: status, detail: body)
+
+            record_error(job, basename, "API #{status}: #{inspect(detail)}",
+              status: status,
+              detail: body
+            )
+
             {:error, inspect(detail)}
 
           {:error, reason} ->
             Logger.error("Could not reach embed API: #{inspect(reason)}")
-            record_error(job, basename, "Transport: #{inspect(reason)}", detail: %{transport: inspect(reason)})
+
+            record_error(job, basename, "Transport: #{inspect(reason)}",
+              detail: %{transport: inspect(reason)}
+            )
+
             {:error, inspect(reason)}
         end
     end
   end
 
   defp enqueue_preference_followup(%{user_rating: rating, id: id}) when not is_nil(rating) do
-    Orchestrator.Workers.PreferenceTrainWorker.new(%{trigger: "rated_embedding_added", photo_id: id})
+    Orchestrator.Workers.PreferenceTrainWorker.new(%{
+      trigger: "rated_embedding_added",
+      photo_id: id
+    })
     |> Oban.insert()
   end
 
