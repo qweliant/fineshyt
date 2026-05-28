@@ -42,6 +42,12 @@ use tauri::{AppHandle, Emitter, Manager};
 const PHOENIX_HOST: &str = "127.0.0.1";
 const PHOENIX_PORT: u16 = 4000;
 
+/// llama-server (Phase C5) listens on the Ollama-default port so the
+/// existing `LLM_BASE_URL=http://localhost:11434/v1/` config keeps
+/// working without any orchestrator/ai_worker changes.
+const LLAMA_HOST: &str = "127.0.0.1";
+const LLAMA_PORT: u16 = 11434;
+
 const POLL_TIMEOUT: Duration = Duration::from_secs(180);
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 
@@ -50,13 +56,21 @@ const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const RELEASE_BIN_RELATIVE: &str = "orchestrator/_build/prod/rel/orchestrator/bin/server";
 const RELEASE_MIGRATE_RELATIVE: &str = "orchestrator/_build/prod/rel/orchestrator/bin/migrate";
 
-/// Tauri-managed state: the orchestrator child process. None until we
-/// successfully spawn the release. Cleanup reads this on window close.
+/// Vision model the shell loads on launch. ggml-org's HuggingFace
+/// collection of multimodal GGUFs is the blessed source — llama-server's
+/// `-hf` flag auto-fetches both the main model and the mmproj file.
+/// Override at build time via env if you want a smaller/larger model.
+const LLAMA_MODEL_HF: &str = "ggml-org/Qwen2.5-Omni-7B-GGUF";
+
+/// Tauri-managed state: child processes we own and need to clean up on
+/// quit. None until we successfully spawn each one.
 struct OrchestratorChild(Mutex<Option<Child>>);
+struct LlamaServerChild(Mutex<Option<Child>>);
 
 fn main() {
     tauri::Builder::default()
         .manage(OrchestratorChild(Mutex::new(None)))
+        .manage(LlamaServerChild(Mutex::new(None)))
         .setup(|app| {
             let app_handle = app.handle().clone();
             std::thread::spawn(move || run_startup_pipeline(&app_handle));
@@ -106,6 +120,45 @@ fn run_startup_pipeline(app: &AppHandle) {
             format!(
                 "docker compose up failed.\n\n\
                  Make sure Docker Desktop is running, then re-launch.\n\n\
+                 Underlying error:\n{e}"
+            ),
+        );
+        return;
+    }
+
+    eprintln!("[fineshyt-desktop] startup: spawning llama-server (vision LLM)");
+    match spawn_llama_server(&repo) {
+        Ok(child) => {
+            *app.state::<LlamaServerChild>().0.lock().unwrap() = Some(child);
+        }
+        Err(e) => {
+            emit_failure(
+                app,
+                format!(
+                    "Couldn't start llama-server. Fine.Shyt embeds a local vision \
+                     LLM (no Ollama needed); the runtime is provided by the \
+                     `llama.cpp` package.\n\n\
+                     Install it once with `brew install llama.cpp`, then \
+                     re-launch.\n\n\
+                     Underlying error:\n{e}"
+                ),
+            );
+            return;
+        }
+    }
+
+    eprintln!(
+        "[fineshyt-desktop] startup: waiting for llama-server on {LLAMA_HOST}:{LLAMA_PORT} \
+         (first launch downloads ~5–7 GB)"
+    );
+    if let Err(e) = wait_for_llama_server() {
+        emit_failure(
+            app,
+            format!(
+                "llama-server started but never opened port {LLAMA_PORT}. The \
+                 model is probably still downloading on first launch — try \
+                 again in a few minutes, or watch `make c5-llama-logs` for \
+                 progress.\n\n\
                  Underlying error:\n{e}"
             ),
         );
@@ -265,6 +318,57 @@ fn start_services(repo: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Spawn `llama-server` (from `brew install llama.cpp`) with the bundled
+/// vision model. Flags:
+///   --no-jinja  required for multimodal — the default Jinja chat
+///               template doesn't insert image markers, which causes
+///               a "bitmaps vs markers" tokenize error on first
+///               vision request.
+///   -c 8192     larger context window so instructor's retry-with-error
+///               cycle fits when the LLM produces a malformed first reply.
+///   -hf <repo>  auto-downloads both the main GGUF and the mmproj file
+///               from the ggml-org HuggingFace collection on first launch.
+///
+/// LLAMA_CACHE is set to desktop/runtime/models so downloaded weights
+/// live alongside the repo (gitignored) instead of in `~/.cache`.
+fn spawn_llama_server(repo: &Path) -> Result<Child, String> {
+    let cache_dir = repo.join("desktop").join("runtime").join("models");
+    std::fs::create_dir_all(&cache_dir)
+        .map_err(|e| format!("couldn't create {}: {e}", cache_dir.display()))?;
+
+    let port_str = LLAMA_PORT.to_string();
+    let mut cmd = Command::new("llama-server");
+    cmd.args([
+        "-hf",
+        LLAMA_MODEL_HF,
+        "--port",
+        &port_str,
+        "--host",
+        LLAMA_HOST,
+        "--no-jinja",
+        "-c",
+        "8192",
+    ]);
+    cmd.env("LLAMA_CACHE", &cache_dir);
+    // Pipe logs to this process so first-run download progress shows up
+    // alongside the other startup traces.
+    cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+
+    cmd.spawn().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            "`llama-server` is not on PATH. Install it once with \
+             `brew install llama.cpp`."
+                .to_string()
+        } else {
+            format!("couldn't spawn llama-server: {e}")
+        }
+    })
+}
+
+fn wait_for_llama_server() -> Result<(), String> {
+    wait_for_port(LLAMA_HOST, LLAMA_PORT)
+}
+
 /// Reads SECRET_KEY_BASE from the repo's .env file. We require this
 /// to be already set; compose-init upstream generates it.
 fn read_secret_key_base(repo: &Path) -> Result<String, String> {
@@ -363,9 +467,17 @@ fn spawn_orchestrator(repo: &Path, env: &[(&'static str, String)]) -> Result<Chi
 }
 
 fn wait_for_phoenix() -> Result<(), String> {
-    let addr = format!("{PHOENIX_HOST}:{PHOENIX_PORT}")
+    wait_for_port(PHOENIX_HOST, PHOENIX_PORT)
+}
+
+/// Poll a TCP port until it accepts a connection or POLL_TIMEOUT elapses.
+/// Used by both wait_for_phoenix and wait_for_llama_server. We don't
+/// bother with HTTP — a successful TCP connect means the listener is
+/// up, which is good enough for "ready" in both cases.
+fn wait_for_port(host: &str, port: u16) -> Result<(), String> {
+    let addr = format!("{host}:{port}")
         .parse::<std::net::SocketAddr>()
-        .expect("hardcoded socket addr parses");
+        .map_err(|e| format!("couldn't parse {host}:{port}: {e}"))?;
 
     let deadline = std::time::Instant::now() + POLL_TIMEOUT;
     let mut last_error: Option<std::io::Error> = None;
@@ -386,9 +498,9 @@ fn wait_for_phoenix() -> Result<(), String> {
     })
 }
 
-/// Shutdown: stop the orchestrator child, then bring down the
-/// containerised services. We block here so the OS doesn't tear down
-/// the app before docker has settled.
+/// Shutdown: stop both child processes (orchestrator + llama-server),
+/// then bring down the containerised services. We block here so the OS
+/// doesn't tear down the app before docker has settled.
 fn shutdown(app: &AppHandle) {
     eprintln!("[fineshyt-desktop] shutdown: stopping orchestrator child");
     if let Some(mut child) = app
@@ -403,6 +515,18 @@ fn shutdown(app: &AppHandle) {
         // but Erlang's bin/server traps SIGKILL well enough that ports get
         // closed and pg connections drop cleanly. C2.5: replace with a
         // proper SIGTERM + wait + SIGKILL fallback.
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    eprintln!("[fineshyt-desktop] shutdown: stopping llama-server child");
+    if let Some(mut child) = app
+        .state::<LlamaServerChild>()
+        .0
+        .lock()
+        .unwrap()
+        .take()
+    {
         let _ = child.kill();
         let _ = child.wait();
     }

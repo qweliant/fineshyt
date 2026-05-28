@@ -1,0 +1,17 @@
+# Project-local toolchain pins. Burrito 1.5.0 requires Zig 0.15.2 *exactly*
+# (the wrapper binary is a Zig program that embeds an ERTS-bundled BEAM
+# release, and Burrito only ships ERTS replacements that match this Zig
+# version).
+#
+# Erlang + Elixir intentionally not pinned here — they're set in the
+# user's global ~/.config/mise/config.toml; this file only adds the
+# extras needed for cross-platform builds.
+#
+# 7zip (Burrito needs it for Windows targets) is NOT installable via
+# mise's aqua registry under a `7z` binary name — that package ships
+# the modern `7zz` binary instead, which Burrito doesn't recognise.
+# Install via Homebrew instead:
+#     brew install p7zip
+
+[tools]
+zig = "0.15.2"

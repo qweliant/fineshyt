@@ -16,17 +16,41 @@ defmodule Orchestrator.MixProject do
     ]
   end
 
-  # Release configuration. We use a custom :prune_user_data step to strip
-  # priv/static/uploads from the release artifact — that directory holds
-  # the user's ingested JPEGs and easily reaches several GB, which would
-  # otherwise bloat every release we ship as a Tauri sidecar (phase C2+).
-  # The runtime relocates uploads to a user-writable path anyway (see
-  # STATIC_UPLOADS_DIR in config/runtime.exs), so the bundled copies are
-  # both stale and irrelevant.
+  # Release configuration.
+  #
+  #   :prune_user_data — strips priv/static/uploads from the artifact
+  #     (those JPEGs reach several GB; STATIC_UPLOADS_DIR redirects
+  #     reads/writes at runtime, so the bundled copies are dead weight).
+  #
+  # Burrito wrap step is *opt-in* via `BURRITO=1` env var. Reason:
+  # Burrito 1.5.0 pins Zig 0.15.2, which has a known libSystem
+  # weak-linking failure on macOS 26 (Tahoe) — see upstream issue
+  # https://github.com/burrito-elixir/burrito/issues/221. Until that
+  # ships a fix (or we move cross-platform builds to GitHub Actions
+  # runners on macOS 14/15 where Zig 0.15 still works), plain
+  # `mix release` is the local-build path and Burrito wrapping is
+  # gated. The dep stays in mix.exs as a marker for future re-enable.
   defp releases do
+    base_steps = [:assemble, &prune_user_data/1]
+
+    steps =
+      if System.get_env("BURRITO") in ~w(1 true) do
+        base_steps ++ [&Burrito.wrap/1]
+      else
+        base_steps
+      end
+
     [
       orchestrator: [
-        steps: [:assemble, &prune_user_data/1]
+        steps: steps,
+        burrito: [
+          targets: [
+            macos_silicon: [os: :darwin, cpu: :aarch64],
+            macos_intel: [os: :darwin, cpu: :x86_64],
+            linux: [os: :linux, cpu: :x86_64],
+            windows: [os: :windows, cpu: :x86_64]
+          ]
+        ]
       ]
     ]
   end
@@ -96,7 +120,13 @@ defmodule Orchestrator.MixProject do
       {:oban, "~> 2.20.3"},
       {:pgvector, "~> 0.3"},
       {:igniter, "~> 0.6", only: [:dev, :test]},
-      {:credo, "~> 1.7", only: [:dev, :test], runtime: false}
+      {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
+      # Burrito wraps the Mix release into a self-extracting Zig binary
+      # with embedded ERTS so we can build Windows / Linux / macOS
+      # artifacts cross-platform from a single host. Phase 0 of the
+      # native packaging plan. `runtime: false` because Burrito is a
+      # build-time tool — its modules don't ship inside the release.
+      {:burrito, "~> 1.5"}
     ]
   end
 

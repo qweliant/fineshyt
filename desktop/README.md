@@ -10,18 +10,19 @@ Photographers shouldn't have to open PowerShell, run `git clone`, paste `make co
 
 ## Phase status
 
-| Phase | Status | What runs natively | What's still Docker |
+| Phase | Status | What runs natively | What's still Docker / extra prereq |
 | --- | --- | --- | --- |
-| C1 | done (superseded) | nothing | db, orchestrator, ai_worker |
-| **C2** | **current** | **orchestrator (Elixir release)** | db, ai_worker |
+| C1 | done (superseded) | nothing | db, orchestrator, ai_worker, Ollama |
+| C2 | done | orchestrator (Elixir release) | db, ai_worker, Ollama |
+| **C5** | **current** | **orchestrator + llama-server (via brew)** | db, ai_worker |
 | C3 | not started | + Postgres (via SQLite migration) | ai_worker |
 | C4 | not started | + ai_worker (PyInstaller/uv-freeze) | — |
-| C5 | not started | + Ollama (embedded llama.cpp) | — |
+
+Phases shipped out of original order: C5 was prioritised over C3 + C4 because Ollama was the most user-visible prereq (~5 GB model download + separate install) and the Tauri + llama.cpp pattern had the most-paved community path. See the plan doc for the reasoning.
 
 ## What it does NOT do (yet)
 
 - Bundle Postgres or the Python ai_worker — those are still containerised. Docker is still a host prereq.
-- Bundle Ollama — still an external host install.
 - Handle first-run config (PHOTO_LIBRARY, SECRET_KEY_BASE) interactively — edit `.env` per the root README. First-run wizard is a later phase.
 - Code-sign or auto-update — dev builds only.
 
@@ -29,9 +30,12 @@ Photographers shouldn't have to open PowerShell, run `git clone`, paste `make co
 
 - Rust toolchain (`rustup`, `cargo`) — `cargo --version` should work.
 - Node.js — only needed if you want to use `cargo tauri` CLI for packaged builds. Dev mode (`cargo run`) doesn't require it.
-- Docker Desktop and Ollama installed on the host.
+- Docker Desktop on the host (for the still-containerised db + ai_worker).
+- `brew install llama.cpp` — provides the `llama-server` binary the shell spawns for the embedded vision LLM. (Replaces Ollama.)
 - A built Phoenix release at `orchestrator/_build/prod/rel/orchestrator/bin/server`. Build it with `make release` from the repo root.
 - The repo's normal `.env` set up (run `make compose-init` once at the repo root).
+
+The vision GGUF (~5–7 GB) downloads automatically into `desktop/runtime/models/` on the first launch via llama-server's `-hf` flag.
 
 ## Run in dev mode
 
@@ -50,6 +54,9 @@ The boot flow you'll see in the terminal:
 [fineshyt-desktop] startup: resolving repo root
 [fineshyt-desktop] startup: running `make compose-init` in ...
 [fineshyt-desktop] startup: starting db + ai_worker via `--profile c2`
+[fineshyt-desktop] startup: spawning llama-server (vision LLM)
+[fineshyt-desktop] startup: waiting for llama-server on 127.0.0.1:11434 (first launch downloads ~5–7 GB)
+... llama-server boot lines, including "server is listening on http://127.0.0.1:11434" ...
 [fineshyt-desktop] startup: locating release binary
 [fineshyt-desktop] startup: reading SECRET_KEY_BASE from .env
 [fineshyt-desktop] startup: running orchestrator migrations
@@ -58,6 +65,8 @@ The boot flow you'll see in the terminal:
 [fineshyt-desktop] startup: waiting for Phoenix on 127.0.0.1:4000
 [fineshyt-desktop] startup: Phoenix is up; splash will detect and navigate.
 ```
+
+**First-launch note:** the vision model GGUF (~5–7 GB) downloads from HuggingFace into `desktop/runtime/models/` on the very first run. Plan for ~10 minutes on a fresh clone; subsequent launches are seconds. The splash will show the wait time as "waiting for llama-server" until the model loads.
 
 The splash window then redirects itself to `http://localhost:4000` and you see the gallery.
 

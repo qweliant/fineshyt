@@ -26,6 +26,11 @@ if [ ! -f "$ENV_FILE" ]; then
 fi
 
 PHOTO_LIBRARIES_VALUE=$(grep -E '^PHOTO_LIBRARIES=' "$ENV_FILE" | head -1 | cut -d= -f2- || true)
+# We also need PHOTO_LIBRARY: the base compose.yml already path-mirrors it,
+# so we must NOT also emit a mount for it in the override (Docker errors
+# out with `mount source path ... file exists` on duplicate bind-mounts
+# to overlapping host_mnt subtrees).
+PHOTO_LIBRARY_VALUE=$(grep -E '^PHOTO_LIBRARY=' "$ENV_FILE" | head -1 | cut -d= -f2- || true)
 
 # Empty or unset → remove our generated file (but never delete a file the
 # user wrote by hand).
@@ -59,6 +64,10 @@ fi
 
 # Write the override file. Both services need the same set of mounts since
 # they share file paths via the database.
+#
+# Skip any path that equals PHOTO_LIBRARY — the base compose.yml already
+# emits a path-mirrored bind-mount for it, and Docker rejects the
+# resulting duplicate mount with `mkdir /host_mnt/...: file exists`.
 {
   echo "$GENERATED_HEADER"
   echo "# regenerated automatically by 'make compose-init' whenever"
@@ -69,16 +78,22 @@ fi
   IFS=:
   for path in $PHOTO_LIBRARIES_VALUE; do
     [ -z "$path" ] && continue
+    [ "$path" = "$PHOTO_LIBRARY_VALUE" ] && continue
     echo "      - $path:$path:ro"
   done
   echo "  ai_worker:"
   echo "    volumes:"
   for path in $PHOTO_LIBRARIES_VALUE; do
     [ -z "$path" ] && continue
+    [ "$path" = "$PHOTO_LIBRARY_VALUE" ] && continue
     echo "      - $path:$path:ro"
   done
   IFS="$OLD_IFS"
 } > "$OVERRIDE_FILE"
 
 DRIVE_COUNT=$(echo "$PHOTO_LIBRARIES_VALUE" | tr ':' '\n' | grep -c . || true)
-echo "→ wrote $OVERRIDE_FILE with $DRIVE_COUNT drive(s)"
+SKIPPED_NOTE=""
+if echo "$PHOTO_LIBRARIES_VALUE" | tr ':' '\n' | grep -qxF "$PHOTO_LIBRARY_VALUE" 2>/dev/null; then
+  SKIPPED_NOTE=" (skipped PHOTO_LIBRARY entry; base compose mounts it)"
+fi
+echo "→ wrote $OVERRIDE_FILE with $DRIVE_COUNT drive(s)$SKIPPED_NOTE"

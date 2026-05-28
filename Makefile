@@ -1,4 +1,4 @@
-.PHONY: dev db-up db-down setup export reset start-phoenix start-ai compose compose-init compose-up compose-down compose-build compose-logs desktop-dev desktop-build release c2-services c2-services-down c2-run
+.PHONY: dev db-up db-down setup export reset start-phoenix start-ai compose compose-init compose-up compose-down compose-build compose-logs desktop-dev desktop-build release c2-services c2-services-down c2-run c5-llama c5-llama-stop c5-llama-logs
 
 CINNA  := \033[38;5;153m
 KUROMI := \033[38;5;135m
@@ -167,6 +167,62 @@ desktop-build:
 		(printf "$(CINNA)→ installing tauri-cli (one time)...$(RESET)\n" && \
 		 cargo install tauri-cli --version "^2.0" --locked)
 	@cd desktop/src-tauri && cargo tauri build
+
+## ---- Phase C5 — embedded vision LLM via llama.cpp ----------------------
+##
+## Runs `llama-server` (from `brew install llama.cpp`) with a vision model
+## from ggml-org's HuggingFace collection. Replaces Ollama as the LLM
+## the ai_worker calls. The model + mmproj download into desktop/runtime/
+## models/ on first launch (~5–7 GB for Qwen2.5-Omni-7B).
+##
+## Notes:
+##   * --no-jinja is REQUIRED for multimodal models. The default Jinja
+##     chat template doesn't insert image markers, which causes a
+##     "number of bitmaps does not match number of markers" tokenize
+##     failure on the first vision request.
+##   * -c 8192 raises the context window above the default 2048 so
+##     instructor's retry-with-error chain fits.
+##   * Listening on :11434 to match Ollama's port, so existing
+##     LLM_BASE_URL=http://localhost:11434/v1/ keeps working with no
+##     orchestrator changes.
+
+C5_MODEL ?= ggml-org/Qwen2.5-Omni-7B-GGUF
+C5_PORT  ?= 11434
+C5_CTX   ?= 8192
+C5_LOG   ?= /tmp/fineshyt-llama-server.log
+C5_PID   ?= /tmp/fineshyt-llama-server.pid
+
+c5-llama:
+	@if [ -f $(C5_PID) ] && kill -0 $$(cat $(C5_PID)) 2>/dev/null; then \
+		printf "$(KEROPPI)$(BOLD)→ llama-server already running (pid $$(cat $(C5_PID)))$(RESET)\n"; \
+		exit 0; \
+	fi
+	@command -v llama-server >/dev/null 2>&1 || \
+		(printf "$(KUROMI)✗ llama-server not found. Run 'brew install llama.cpp'.$(RESET)\n"; exit 1)
+	@mkdir -p desktop/runtime/models
+	@printf "$(CINNA)$(BOLD)→ starting llama-server with $(C5_MODEL) on :$(C5_PORT)...$(RESET)\n"
+	@LLAMA_CACHE=$$(pwd)/desktop/runtime/models nohup \
+		llama-server -hf $(C5_MODEL) \
+			--port $(C5_PORT) --host 127.0.0.1 \
+			--no-jinja \
+			-c $(C5_CTX) \
+		> $(C5_LOG) 2>&1 & \
+	echo $$! > $(C5_PID)
+	@printf "$(KEROPPI)→ spawned pid $$(cat $(C5_PID)), tail logs with 'make c5-llama-logs'$(RESET)\n"
+
+c5-llama-stop:
+	@if [ -f $(C5_PID) ] && kill -0 $$(cat $(C5_PID)) 2>/dev/null; then \
+		PID=$$(cat $(C5_PID)); \
+		kill $$PID; \
+		rm -f $(C5_PID); \
+		printf "$(KUROMI)→ stopped llama-server (pid $$PID)$(RESET)\n"; \
+	else \
+		printf "$(KUROMI)→ llama-server not running$(RESET)\n"; \
+		rm -f $(C5_PID); \
+	fi
+
+c5-llama-logs:
+	@tail -f $(C5_LOG)
 
 ## ---- Phase C2 — Elixir release as a local sidecar -----------------------
 ##

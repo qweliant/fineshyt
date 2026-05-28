@@ -362,8 +362,11 @@ Every target in [Makefile](Makefile). Run from the repo root.
 
 | Target | What it does |
 | --- | --- |
-| `make desktop-dev` | Compile and launch the Tauri 2.x shell in dev mode. Window opens, runs `make compose-init && docker compose up`, polls for Phoenix on :4000, then navigates to `localhost:4000`. On quit, runs `docker compose down`. Requires Rust + Cargo. See [desktop/README.md](desktop/README.md). |
+| `make desktop-dev` | Compile and launch the Tauri 2.x shell in dev mode. The shell brings up db + ai_worker via `docker compose --profile c2`, spawns the native Phoenix release, spawns `llama-server` with a vision GGUF, polls for Phoenix on :4000, then navigates to `localhost:4000`. On quit, it tears everything down. Requires Rust + Cargo + `brew install llama.cpp`. See [desktop/README.md](desktop/README.md). |
 | `make desktop-build` | Install `tauri-cli` if missing, then `cargo tauri build` for a release binary. Bundle is currently disabled (`bundle.active: false`); flip on once we want shippable artifacts. |
+| `make c5-llama` | Spawn `llama-server` with the Qwen2.5-Omni-7B vision model on :11434 (matches Ollama's port; existing `LLM_BASE_URL` keeps working). First launch downloads ~5–7 GB into `desktop/runtime/models/`. Useful for ai_worker testing without firing up the full desktop shell. |
+| `make c5-llama-stop` | Stop the llama-server spawned by `make c5-llama`. |
+| `make c5-llama-logs` | Tail llama-server's log file (`/tmp/fineshyt-llama-server.log`). |
 
 > ⚠ **Never run** `docker compose down -v`, `docker volume prune`, or `docker system prune --volumes` — any of those wipe the `pgdata` volume and lose all ratings, embeddings, and AI metadata. To free disk safely, use `docker builder prune -a -f` and `docker image prune -a -f` (those only touch unused build cache and orphan images).
 
