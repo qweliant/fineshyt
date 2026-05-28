@@ -211,7 +211,7 @@ defmodule Orchestrator.Sidecars do
   end
 
   defp run_exiftool(args) do
-    case System.cmd("exiftool", args, stderr_to_stdout: true) do
+    case System.cmd("exiftool", config_args() ++ args, stderr_to_stdout: true) do
       {output, 0} -> {:ok, output}
       {output, code} -> {:error, {:exiftool_exit, code, output}}
     end
@@ -219,6 +219,15 @@ defmodule Orchestrator.Sidecars do
     e in ErlangError ->
       Logger.warning("exiftool not installed: #{Exception.message(e)}")
       {:error, :exiftool_missing}
+  end
+
+  # Registers Fine.Shyt's custom `fineshyt` XMP namespace so exiftool will
+  # write our AI-derived tags (Subject, ArtisticMood, etc.) instead of
+  # rejecting them as undefined. Returns `[]` if the config file is missing
+  # so reads/writes of standard tags still work in a stripped environment.
+  defp config_args do
+    path = Path.join(:code.priv_dir(:orchestrator), "fineshyt_exiftool.config")
+    if File.exists?(path), do: ["-config", path], else: []
   end
 
   defp parse_exiftool_json(output) do
