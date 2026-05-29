@@ -5,13 +5,14 @@
 //!
 //! C2 boots Phoenix as a **native Elixir release binary** spawned as a
 //! child process of this Tauri shell. The orchestrator no longer runs
-//! inside Docker; the only services still containerised are Postgres
-//! and the Python ai_worker (those move to C3 and C4 respectively).
+//! inside Docker, and since C3 it uses a native SQLite database (no
+//! Postgres). The only service still containerised is the Python
+//! ai_worker (moves to C4).
 //!
 //! Boot sequence:
 //!
 //!   1. `make compose-init` — idempotent .env bootstrap.
-//!   2. `docker compose --profile c2 up -d` — bring up db + ai_worker
+//!   2. `docker compose --profile c2 up -d` — bring up ai_worker
 //!      (NOT the orchestrator container, which we replace below).
 //!   3. Verify the release binary exists at
 //!      `orchestrator/_build/prod/rel/orchestrator/bin/server`. If
@@ -29,7 +30,7 @@
 //!   1. SIGTERM the orchestrator child, wait briefly, SIGKILL if it
 //!      doesn't exit. Erlang's signal handler does a graceful BEAM
 //!      shutdown.
-//!   2. `docker compose --profile c2 down` to stop db + ai_worker.
+//!   2. `docker compose --profile c2 down` to stop ai_worker.
 
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
@@ -113,7 +114,7 @@ fn run_startup_pipeline(app: &AppHandle) {
         return;
     }
 
-    eprintln!("[fineshyt-desktop] startup: starting db + ai_worker via `--profile c2`");
+    eprintln!("[fineshyt-desktop] startup: starting ai_worker via `--profile c2`");
     if let Err(e) = start_services(&repo) {
         emit_failure(
             app,
@@ -206,9 +207,9 @@ fn run_startup_pipeline(app: &AppHandle) {
             app,
             format!(
                 "Orchestrator migrations failed.\n\n\
-                 Postgres might not be ready yet, or the schema is in a \
-                 bad state. Check `docker compose --profile c2 logs db` for \
-                 details.\n\n\
+                 The SQLite database file may not be writable, or the schema \
+                 is in a bad state. Check that DATABASE_PATH's directory is \
+                 writable.\n\n\
                  Underlying error:\n{e}"
             ),
         );
@@ -412,11 +413,18 @@ fn release_env(repo: &Path, secret: &str) -> Vec<(&'static str, String)> {
         .to_string_lossy()
         .into_owned();
 
+    // SQLite database file, co-located with uploads under the repo's
+    // orchestrator/priv. The Phoenix app creates the file + parent dir on
+    // boot (see Orchestrator.Application.ensure_db_dir/0).
+    let database_path = repo
+        .join("orchestrator")
+        .join("priv")
+        .join("fineshyt.db")
+        .to_string_lossy()
+        .into_owned();
+
     vec![
-        (
-            "DATABASE_URL",
-            "ecto://postgres:postgres_password@localhost:5432/photo_curator_dev".to_string(),
-        ),
+        ("DATABASE_PATH", database_path),
         ("SECRET_KEY_BASE", secret.to_string()),
         ("PHX_HOST", "localhost".to_string()),
         ("PHX_SCHEME", "http".to_string()),

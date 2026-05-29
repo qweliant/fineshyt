@@ -85,10 +85,18 @@ defmodule Orchestrator.Sidecars do
   @spec mode() :: mode()
   def mode do
     case Application.get_env(:orchestrator, :sidecar_mode, "read") do
-      "off"        -> :off
-      "read"       -> :read
-      "read-write" -> :read_write
-      "read_write" -> :read_write
+      "off" ->
+        :off
+
+      "read" ->
+        :read
+
+      "read-write" ->
+        :read_write
+
+      "read_write" ->
+        :read_write
+
       other ->
         Logger.warning("Unknown FINESHYT_SIDECAR_MODE=#{inspect(other)}; defaulting to :read")
         :read
@@ -176,6 +184,7 @@ defmodule Orchestrator.Sidecars do
           Logger.warning(
             "Skipping XMP write for #{Path.basename(sidecar)}: editor has modified it since last sync"
           )
+
           :skipped
 
         true ->
@@ -251,15 +260,18 @@ defmodule Orchestrator.Sidecars do
 
   defp normalize_rating(nil), do: nil
   defp normalize_rating(n) when is_integer(n) and n in 1..5, do: n
+
   defp normalize_rating(n) when is_binary(n) do
     case Integer.parse(n) do
       {i, _} when i in 1..5 -> i
       _ -> nil
     end
   end
+
   defp normalize_rating(_), do: nil
 
   defp normalize_keywords(nil, nil), do: nil
+
   defp normalize_keywords(subject, keywords) do
     [subject, keywords]
     |> Enum.flat_map(fn
@@ -284,10 +296,12 @@ defmodule Orchestrator.Sidecars do
 
   defp add_arg_list(args, _flag, nil), do: args
   defp add_arg_list(args, _flag, []), do: args
+
   defp add_arg_list(args, flag, list) when is_list(list) do
     # exiftool's repeated-flag syntax for list-valued tags
     Enum.reduce(list, args, fn item, acc -> acc ++ ["#{flag}=#{item}"] end)
   end
+
   defp add_arg_list(args, _flag, _), do: args
 
   defp sidecar_newer_than_synced?(sidecar, photo) do
@@ -296,7 +310,9 @@ defmodule Orchestrator.Sidecars do
         synced = Map.get(photo, :sidecar_synced_at)
 
         cond do
-          is_nil(synced) -> false
+          is_nil(synced) ->
+            false
+
           true ->
             synced_posix =
               synced

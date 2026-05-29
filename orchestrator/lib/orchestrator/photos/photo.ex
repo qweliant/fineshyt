@@ -64,7 +64,7 @@ defmodule Orchestrator.Photos.Photo do
     field :sharpness_score, :integer
     field :exposure_score, :integer
 
-    field :clip_embedding, Pgvector.Ecto.Vector
+    field :clip_embedding, Orchestrator.Embedding
     field :preference_score, :integer
     field :preference_model_version, :integer
 
@@ -115,13 +115,29 @@ defmodule Orchestrator.Photos.Photo do
   def changeset(photo, attrs) do
     photo
     |> cast(attrs, [
-      :file_path, :url, :source,
+      :file_path,
+      :url,
+      :source,
       :manual_match,
-      :technical_score, :sharpness_score, :exposure_score,
-      :clip_embedding, :preference_score, :preference_model_version,
-      :subject, :artistic_mood, :lighting_critique, :content_type, :suggested_tags,
-      :user_rating, :project, :captured_at, :burst_group, :curation_status, :failure_reason,
-      :source_path, :sidecar_synced_at
+      :technical_score,
+      :sharpness_score,
+      :exposure_score,
+      :clip_embedding,
+      :preference_score,
+      :preference_model_version,
+      :subject,
+      :artistic_mood,
+      :lighting_critique,
+      :content_type,
+      :suggested_tags,
+      :user_rating,
+      :project,
+      :captured_at,
+      :burst_group,
+      :curation_status,
+      :failure_reason,
+      :source_path,
+      :sidecar_synced_at
     ])
     |> validate_inclusion(:user_rating, 1..5, message: "must be between 1 and 5")
     |> validate_required([:file_path])

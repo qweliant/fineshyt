@@ -86,10 +86,10 @@ defmodule OrchestratorWeb.GalleryLive do
 
   defp query_opts(socket) do
     [
-      filter:  socket.assigns.filter,
-      sort:    socket.assigns.sort,
-      search:  socket.assigns.search,
-      page:    socket.assigns.page,
+      filter: socket.assigns.filter,
+      sort: socket.assigns.sort,
+      search: socket.assigns.search,
+      page: socket.assigns.page,
       project: socket.assigns.project_filter
     ]
   end
@@ -98,25 +98,31 @@ defmodule OrchestratorWeb.GalleryLive do
     opts = query_opts(socket)
 
     if socket.assigns.sort == :vibe_desc do
-      # Vibe is computed in-memory from the tag profile, so we fetch all
-      # matching photos, score + sort here, then slice the page.
+      # Vibe is computed in-memory from the tag profile. Rank the whole
+      # filtered library from a lightweight {id, tags, preference_score}
+      # projection (NOT full structs — avoids decoding every clip_embedding
+      # blob), slice the page's ids, then load only those 60 full rows.
       profile = socket.assigns.tag_profile
-      all = Photos.list_photos(Keyword.merge(opts, page: :all, sort: :newest))
 
-      sorted =
-        Enum.sort_by(all, fn photo ->
-          {Photos.vibe_score(photo, profile) || -1, photo.preference_score || -1}
-        end, :desc)
+      ranked =
+        Photos.list_for_vibe_ranking(opts)
+        |> Enum.sort_by(
+          fn {_id, tags, pref} ->
+            {Photos.vibe_score_for_tags(tags, profile) || -1, pref || -1}
+          end,
+          :desc
+        )
 
-      total = length(sorted)
+      total = length(ranked)
       pages = max(1, ceil(total / Photos.page_size()))
 
-      page_photos =
-        sorted
+      page_ids =
+        ranked
         |> Enum.drop((socket.assigns.page - 1) * Photos.page_size())
         |> Enum.take(Photos.page_size())
+        |> Enum.map(&elem(&1, 0))
 
-      assign(socket, photos: page_photos, total: total, pages: pages)
+      assign(socket, photos: Photos.list_by_ids_ordered(page_ids), total: total, pages: pages)
     else
       total = Photos.count_photos(opts)
       pages = max(1, ceil(total / Photos.page_size()))
@@ -198,17 +204,18 @@ defmodule OrchestratorWeb.GalleryLive do
   """
   @impl Phoenix.LiveView
   def handle_event("set_filter", %{"filter" => filter}, socket) do
-    atom = case filter do
-      "match"        -> :match
-      "no_match"     -> :no_match
-      "rated"        -> :rated
-      "unrated"      -> :unrated
-      "failed"       -> :failed
-      "rejected"     -> :rejected
-      "for_projects" -> :for_projects
-      "bursts"       -> :bursts
-      _              -> :all
-    end
+    atom =
+      case filter do
+        "match" -> :match
+        "no_match" -> :no_match
+        "rated" -> :rated
+        "unrated" -> :unrated
+        "failed" -> :failed
+        "rejected" -> :rejected
+        "for_projects" -> :for_projects
+        "bursts" -> :bursts
+        _ -> :all
+      end
 
     socket = socket |> assign(:selected, MapSet.new())
 
@@ -224,13 +231,15 @@ defmodule OrchestratorWeb.GalleryLive do
 
   @impl Phoenix.LiveView
   def handle_event("set_sort", %{"sort" => sort}, socket) do
-    atom = case sort do
-      "vibe_desc"       -> :vibe_desc
-      "rating_desc"     -> :rating_desc
-      "preference_desc" -> :preference_desc
-      "preference_asc"  -> :preference_asc
-      _                 -> :newest
-    end
+    atom =
+      case sort do
+        "vibe_desc" -> :vibe_desc
+        "rating_desc" -> :rating_desc
+        "preference_desc" -> :preference_desc
+        "preference_asc" -> :preference_asc
+        _ -> :newest
+      end
+
     {:noreply, reload(socket, sort: atom)}
   end
 
@@ -248,20 +257,25 @@ defmodule OrchestratorWeb.GalleryLive do
   @impl Phoenix.LiveView
   def handle_event("photo_keydown", %{"id" => id, "key" => key}, socket) do
     photo_id = String.to_integer(id)
+
     case key do
       k when k in ["1", "2", "3", "4", "5"] ->
         Photos.rate_photo(photo_id, String.to_integer(k))
         trigger_preference_retrain()
         {:noreply, socket |> assign(:tag_profile, Photos.tag_affinity_profile()) |> load_photos()}
+
       "p" ->
         Photos.rate_photo(photo_id, 5)
         trigger_preference_retrain()
         {:noreply, socket |> assign(:tag_profile, Photos.tag_affinity_profile()) |> load_photos()}
+
       "x" ->
         Photos.reject_photo(photo_id)
         {:noreply, socket |> assign(:tag_profile, Photos.tag_affinity_profile()) |> load_photos()}
+
       "m" ->
         handle_event("toggle_select", %{"id" => id}, socket)
+
       _ ->
         {:noreply, socket}
     end
@@ -296,7 +310,7 @@ defmodule OrchestratorWeb.GalleryLive do
   @impl Phoenix.LiveView
   def handle_event("add_tag", %{"id" => id, "value" => tag}, socket) do
     case Photos.add_tag(String.to_integer(id), tag) do
-      {:ok, _}    -> {:noreply, load_photos(socket)}
+      {:ok, _} -> {:noreply, load_photos(socket)}
       {:error, _} -> {:noreply, put_flash(socket, :error, "Could not add tag.")}
     end
   end
@@ -310,10 +324,12 @@ defmodule OrchestratorWeb.GalleryLive do
   @impl Phoenix.LiveView
   def handle_event("delete_photo", %{"id" => id}, socket) do
     Photos.delete_photo(String.to_integer(id))
-    {:noreply, socket
-      |> put_flash(:info, "Photo removed from archive.")
-      |> assign(:tag_profile, Photos.tag_affinity_profile())
-      |> load_photos()}
+
+    {:noreply,
+     socket
+     |> put_flash(:info, "Photo removed from archive.")
+     |> assign(:tag_profile, Photos.tag_affinity_profile())
+     |> load_photos()}
   end
 
   @impl Phoenix.LiveView
@@ -321,6 +337,7 @@ defmodule OrchestratorWeb.GalleryLive do
     case Photos.retry_failed(String.to_integer(id)) do
       {:ok, %{file_path: fp, source: source, project: project}} ->
         ref = System.unique_integer([:positive]) |> to_string()
+
         Orchestrator.Workers.AiCurationWorker.new(%{
           "file_path" => fp,
           "ref" => ref,
@@ -328,7 +345,9 @@ defmodule OrchestratorWeb.GalleryLive do
           "project" => project
         })
         |> Oban.insert()
+
         {:noreply, socket |> put_flash(:info, "Re-queued for curation.") |> load_photos()}
+
       _ ->
         {:noreply, put_flash(socket, :error, "Could not retry.")}
     end
@@ -337,9 +356,11 @@ defmodule OrchestratorWeb.GalleryLive do
   @impl Phoenix.LiveView
   def handle_event("retry_all_failed", _params, socket) do
     failed = Photos.list_photos(filter: :failed, page: 1)
+
     Enum.each(failed, fn photo ->
       ref = System.unique_integer([:positive]) |> to_string()
       Photos.retry_failed(photo.id)
+
       Orchestrator.Workers.AiCurationWorker.new(%{
         "file_path" => photo.file_path,
         "ref" => ref,
@@ -348,7 +369,9 @@ defmodule OrchestratorWeb.GalleryLive do
       })
       |> Oban.insert()
     end)
-    {:noreply, socket |> put_flash(:info, "Re-queued #{length(failed)} failed photos.") |> load_photos()}
+
+    {:noreply,
+     socket |> put_flash(:info, "Re-queued #{length(failed)} failed photos.") |> load_photos()}
   end
 
   # ── multi-select & bulk ───────────────────────────────────────────────────
@@ -399,7 +422,10 @@ defmodule OrchestratorWeb.GalleryLive do
 
   def handle_event("bulk_assign_input", _, socket) do
     name = String.trim(socket.assigns.bulk_project)
-    if name == "", do: {:noreply, socket}, else: handle_event("bulk_assign_project", %{"name" => name}, socket)
+
+    if name == "",
+      do: {:noreply, socket},
+      else: handle_event("bulk_assign_project", %{"name" => name}, socket)
   end
 
   def handle_event("bulk_reject", _, socket) do
@@ -423,7 +449,9 @@ defmodule OrchestratorWeb.GalleryLive do
 
     msg =
       "Trash emptied: #{deleted} row#{if deleted == 1, do: "", else: "s"} removed" <>
-        if missing > 0, do: " (#{missing} file#{if missing == 1, do: "", else: "s"} were already gone)", else: ""
+        if missing > 0,
+          do: " (#{missing} file#{if missing == 1, do: "", else: "s"} were already gone)",
+          else: ""
 
     {:noreply,
      socket
@@ -467,7 +495,10 @@ defmodule OrchestratorWeb.GalleryLive do
         {:noreply,
          socket
          |> assign(:burst_groups, Photos.list_burst_groups())
-         |> put_flash(:info, "Kept sharpest, rejected #{n} duplicate#{if n == 1, do: "", else: "s"}.")
+         |> put_flash(
+           :info,
+           "Kept sharpest, rejected #{n} duplicate#{if n == 1, do: "", else: "s"}."
+         )
          |> load_photos()}
 
       _ ->
@@ -478,6 +509,7 @@ defmodule OrchestratorWeb.GalleryLive do
   @impl Phoenix.LiveView
   def handle_event("keep_best_all", _params, socket) do
     burst_groups = socket.assigns.burst_groups
+
     reject_ids =
       Enum.flat_map(burst_groups, fn {_gid, [_best | rest]} ->
         Enum.map(rest, & &1.id)
@@ -491,7 +523,10 @@ defmodule OrchestratorWeb.GalleryLive do
       {:noreply,
        socket
        |> assign(:burst_groups, Photos.list_burst_groups())
-       |> put_flash(:info, "Kept sharpest per burst, rejected #{n} duplicate#{if n == 1, do: "", else: "s"}.")
+       |> put_flash(
+         :info,
+         "Kept sharpest per burst, rejected #{n} duplicate#{if n == 1, do: "", else: "s"}."
+       )
        |> load_photos()}
     end
   end
@@ -516,10 +551,11 @@ defmodule OrchestratorWeb.GalleryLive do
   """
   @impl Phoenix.LiveView
   def handle_info({:curation_complete, _ref, _metadata, _basename}, socket) do
-    {:noreply, socket
-      |> assign(:tag_profile, Photos.tag_affinity_profile())
-      |> assign(:projects, Photos.list_projects())
-      |> load_photos()}
+    {:noreply,
+     socket
+     |> assign(:tag_profile, Photos.tag_affinity_profile())
+     |> assign(:projects, Photos.list_projects())
+     |> load_photos()}
   end
 
   def handle_info({:preference_scores_updated, _version}, socket) do
@@ -536,7 +572,10 @@ defmodule OrchestratorWeb.GalleryLive do
 
     {:noreply,
      socket
-     |> put_flash(:info, "Detected #{n_groups} burst group#{if n_groups == 1, do: "", else: "s"}.")
+     |> put_flash(
+       :info,
+       "Detected #{n_groups} burst group#{if n_groups == 1, do: "", else: "s"}."
+     )
      |> load_photos()}
   end
 
@@ -571,23 +610,34 @@ defmodule OrchestratorWeb.GalleryLive do
   def render(assigns) do
     ~H"""
     <div class="min-h-screen bg-[#fcfbf9] text-[#111111] font-serif p-6 md:p-12 lg:p-24">
-
       <%!-- Header --%>
       <header class="mb-12 border-b-[3px] border-[#111111] pb-6 flex flex-col md:flex-row md:items-end justify-between">
         <div>
-          <h1 class="text-6xl md:text-8xl font-black tracking-tight leading-none">FINE.<br/>SHYT.</h1>
+          <h1 class="text-6xl md:text-8xl font-black tracking-tight leading-none">
+            FINE.<br />SHYT.
+          </h1>
           <p class="mt-4 text-lg font-light italic text-gray-600">
-            The Archive. <span class="font-sans text-sm not-italic text-gray-400"><%= @total %> photos</span>
+            The Archive.
+            <span class="font-sans text-sm not-italic text-gray-400">{@total} photos</span>
           </p>
         </div>
         <div class="mt-6 md:mt-0 font-sans uppercase tracking-widest text-xs flex gap-6">
-          <.link navigate={~p"/review"} class="border-b border-[#111111] pb-0.5 hover:text-gray-500 hover:border-gray-500 transition-colors">
+          <.link
+            navigate={~p"/review"}
+            class="border-b border-[#111111] pb-0.5 hover:text-gray-500 hover:border-gray-500 transition-colors"
+          >
             Review →
           </.link>
-          <.link navigate={~p"/projects"} class="border-b border-gray-400 pb-0.5 hover:text-gray-500 hover:border-gray-500 transition-colors">
+          <.link
+            navigate={~p"/projects"}
+            class="border-b border-gray-400 pb-0.5 hover:text-gray-500 hover:border-gray-500 transition-colors"
+          >
             Projects
           </.link>
-          <.link navigate={~p"/"} class="border-b border-gray-400 pb-0.5 hover:text-gray-500 hover:border-gray-500 transition-colors">
+          <.link
+            navigate={~p"/"}
+            class="border-b border-gray-400 pb-0.5 hover:text-gray-500 hover:border-gray-500 transition-colors"
+          >
             ← Ingest
           </.link>
         </div>
@@ -605,7 +655,14 @@ defmodule OrchestratorWeb.GalleryLive do
             class="w-full border border-gray-300 bg-transparent px-4 py-2.5 font-sans text-sm focus:outline-none focus:border-[#111111] placeholder-gray-300"
           />
           <%= if @search != "" do %>
-            <button type="button" phx-click="search" phx-value-q="" class="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-700 font-sans text-sm">×</button>
+            <button
+              type="button"
+              phx-click="search"
+              phx-value-q=""
+              class="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-700 font-sans text-sm"
+            >
+              ×
+            </button>
           <% end %>
         </form>
         <form phx-change="set_sort">
@@ -613,11 +670,11 @@ defmodule OrchestratorWeb.GalleryLive do
             name="sort"
             class="border border-gray-300 bg-[#fcfbf9] px-4 py-2.5 font-sans text-xs uppercase tracking-widest focus:outline-none focus:border-[#111111] cursor-pointer"
           >
-            <option value="vibe_desc"        selected={@sort == :vibe_desc}>Vibe ↓</option>
-            <option value="newest"           selected={@sort == :newest}>Newest</option>
-            <option value="preference_desc"  selected={@sort == :preference_desc}>Preference ↓</option>
-            <option value="preference_asc"   selected={@sort == :preference_asc}>Preference ↑</option>
-            <option value="rating_desc"      selected={@sort == :rating_desc}>Rating ↓</option>
+            <option value="vibe_desc" selected={@sort == :vibe_desc}>Vibe ↓</option>
+            <option value="newest" selected={@sort == :newest}>Newest</option>
+            <option value="preference_desc" selected={@sort == :preference_desc}>Preference ↓</option>
+            <option value="preference_asc" selected={@sort == :preference_asc}>Preference ↑</option>
+            <option value="rating_desc" selected={@sort == :rating_desc}>Rating ↓</option>
           </select>
         </form>
       </div>
@@ -637,13 +694,16 @@ defmodule OrchestratorWeb.GalleryLive do
             phx-value-filter={value}
             class={[
               "font-sans uppercase tracking-widest text-xs px-5 py-3 border-b-2 transition-colors whitespace-nowrap shrink-0",
-              @filter == value and value in [:failed, :rejected] && "border-red-600 text-red-600",
-              @filter == value and value not in [:failed, :rejected] && "border-[#111111] text-[#111111]",
-              @filter != value and value in [:failed, :rejected] && "border-transparent text-red-300 hover:text-red-500",
-              @filter != value and value not in [:failed, :rejected] && "border-transparent text-gray-400 hover:text-gray-600"
+              (@filter == value and value in [:failed, :rejected]) && "border-red-600 text-red-600",
+              (@filter == value and value not in [:failed, :rejected]) &&
+                "border-[#111111] text-[#111111]",
+              (@filter != value and value in [:failed, :rejected]) &&
+                "border-transparent text-red-300 hover:text-red-500",
+              (@filter != value and value not in [:failed, :rejected]) &&
+                "border-transparent text-gray-400 hover:text-gray-600"
             ]}
           >
-            <%= label %>
+            {label}
           </button>
         <% end %>
       </div>
@@ -652,7 +712,10 @@ defmodule OrchestratorWeb.GalleryLive do
       <%= if @filter == :rejected and @total > 0 do %>
         <div class="flex items-center gap-4 mb-6 p-3 border border-red-200 bg-red-50/50">
           <p class="font-sans text-xs text-red-600 flex-1">
-            <%= @total %> photo<%= if @total != 1, do: "s" %> in trash. Click <span class="font-bold">restore</span> to bring one back, or <span class="font-bold">empty trash</span> to hard-delete the files.
+            {@total} photo{if @total != 1, do: "s"} in trash. Click
+            <span class="font-bold">restore</span>
+            to bring one back, or <span class="font-bold">empty trash</span>
+            to hard-delete the files.
           </p>
           <button
             phx-click="empty_trash"
@@ -668,7 +731,7 @@ defmodule OrchestratorWeb.GalleryLive do
       <%= if @filter == :failed and @total > 0 do %>
         <div class="flex items-center gap-4 mb-6 p-3 border border-red-200 bg-red-50/50">
           <p class="font-sans text-xs text-red-600 flex-1">
-            <%= @total %> photo<%= if @total != 1, do: "s" %> failed AI curation (timeout or service error).
+            {@total} photo{if @total != 1, do: "s"} failed AI curation (timeout or service error).
           </p>
           <button
             phx-click="retry_all_failed"
@@ -686,9 +749,10 @@ defmodule OrchestratorWeb.GalleryLive do
           <div class="flex items-center gap-4 mb-4">
             <p class="font-sans text-xs text-purple-700 flex-1">
               <%= if @burst_groups == [] do %>
-                No burst groups detected yet. Click <span class="font-bold">Detect Bursts</span> to scan for visually similar photo sequences.
+                No burst groups detected yet. Click <span class="font-bold">Detect Bursts</span>
+                to scan for visually similar photo sequences.
               <% else %>
-                <%= length(@burst_groups) %> burst group<%= if length(@burst_groups) != 1, do: "s" %> found.
+                {length(@burst_groups)} burst group{if length(@burst_groups) != 1, do: "s"} found.
                 The sharpest frame in each group is shown first.
               <% end %>
             </p>
@@ -714,7 +778,7 @@ defmodule OrchestratorWeb.GalleryLive do
             <div class="mb-6 border border-gray-200 bg-white/70 p-3">
               <div class="flex items-center justify-between mb-2">
                 <span class="font-sans text-[10px] uppercase tracking-widest text-gray-500">
-                  Burst #<%= group_id %> · <%= length(photos) %> photos
+                  Burst #{group_id} · {length(photos)} photos
                 </span>
                 <button
                   phx-click="keep_best"
@@ -734,8 +798,8 @@ defmodule OrchestratorWeb.GalleryLive do
                   ]}>
                     <img src={photo.url} class="w-full h-full object-cover" loading="lazy" />
                     <div class="absolute bottom-0 left-0 right-0 bg-black/60 text-white font-sans text-[9px] px-1 py-0.5 text-center">
-                      sharp <%= photo.sharpness_score || "?" %>
-                      <%= if photo.id == best.id, do: " ★", else: "" %>
+                      sharp {photo.sharpness_score || "?"}
+                      {if photo.id == best.id, do: " ★", else: ""}
                     </div>
                   </div>
                 <% end %>
@@ -748,16 +812,21 @@ defmodule OrchestratorWeb.GalleryLive do
       <%!-- Project filter --%>
       <%= if @projects != [] do %>
         <div class="flex items-center gap-2 mb-8 flex-wrap">
-          <span class="font-sans text-[9px] uppercase tracking-widest text-gray-400 shrink-0">Project</span>
+          <span class="font-sans text-[9px] uppercase tracking-widest text-gray-400 shrink-0">
+            Project
+          </span>
           <button
             phx-click="set_project_filter"
             phx-value-project=""
             class={[
               "font-sans text-[10px] uppercase tracking-wider px-3 py-1 border transition-colors",
               is_nil(@project_filter) && "border-[#111111] text-[#111111]",
-              !is_nil(@project_filter) && "border-gray-200 text-gray-400 hover:border-gray-500 hover:text-gray-700"
+              !is_nil(@project_filter) &&
+                "border-gray-200 text-gray-400 hover:border-gray-500 hover:text-gray-700"
             ]}
-          >all</button>
+          >
+            all
+          </button>
           <%= for proj <- @projects do %>
             <button
               phx-click="set_project_filter"
@@ -765,9 +834,12 @@ defmodule OrchestratorWeb.GalleryLive do
               class={[
                 "font-mono text-[10px] px-3 py-1 border transition-colors",
                 @project_filter == proj && "border-[#111111] text-[#111111]",
-                @project_filter != proj && "border-gray-200 text-gray-400 hover:border-gray-500 hover:text-gray-700"
+                @project_filter != proj &&
+                  "border-gray-200 text-gray-400 hover:border-gray-500 hover:text-gray-700"
               ]}
-            ><%= proj %></button>
+            >
+              {proj}
+            </button>
           <% end %>
         </div>
       <% end %>
@@ -776,7 +848,7 @@ defmodule OrchestratorWeb.GalleryLive do
       <%= if MapSet.size(@selected) > 0 do %>
         <div class="sticky top-2 z-10 mb-4 flex flex-col md:flex-row md:items-center gap-3 p-3 border-2 border-[#111111] bg-[#fcfbf9] shadow-sm">
           <p class="font-sans text-xs uppercase tracking-widest text-[#111111] shrink-0">
-            <%= MapSet.size(@selected) %> selected
+            {MapSet.size(@selected)} selected
           </p>
 
           <div class="flex items-center gap-1 flex-wrap">
@@ -785,7 +857,9 @@ defmodule OrchestratorWeb.GalleryLive do
                 phx-click="bulk_assign_project"
                 phx-value-name={proj}
                 class="font-mono text-[10px] px-2 py-1 border border-gray-300 text-gray-700 hover:border-[#111111] hover:text-[#111111] transition-colors"
-              ><%= proj %></button>
+              >
+                {proj}
+              </button>
             <% end %>
           </div>
 
@@ -799,278 +873,340 @@ defmodule OrchestratorWeb.GalleryLive do
               placeholder="new project name…"
               class="flex-1 bg-transparent border border-gray-300 focus:border-[#111111] px-2 py-1 font-mono text-xs text-[#111111] placeholder-gray-400 focus:outline-none"
             />
-            <button type="submit" class="font-sans text-[10px] uppercase tracking-widest text-gray-700 border border-gray-300 hover:border-[#111111] hover:text-[#111111] px-2 py-1 transition-colors">Assign</button>
+            <button
+              type="submit"
+              class="font-sans text-[10px] uppercase tracking-widest text-gray-700 border border-gray-300 hover:border-[#111111] hover:text-[#111111] px-2 py-1 transition-colors"
+            >
+              Assign
+            </button>
           </form>
 
           <button
             phx-click="bulk_reject"
             data-confirm={"Reject #{MapSet.size(@selected)} photos? (reversible)"}
             class="font-sans text-[10px] uppercase tracking-widest text-red-700 border border-red-300 hover:border-red-600 px-3 py-1 transition-colors shrink-0"
-          >Reject</button>
+          >
+            Reject
+          </button>
           <button
             phx-click="select_all"
             class="font-sans text-[10px] uppercase tracking-widest text-gray-500 border border-gray-300 hover:border-gray-700 hover:text-gray-700 px-3 py-1 transition-colors shrink-0"
-          >Select page</button>
+          >
+            Select page
+          </button>
           <button
             phx-click="clear_selection"
             class="font-sans text-[10px] uppercase tracking-widest text-gray-500 hover:text-[#111111] transition-colors shrink-0"
-          >Clear</button>
+          >
+            Clear
+          </button>
         </div>
       <% end %>
 
       <%= if @filter != :bursts do %>
-      <%!-- Keyboard hint --%>
-      <p class="mb-4 font-sans text-[9px] uppercase tracking-widest text-gray-300">
-        Click a photo, then: <span class="text-gray-400">1–5</span> rate · <span class="text-gray-400">p</span> pick · <span class="text-gray-400">x</span> reject · <span class="text-gray-400">m</span> select · or use <.link navigate={~p"/review"} class="text-gray-500 underline">Review</.link> for single-image culling
-      </p>
+        <%!-- Keyboard hint --%>
+        <p class="mb-4 font-sans text-[9px] uppercase tracking-widest text-gray-300">
+          Click a photo, then: <span class="text-gray-400">1–5</span>
+          rate · <span class="text-gray-400">p</span>
+          pick · <span class="text-gray-400">x</span>
+          reject · <span class="text-gray-400">m</span>
+          select · or use <.link navigate={~p"/review"} class="text-gray-500 underline">Review</.link>
+          for single-image culling
+        </p>
 
-      <%!-- Gallery Grid --%>
-      <%= if @photos == [] do %>
-        <div class="text-center py-24 text-gray-400 font-serif italic text-xl">
-          <%= cond do %>
-            <% @total == 0 -> %>
-              No photos yet. <.link navigate={~p"/"} class="border-b border-gray-400">Ingest from a directory.</.link>
-            <% @search != "" -> %>
-              No photos match "<%= @search %>".
-            <% true -> %>
-              No photos match this filter.
-          <% end %>
-        </div>
-      <% else %>
-        <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-          <%= for photo <- @photos do %>
-            <% vibe = Photos.vibe_score(photo, @tag_profile) %>
-            <% selected? = MapSet.member?(@selected, photo.id) %>
-            <div
-              class={[
-                "group relative aspect-square overflow-hidden border bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-1",
-                selected? && "border-[#111111] ring-2 ring-[#111111]",
-                !selected? && "border-gray-200 focus:ring-[#111111]"
-              ]}
-              tabindex="0"
-              phx-keydown="photo_keydown"
-              phx-value-id={photo.id}
-            >
-              <%!-- Selection checkbox (bottom-left, out of the way of hover overlay's delete + top-right badges) --%>
-              <button
-                phx-click="toggle_select"
-                phx-value-id={photo.id}
-                title="select (m)"
+        <%!-- Gallery Grid --%>
+        <%= if @photos == [] do %>
+          <div class="text-center py-24 text-gray-400 font-serif italic text-xl">
+            <%= cond do %>
+              <% @total == 0 -> %>
+                No photos yet.
+                <.link navigate={~p"/"} class="border-b border-gray-400">
+                  Ingest from a directory.
+                </.link>
+              <% @search != "" -> %>
+                No photos match "{@search}".
+              <% true -> %>
+                No photos match this filter.
+            <% end %>
+          </div>
+        <% else %>
+          <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+            <%= for photo <- @photos do %>
+              <% vibe = Photos.vibe_score(photo, @tag_profile) %>
+              <% selected? = MapSet.member?(@selected, photo.id) %>
+              <div
                 class={[
-                  "absolute bottom-2 left-2 z-20 w-6 h-6 flex items-center justify-center font-sans text-sm font-bold transition-all",
-                  selected? && "bg-[#111111] text-[#fcfbf9] border-2 border-[#111111]",
-                  !selected? && "bg-[#fcfbf9]/90 text-transparent border-2 border-gray-300 opacity-0 group-hover:opacity-100 hover:border-[#111111] hover:text-gray-500"
+                  "group relative aspect-square overflow-hidden border bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-1",
+                  selected? && "border-[#111111] ring-2 ring-[#111111]",
+                  !selected? && "border-gray-200 focus:ring-[#111111]"
                 ]}
-              >✓</button>
-              <%= if photo.url do %>
-                <img
-                  src={photo.url}
-                  alt={photo.subject || "Photo"}
-                  class="object-cover w-full h-full transition-transform duration-500 group-hover:scale-105"
-                />
-              <% else %>
-                <div class="w-full h-full flex flex-col items-center justify-center gap-2 bg-gray-100">
-                  <span class="text-red-400 font-sans text-lg">✗</span>
-                  <span class="font-mono text-[9px] text-gray-400 text-center px-2 leading-snug truncate w-full text-center"><%= Path.basename(photo.file_path || "") %></span>
-                </div>
-              <% end %>
+                tabindex="0"
+                phx-keydown="photo_keydown"
+                phx-value-id={photo.id}
+              >
+                <%!-- Selection checkbox (bottom-left, out of the way of hover overlay's delete + top-right badges) --%>
+                <button
+                  phx-click="toggle_select"
+                  phx-value-id={photo.id}
+                  title="select (m)"
+                  class={[
+                    "absolute bottom-2 left-2 z-20 w-6 h-6 flex items-center justify-center font-sans text-sm font-bold transition-all",
+                    selected? && "bg-[#111111] text-[#fcfbf9] border-2 border-[#111111]",
+                    !selected? &&
+                      "bg-[#fcfbf9]/90 text-transparent border-2 border-gray-300 opacity-0 group-hover:opacity-100 hover:border-[#111111] hover:text-gray-500"
+                  ]}
+                >
+                  ✓
+                </button>
+                <%= if photo.url do %>
+                  <img
+                    src={photo.url}
+                    alt={photo.subject || "Photo"}
+                    class="object-cover w-full h-full transition-transform duration-500 group-hover:scale-105"
+                  />
+                <% else %>
+                  <div class="w-full h-full flex flex-col items-center justify-center gap-2 bg-gray-100">
+                    <span class="text-red-400 font-sans text-lg">✗</span>
+                    <span class="font-mono text-[9px] text-gray-400 text-center px-2 leading-snug truncate w-full text-center">
+                      {Path.basename(photo.file_path || "")}
+                    </span>
+                  </div>
+                <% end %>
 
-              <%!-- Primary score — top-left --%>
-              <% primary = vibe || photo.preference_score %>
-              <%= if primary do %>
-                <div class={[
-                  "absolute top-2 left-2 font-sans text-[11px] font-bold tabular-nums px-2 py-1",
-                  primary >= 70 && "bg-[#111111] text-[#fcfbf9]",
-                  primary >= 40 and primary < 70 && "bg-[#fcfbf9]/90 text-gray-600 border border-gray-300",
-                  primary < 40 && "bg-[#fcfbf9]/70 text-gray-400 border border-gray-200"
-                ]}>
-                  <%= primary %>
-                </div>
-              <% end %>
+                <%!-- Primary score — top-left --%>
+                <% primary = vibe || photo.preference_score %>
+                <%= if primary do %>
+                  <div class={[
+                    "absolute top-2 left-2 font-sans text-[11px] font-bold tabular-nums px-2 py-1",
+                    primary >= 70 && "bg-[#111111] text-[#fcfbf9]",
+                    (primary >= 40 and primary < 70) &&
+                      "bg-[#fcfbf9]/90 text-gray-600 border border-gray-300",
+                    primary < 40 && "bg-[#fcfbf9]/70 text-gray-400 border border-gray-200"
+                  ]}>
+                    {primary}
+                  </div>
+                <% end %>
 
-              <%!-- Match status + project — top-right --%>
-              <div class="absolute top-2 right-2 flex flex-col items-end gap-1">
-                <%= cond do %>
-                  <% photo.manual_match -> %>
-                    <div class="bg-amber-400 text-[#111111] font-sans text-[10px] font-bold uppercase tracking-wider px-2 py-1">
-                      ★ Pick
+                <%!-- Match status + project — top-right --%>
+                <div class="absolute top-2 right-2 flex flex-col items-end gap-1">
+                  <%= cond do %>
+                    <% photo.manual_match -> %>
+                      <div class="bg-amber-400 text-[#111111] font-sans text-[10px] font-bold uppercase tracking-wider px-2 py-1">
+                        ★ Pick
+                      </div>
+                    <% photo.preference_score != nil and photo.preference_score >= @match_threshold -> %>
+                      <div class="bg-[#111111] text-[#fcfbf9] font-sans text-[10px] font-bold uppercase tracking-wider px-2 py-1">
+                        ✓ Match
+                      </div>
+                    <% true -> %>
+                  <% end %>
+                  <%= if photo.project do %>
+                    <div class="bg-[#fcfbf9]/90 border border-gray-300 font-sans text-[9px] uppercase tracking-wider px-2 py-0.5 text-gray-500 max-w-[80px] truncate">
+                      {photo.project}
                     </div>
-                  <% photo.preference_score != nil and photo.preference_score >= @match_threshold -> %>
-                    <div class="bg-[#111111] text-[#fcfbf9] font-sans text-[10px] font-bold uppercase tracking-wider px-2 py-1">
-                      ✓ Match
+                  <% end %>
+                </div>
+
+                <%!-- Hover overlay — failed variant --%>
+                <%= cond do %>
+                  <% photo.curation_status == "failed" -> %>
+                    <div class="absolute inset-0 bg-[#111111]/85 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity duration-300 flex flex-col justify-center items-center gap-3 p-4">
+                      <p class="font-sans text-[10px] uppercase tracking-widest text-red-400 text-center">
+                        Curation failed
+                      </p>
+                      <%= if photo.failure_reason && photo.failure_reason != "" do %>
+                        <p class="font-mono text-[9px] text-gray-400 text-center leading-snug px-2 truncate w-full">
+                          {photo.failure_reason}
+                        </p>
+                      <% end %>
+                      <button
+                        phx-click="retry_photo"
+                        phx-value-id={photo.id}
+                        class="font-sans text-[10px] uppercase tracking-widest text-[#fcfbf9] border border-gray-500 hover:border-white px-4 py-2 transition-colors"
+                      >
+                        Retry
+                      </button>
+                      <button
+                        phx-click="delete_photo"
+                        phx-value-id={photo.id}
+                        data-confirm="Remove this photo?"
+                        class="font-sans text-[9px] uppercase tracking-widest text-gray-600 hover:text-red-400 transition-colors"
+                      >
+                        discard
+                      </button>
+                    </div>
+                  <% photo.curation_status == "rejected" -> %>
+                    <div class="absolute inset-0 bg-[#111111]/85 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity duration-300 flex flex-col justify-center items-center gap-3 p-4">
+                      <p class="font-sans text-[10px] uppercase tracking-widest text-red-400 text-center">
+                        Rejected
+                      </p>
+                      <p class="font-mono text-[9px] text-gray-500 text-center leading-snug px-2 truncate w-full">
+                        {Path.basename(photo.file_path || "")}
+                      </p>
+                      <button
+                        phx-click="restore_photo"
+                        phx-value-id={photo.id}
+                        class="font-sans text-[10px] uppercase tracking-widest text-[#fcfbf9] border border-gray-500 hover:border-white px-4 py-2 transition-colors"
+                      >
+                        Restore
+                      </button>
+                      <button
+                        phx-click="delete_photo"
+                        phx-value-id={photo.id}
+                        data-confirm="Hard-delete this photo (file + row)?"
+                        class="font-sans text-[9px] uppercase tracking-widest text-gray-600 hover:text-red-400 transition-colors"
+                      >
+                        delete forever
+                      </button>
                     </div>
                   <% true -> %>
-                <% end %>
-                <%= if photo.project do %>
-                  <div class="bg-[#fcfbf9]/90 border border-gray-300 font-sans text-[9px] uppercase tracking-wider px-2 py-0.5 text-gray-500 max-w-[80px] truncate">
-                    <%= photo.project %>
-                  </div>
-                <% end %>
-              </div>
-
-              <%!-- Hover overlay — failed variant --%>
-              <%= cond do %>
-                <% photo.curation_status == "failed" -> %>
-                <div class="absolute inset-0 bg-[#111111]/85 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity duration-300 flex flex-col justify-center items-center gap-3 p-4">
-                  <p class="font-sans text-[10px] uppercase tracking-widest text-red-400 text-center">Curation failed</p>
-                  <%= if photo.failure_reason && photo.failure_reason != "" do %>
-                    <p class="font-mono text-[9px] text-gray-400 text-center leading-snug px-2 truncate w-full"><%= photo.failure_reason %></p>
-                  <% end %>
-                  <button
-                    phx-click="retry_photo"
-                    phx-value-id={photo.id}
-                    class="font-sans text-[10px] uppercase tracking-widest text-[#fcfbf9] border border-gray-500 hover:border-white px-4 py-2 transition-colors"
-                  >
-                    Retry
-                  </button>
-                  <button
-                    phx-click="delete_photo"
-                    phx-value-id={photo.id}
-                    data-confirm="Remove this photo?"
-                    class="font-sans text-[9px] uppercase tracking-widest text-gray-600 hover:text-red-400 transition-colors"
-                  >
-                    discard
-                  </button>
-                </div>
-
-                <% photo.curation_status == "rejected" -> %>
-                <div class="absolute inset-0 bg-[#111111]/85 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity duration-300 flex flex-col justify-center items-center gap-3 p-4">
-                  <p class="font-sans text-[10px] uppercase tracking-widest text-red-400 text-center">Rejected</p>
-                  <p class="font-mono text-[9px] text-gray-500 text-center leading-snug px-2 truncate w-full"><%= Path.basename(photo.file_path || "") %></p>
-                  <button
-                    phx-click="restore_photo"
-                    phx-value-id={photo.id}
-                    class="font-sans text-[10px] uppercase tracking-widest text-[#fcfbf9] border border-gray-500 hover:border-white px-4 py-2 transition-colors"
-                  >
-                    Restore
-                  </button>
-                  <button
-                    phx-click="delete_photo"
-                    phx-value-id={photo.id}
-                    data-confirm="Hard-delete this photo (file + row)?"
-                    class="font-sans text-[9px] uppercase tracking-widest text-gray-600 hover:text-red-400 transition-colors"
-                  >
-                    delete forever
-                  </button>
-                </div>
-
-                <% true -> %>
-              <%!-- Hover overlay — normal variant --%>
-              <div class="absolute inset-0 bg-[#111111]/80 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity duration-300 flex flex-col justify-end p-4">
-
-                <button
-                  phx-click="delete_photo"
-                  phx-value-id={photo.id}
-                  data-confirm="Remove this photo from the archive?"
-                  class="absolute top-2 left-2 font-sans text-[9px] uppercase tracking-widest text-gray-600 hover:text-red-400 border border-gray-800 hover:border-red-600 px-2 py-1 transition-colors"
-                >
-                  delete
-                </button>
-
-                <p class="text-[#fcfbf9] font-serif text-sm leading-snug mb-1"><%= photo.subject %></p>
-
-                <%!-- Score breakdown --%>
-                <div class="flex items-center gap-1.5 mt-1 mb-1 flex-wrap">
-                  <%= if vibe do %>
-                    <span class="font-sans text-[9px] uppercase tracking-wider text-gray-400 border border-gray-700 px-1.5 py-0.5">vibe <%= vibe %></span>
-                  <% end %>
-                  <%= if photo.preference_score do %>
-                    <span class="font-sans text-[9px] uppercase tracking-wider text-gray-400 border border-gray-700 px-1.5 py-0.5">pref <%= photo.preference_score %></span>
-                  <% end %>
-                  <%= if photo.technical_score do %>
-                    <span class="font-sans text-[9px] uppercase tracking-wider text-gray-400 border border-gray-700 px-1.5 py-0.5">tech <%= photo.technical_score %></span>
-                  <% end %>
-                  <%= if photo.content_type do %>
-                    <span class="font-sans text-[9px] uppercase tracking-wider text-gray-500"><%= photo.content_type %></span>
-                  <% end %>
-                </div>
-
-                <div class="flex flex-wrap gap-1 mt-1">
-                  <%= for tag <- photo.suggested_tags do %>
-                    <button
-                      phx-click="delete_tag"
-                      phx-value-id={photo.id}
-                      phx-value-tag={tag}
-                      class="group/tag font-sans text-[10px] uppercase tracking-wider border border-gray-600 text-gray-400 px-1.5 py-0.5 hover:border-red-500 hover:text-red-400 transition-colors flex items-center gap-1"
-                    >
-                      <%= String.downcase(tag) %><span class="opacity-0 group-hover/tag:opacity-100 transition-opacity leading-none">×</span>
-                    </button>
-                  <% end %>
-                  <input
-                    type="text"
-                    placeholder="+ tag"
-                    maxlength="30"
-                    phx-keyup="add_tag"
-                    phx-key="Enter"
-                    phx-value-id={photo.id}
-                    name="tag"
-                    class="font-sans text-[10px] uppercase tracking-wider border border-gray-700 border-dashed text-gray-500 bg-transparent px-1.5 py-0.5 w-16 focus:outline-none focus:border-gray-400 focus:text-gray-300 placeholder-gray-700"
-                  />
-                </div>
-
-                <div class="flex items-center justify-between mt-3">
-                  <div class="flex gap-1">
-                    <%= for star <- 1..5 do %>
+                    <%!-- Hover overlay — normal variant --%>
+                    <div class="absolute inset-0 bg-[#111111]/80 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity duration-300 flex flex-col justify-end p-4">
                       <button
-                        phx-click="rate"
+                        phx-click="delete_photo"
                         phx-value-id={photo.id}
-                        phx-value-rating={star}
-                        class={[
-                          "text-lg leading-none transition-colors",
-                          photo.user_rating && photo.user_rating >= star && "text-[#fcfbf9]",
-                          !(photo.user_rating && photo.user_rating >= star) && "text-gray-600 hover:text-gray-300"
-                        ]}
-                      >★</button>
-                    <% end %>
-                  </div>
-                  <button
-                    phx-click="toggle_match"
-                    phx-value-id={photo.id}
-                    title="Chef's pick — manual override, independent of the preference score"
-                    class={[
-                      "font-sans text-[10px] uppercase tracking-widest px-2 py-1 transition-colors",
-                      photo.manual_match && "bg-amber-400 text-[#111111] border border-amber-400 hover:bg-amber-300",
-                      !photo.manual_match && "text-gray-500 border border-gray-700 hover:border-amber-400 hover:text-amber-300"
-                    ]}
-                  >
-                    <%= if photo.manual_match, do: "★ picked", else: "☆ pick" %>
-                  </button>
-                </div>
+                        data-confirm="Remove this photo from the archive?"
+                        class="absolute top-2 left-2 font-sans text-[9px] uppercase tracking-widest text-gray-600 hover:text-red-400 border border-gray-800 hover:border-red-600 px-2 py-1 transition-colors"
+                      >
+                        delete
+                      </button>
 
-                <form phx-submit="set_project" class="mt-2 flex gap-1">
-                  <input type="hidden" name="_id" value={photo.id} />
-                  <input
-                    type="text"
-                    name="project"
-                    value={photo.project || ""}
-                    placeholder="project..."
-                    class="flex-1 bg-transparent border-b border-gray-600 text-gray-300 font-sans text-xs px-1 py-0.5 focus:outline-none focus:border-gray-300 placeholder-gray-600"
-                  />
-                  <button type="submit" class="text-gray-500 hover:text-gray-200 font-sans text-xs px-1 uppercase tracking-wider">set</button>
-                </form>
+                      <p class="text-[#fcfbf9] font-serif text-sm leading-snug mb-1">
+                        {photo.subject}
+                      </p>
+
+                      <%!-- Score breakdown --%>
+                      <div class="flex items-center gap-1.5 mt-1 mb-1 flex-wrap">
+                        <%= if vibe do %>
+                          <span class="font-sans text-[9px] uppercase tracking-wider text-gray-400 border border-gray-700 px-1.5 py-0.5">
+                            vibe {vibe}
+                          </span>
+                        <% end %>
+                        <%= if photo.preference_score do %>
+                          <span class="font-sans text-[9px] uppercase tracking-wider text-gray-400 border border-gray-700 px-1.5 py-0.5">
+                            pref {photo.preference_score}
+                          </span>
+                        <% end %>
+                        <%= if photo.technical_score do %>
+                          <span class="font-sans text-[9px] uppercase tracking-wider text-gray-400 border border-gray-700 px-1.5 py-0.5">
+                            tech {photo.technical_score}
+                          </span>
+                        <% end %>
+                        <%= if photo.content_type do %>
+                          <span class="font-sans text-[9px] uppercase tracking-wider text-gray-500">
+                            {photo.content_type}
+                          </span>
+                        <% end %>
+                      </div>
+
+                      <div class="flex flex-wrap gap-1 mt-1">
+                        <%= for tag <- photo.suggested_tags do %>
+                          <button
+                            phx-click="delete_tag"
+                            phx-value-id={photo.id}
+                            phx-value-tag={tag}
+                            class="group/tag font-sans text-[10px] uppercase tracking-wider border border-gray-600 text-gray-400 px-1.5 py-0.5 hover:border-red-500 hover:text-red-400 transition-colors flex items-center gap-1"
+                          >
+                            {String.downcase(tag)}<span class="opacity-0 group-hover/tag:opacity-100 transition-opacity leading-none">×</span>
+                          </button>
+                        <% end %>
+                        <input
+                          type="text"
+                          placeholder="+ tag"
+                          maxlength="30"
+                          phx-keyup="add_tag"
+                          phx-key="Enter"
+                          phx-value-id={photo.id}
+                          name="tag"
+                          class="font-sans text-[10px] uppercase tracking-wider border border-gray-700 border-dashed text-gray-500 bg-transparent px-1.5 py-0.5 w-16 focus:outline-none focus:border-gray-400 focus:text-gray-300 placeholder-gray-700"
+                        />
+                      </div>
+
+                      <div class="flex items-center justify-between mt-3">
+                        <div class="flex gap-1">
+                          <%= for star <- 1..5 do %>
+                            <button
+                              phx-click="rate"
+                              phx-value-id={photo.id}
+                              phx-value-rating={star}
+                              class={[
+                                "text-lg leading-none transition-colors",
+                                photo.user_rating && photo.user_rating >= star && "text-[#fcfbf9]",
+                                !(photo.user_rating && photo.user_rating >= star) &&
+                                  "text-gray-600 hover:text-gray-300"
+                              ]}
+                            >
+                              ★
+                            </button>
+                          <% end %>
+                        </div>
+                        <button
+                          phx-click="toggle_match"
+                          phx-value-id={photo.id}
+                          title="Chef's pick — manual override, independent of the preference score"
+                          class={[
+                            "font-sans text-[10px] uppercase tracking-widest px-2 py-1 transition-colors",
+                            photo.manual_match &&
+                              "bg-amber-400 text-[#111111] border border-amber-400 hover:bg-amber-300",
+                            !photo.manual_match &&
+                              "text-gray-500 border border-gray-700 hover:border-amber-400 hover:text-amber-300"
+                          ]}
+                        >
+                          {if photo.manual_match, do: "★ picked", else: "☆ pick"}
+                        </button>
+                      </div>
+
+                      <form phx-submit="set_project" class="mt-2 flex gap-1">
+                        <input type="hidden" name="_id" value={photo.id} />
+                        <input
+                          type="text"
+                          name="project"
+                          value={photo.project || ""}
+                          placeholder="project..."
+                          class="flex-1 bg-transparent border-b border-gray-600 text-gray-300 font-sans text-xs px-1 py-0.5 focus:outline-none focus:border-gray-300 placeholder-gray-600"
+                        />
+                        <button
+                          type="submit"
+                          class="text-gray-500 hover:text-gray-200 font-sans text-xs px-1 uppercase tracking-wider"
+                        >
+                          set
+                        </button>
+                      </form>
+                    </div>
+                <% end %>
               </div>
+            <% end %>
+          </div>
+
+          <%!-- Pagination --%>
+          <%= if @pages > 1 do %>
+            <div class="mt-12 flex items-center justify-center gap-2 font-sans text-xs uppercase tracking-widest">
+              <%= if @page > 1 do %>
+                <button
+                  phx-click="page"
+                  phx-value-n={@page - 1}
+                  class="border border-gray-300 px-4 py-2 hover:border-[#111111] transition-colors"
+                >
+                  ← Prev
+                </button>
+              <% end %>
+              <span class="px-4 py-2 text-gray-400">
+                {@page} / {@pages}
+              </span>
+              <%= if @page < @pages do %>
+                <button
+                  phx-click="page"
+                  phx-value-n={@page + 1}
+                  class="border border-gray-300 px-4 py-2 hover:border-[#111111] transition-colors"
+                >
+                  Next →
+                </button>
               <% end %>
             </div>
           <% end %>
-        </div>
-
-        <%!-- Pagination --%>
-        <%= if @pages > 1 do %>
-          <div class="mt-12 flex items-center justify-center gap-2 font-sans text-xs uppercase tracking-widest">
-            <%= if @page > 1 do %>
-              <button phx-click="page" phx-value-n={@page - 1} class="border border-gray-300 px-4 py-2 hover:border-[#111111] transition-colors">← Prev</button>
-            <% end %>
-            <span class="px-4 py-2 text-gray-400">
-              <%= @page %> / <%= @pages %>
-            </span>
-            <%= if @page < @pages do %>
-              <button phx-click="page" phx-value-n={@page + 1} class="border border-gray-300 px-4 py-2 hover:border-[#111111] transition-colors">Next →</button>
-            <% end %>
-          </div>
         <% end %>
       <% end %>
-      <% end %><%!-- /if @filter != :bursts --%>
-
+      <%!-- /if @filter != :bursts --%>
     </div>
     """
   end

@@ -266,7 +266,7 @@ c2-run: c2-services
 		exit 1; \
 	fi; \
 	UPLOADS=$$(pwd)/orchestrator/priv/static/uploads; \
-	DATABASE_URL='ecto://postgres:postgres_password@localhost:5432/photo_curator_dev' \
+	DATABASE_PATH="$$(pwd)/orchestrator/priv/fineshyt.db" \
 	SECRET_KEY_BASE="$$SECRET" \
 	PHX_HOST=localhost \
 	PHX_SCHEME=http \
@@ -275,7 +275,7 @@ c2-run: c2-services
 	AI_WORKER_URL=http://localhost:8000 \
 	STATIC_UPLOADS_DIR="$$UPLOADS" \
 	./orchestrator/_build/prod/rel/orchestrator/bin/migrate && \
-	DATABASE_URL='ecto://postgres:postgres_password@localhost:5432/photo_curator_dev' \
+	DATABASE_PATH="$$(pwd)/orchestrator/priv/fineshyt.db" \
 	SECRET_KEY_BASE="$$SECRET" \
 	PHX_HOST=localhost \
 	PHX_SCHEME=http \

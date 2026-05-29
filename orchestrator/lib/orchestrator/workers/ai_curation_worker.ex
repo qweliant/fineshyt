@@ -72,9 +72,11 @@ defmodule Orchestrator.Workers.AiCurationWorker do
       PubSub topic.
   """
   @impl Oban.Worker
-  def perform(%Oban.Job{
-        args: %{"file_path" => file_path, "ref" => ref} = args
-      } = job) do
+  def perform(
+        %Oban.Job{
+          args: %{"file_path" => file_path, "ref" => ref} = args
+        } = job
+      ) do
     Logger.info("Starting AI curation for #{file_path}...")
 
     source = Map.get(args, "source", "upload")
@@ -101,11 +103,13 @@ defmodule Orchestrator.Workers.AiCurationWorker do
 
         if Photos.already_processed?(dest) do
           Logger.info("Skipping #{basename} — already processed.")
+
           Phoenix.PubSub.broadcast(
             Orchestrator.PubSub,
             "photo_updates",
             {:curation_skipped, ref, basename}
           )
+
           :ok
         else
           image_binary = File.read!(dest)
@@ -161,26 +165,33 @@ defmodule Orchestrator.Workers.AiCurationWorker do
               end
 
               Logger.info("AI Curation successful for #{basename}!")
+
               Phoenix.PubSub.broadcast(
                 Orchestrator.PubSub,
                 "photo_updates",
                 {:curation_complete, ref, metadata, basename}
               )
+
               :ok
 
             {:ok, %Req.Response{status: status, body: body}} ->
               detail = format_api_error(body)
-              Logger.error(
-                "Python API failed for #{basename} with status #{status}: #{detail}"
+              Logger.error("Python API failed for #{basename} with status #{status}: #{detail}")
+
+              record_error(job, basename, "API #{status}: #{detail}",
+                status: status,
+                detail: body
               )
-              record_error(job, basename, "API #{status}: #{detail}", status: status, detail: body)
+
               {:error, "API #{status}: #{detail}"}
 
             {:error, reason} ->
-              Logger.error(
-                "Failed to reach AI service for #{basename}: #{inspect(reason)}"
+              Logger.error("Failed to reach AI service for #{basename}: #{inspect(reason)}")
+
+              record_error(job, basename, "Transport: #{inspect(reason)}",
+                detail: %{transport: inspect(reason)}
               )
-              record_error(job, basename, "Transport: #{inspect(reason)}", detail: %{transport: inspect(reason)})
+
               {:error, inspect(reason)}
           end
         end
@@ -188,11 +199,20 @@ defmodule Orchestrator.Workers.AiCurationWorker do
         e ->
           msg = Exception.message(e)
           Logger.error("AI curation raised an exception: #{msg}")
-          record_error(job, basename, "Exception: #{msg}", detail: %{exception: inspect(e), stacktrace: Exception.format_stacktrace(__STACKTRACE__)})
+
+          record_error(job, basename, "Exception: #{msg}",
+            detail: %{
+              exception: inspect(e),
+              stacktrace: Exception.format_stacktrace(__STACKTRACE__)
+            }
+          )
+
           {:error, msg}
       end
 
-    if result != :ok, do: maybe_broadcast_failure(ref, job, dest, basename, source, project, result)
+    if result != :ok,
+      do: maybe_broadcast_failure(ref, job, dest, basename, source, project, result)
+
     result
   end
 
@@ -232,14 +252,24 @@ defmodule Orchestrator.Workers.AiCurationWorker do
     })
   end
 
-  defp maybe_broadcast_failure(ref, %Oban.Job{attempt: attempt, max_attempts: max}, dest, basename, source, project, result) do
-    reason = case result do
-      {:error, r} -> r
-      _ -> "unknown error"
-    end
+  defp maybe_broadcast_failure(
+         ref,
+         %Oban.Job{attempt: attempt, max_attempts: max},
+         dest,
+         basename,
+         source,
+         project,
+         result
+       ) do
+    reason =
+      case result do
+        {:error, r} -> r
+        _ -> "unknown error"
+      end
 
     if attempt >= max do
       Logger.info("All attempts exhausted for #{basename}, persisting failure.")
+
       Photos.create_failed(%{
         file_path: dest,
         url: "/uploads/#{basename}",
@@ -257,12 +287,14 @@ defmodule Orchestrator.Workers.AiCurationWorker do
   end
 
   defp parse_captured_at(nil), do: nil
+
   defp parse_captured_at(str) when is_binary(str) do
     case NaiveDateTime.from_iso8601(str) do
       {:ok, ndt} -> ndt
       _ -> nil
     end
   end
+
   defp parse_captured_at(_), do: nil
 
   # ---- XMP sidecar helpers --------------------------------------------
@@ -274,8 +306,12 @@ defmodule Orchestrator.Workers.AiCurationWorker do
 
   defp read_sidecar(source_path) do
     case Orchestrator.Sidecars.read(source_path) do
-      {:ok, meta} -> meta
-      :none -> %{}
+      {:ok, meta} ->
+        meta
+
+      :none ->
+        %{}
+
       {:error, reason} ->
         Logger.warning("XMP sidecar read failed for #{source_path}: #{inspect(reason)}")
         %{}

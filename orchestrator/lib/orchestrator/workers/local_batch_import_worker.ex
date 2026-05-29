@@ -49,9 +49,9 @@ defmodule Orchestrator.Workers.LocalBatchImportWorker do
 
         %{
           "file_path" => file_path,
-          "ref"       => ref,
-          "source"    => "local",
-          "project"   => project
+          "ref" => ref,
+          "source" => "local",
+          "project" => project
         }
         |> Orchestrator.Workers.ConversionWorker.new()
         |> Oban.insert()

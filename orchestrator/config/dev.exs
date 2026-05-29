@@ -1,14 +1,13 @@
 import Config
 
-# Configure your database
+# Configure your database (SQLite — file lives in priv/, created on migrate)
 config :orchestrator, Orchestrator.Repo,
-  username: "postgres",
-  password: "postgres_password",
-  hostname: "localhost",
-  database: "photo_curator_dev",
+  database: Path.expand("../priv/orchestrator_dev.db", __DIR__),
+  journal_mode: :wal,
+  busy_timeout: 5_000,
+  pool_size: 5,
   stacktrace: true,
-  show_sensitive_data_on_connection_error: true,
-  pool_size: 10
+  show_sensitive_data_on_connection_error: true
 
 # For development, we disable any cache and enable
 # debugging and code reloading.

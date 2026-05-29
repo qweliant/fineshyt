@@ -72,16 +72,21 @@ defmodule Orchestrator.Workers.PreferenceTrainWorker do
     samples = Photos.list_rated_with_embeddings()
 
     if length(samples) < @min_samples do
-      Logger.info("PreferenceTrainWorker: skipping (#{length(samples)} < #{@min_samples} samples, trigger=#{trigger})")
+      Logger.info(
+        "PreferenceTrainWorker: skipping (#{length(samples)} < #{@min_samples} samples, trigger=#{trigger})"
+      )
+
       :ok
     else
-      Logger.info("PreferenceTrainWorker: training on #{length(samples)} samples (trigger=#{trigger})")
+      Logger.info(
+        "PreferenceTrainWorker: training on #{length(samples)} samples (trigger=#{trigger})"
+      )
 
       payload = %{
         min_samples: @min_samples,
         samples:
           Enum.map(samples, fn {_id, vec, rating} ->
-            %{embedding: Pgvector.to_list(vec), rating: rating}
+            %{embedding: vec, rating: rating}
           end)
       }
 
@@ -101,6 +106,7 @@ defmodule Orchestrator.Workers.PreferenceTrainWorker do
                 "photo_updates",
                 {:preference_scores_updated, version}
               )
+
               :ok
 
             {:error, reason} ->
@@ -111,12 +117,21 @@ defmodule Orchestrator.Workers.PreferenceTrainWorker do
         {:ok, %Req.Response{status: status, body: body}} ->
           detail = get_in(body, ["detail"]) || "status #{status}"
           Logger.error("Preference train API failed: #{inspect(detail)}")
-          record_error(job, "train", "API #{status}: #{inspect(detail)}", status: status, detail: body)
+
+          record_error(job, "train", "API #{status}: #{inspect(detail)}",
+            status: status,
+            detail: body
+          )
+
           {:error, inspect(detail)}
 
         {:error, reason} ->
           Logger.error("Could not reach preference train API: #{inspect(reason)}")
-          record_error(job, "train", "Transport: #{inspect(reason)}", detail: %{transport: inspect(reason)})
+
+          record_error(job, "train", "Transport: #{inspect(reason)}",
+            detail: %{transport: inspect(reason)}
+          )
+
           {:error, inspect(reason)}
       end
     end
@@ -128,7 +143,7 @@ defmodule Orchestrator.Workers.PreferenceTrainWorker do
         :ok
 
       rows ->
-        embeddings = Enum.map(rows, fn {_id, vec} -> Pgvector.to_list(vec) end)
+        embeddings = Enum.map(rows, fn {_id, vec} -> vec end)
 
         case Req.post(Orchestrator.AiWorker.url("/api/v1/preference/score"),
                json: %{embeddings: embeddings},

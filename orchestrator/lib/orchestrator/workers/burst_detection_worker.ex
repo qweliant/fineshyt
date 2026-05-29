@@ -51,7 +51,7 @@ defmodule Orchestrator.Workers.BurstDetectionWorker do
           Enum.map(photos, fn {id, vec, sharpness, captured_at} ->
             %{
               id: id,
-              embedding: Pgvector.to_list(vec),
+              embedding: vec,
               sharpness_score: sharpness || 0,
               captured_at: if(captured_at, do: NaiveDateTime.to_iso8601(captured_at))
             }

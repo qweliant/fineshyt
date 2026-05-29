@@ -12,6 +12,11 @@ defmodule Orchestrator.Application do
     # ensure_uploads_symlink/0 below for the why.
     ensure_uploads_symlink()
 
+    # The SQLite file's parent dir (e.g. ~/Library/Application Support/Fine.Shyt)
+    # may not exist yet on a fresh install. ecto_sqlite3 creates the db file
+    # but not intermediate dirs, so make them before the Repo starts.
+    ensure_db_dir()
+
     children = [
       OrchestratorWeb.Telemetry,
       Orchestrator.Repo,
@@ -58,6 +63,15 @@ defmodule Orchestrator.Application do
         existing_target = File.read_link(priv_link)
 
         cond do
+          # priv_link already resolves to the SAME physical directory as
+          # `configured` (same device+inode). This happens when running from
+          # the source tree — Mix symlinks _build/.../priv to the source priv,
+          # so :code.priv_dir already points at the configured uploads dir.
+          # Without this guard the `File.dir?` branch below would drain and
+          # `rm_rf!` the directory onto itself, destroying the uploads. Bail.
+          same_directory?(priv_link, configured) ->
+            :ok
+
           # Already pointing where we want — nothing to do.
           match?({:ok, ^configured}, existing_target) ->
             :ok
@@ -74,6 +88,7 @@ defmodule Orchestrator.Application do
             for entry <- File.ls!(priv_link) do
               src = Path.join(priv_link, entry)
               dst = Path.join(configured, entry)
+
               unless File.exists?(dst) do
                 File.rename(src, dst)
               end
@@ -87,6 +102,32 @@ defmodule Orchestrator.Application do
             File.ln_s!(configured, priv_link)
         end
 
+        :ok
+    end
+  end
+
+  # True when both paths exist and refer to the same physical directory
+  # (same device + inode), following symlinks. Used to avoid operating on a
+  # uploads dir that's already the configured target.
+  defp same_directory?(a, b) do
+    case {File.stat(a), File.stat(b)} do
+      {{:ok, sa}, {:ok, sb}} ->
+        sa.inode == sb.inode and sa.major_device == sb.major_device
+
+      _ ->
+        false
+    end
+  end
+
+  # Ensure the parent directory of the configured SQLite database exists.
+  # ecto_sqlite3 creates the db file itself but not intermediate dirs, which
+  # matters for the prod default under a per-user data dir.
+  defp ensure_db_dir do
+    case Application.get_env(:orchestrator, Orchestrator.Repo)[:database] do
+      path when is_binary(path) and path != "" ->
+        File.mkdir_p!(Path.dirname(Path.expand(path)))
+
+      _ ->
         :ok
     end
   end

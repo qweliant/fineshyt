@@ -59,3 +59,8 @@ npm-debug.log
 /priv/static/uploads/*.pef
 /priv/static/uploads/*.srw
 
+# SQLite databases (since C3) — dev/test/runtime db files + WAL/SHM sidecars.
+/priv/*.db
+/priv/*.db-shm
+/priv/*.db-wal
+

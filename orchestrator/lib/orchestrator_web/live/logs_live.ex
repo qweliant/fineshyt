@@ -77,7 +77,8 @@ defmodule OrchestratorWeb.LogsLive do
   end
 
   def handle_info(:error_log_cleared, socket) do
-    {:noreply, socket |> assign(:entries, []) |> assign(:total, 0) |> assign(:expanded, MapSet.new())}
+    {:noreply,
+     socket |> assign(:entries, []) |> assign(:total, 0) |> assign(:expanded, MapSet.new())}
   end
 
   def handle_info(_, socket), do: {:noreply, socket}
@@ -129,7 +130,9 @@ defmodule OrchestratorWeb.LogsLive do
 
   defp visible_entries(entries, :all), do: entries
   defp visible_entries(entries, :ai), do: Enum.filter(entries, &(&1.worker == "AiCurationWorker"))
-  defp visible_entries(entries, :conversion), do: Enum.filter(entries, &(&1.worker == "ConversionWorker"))
+
+  defp visible_entries(entries, :conversion),
+    do: Enum.filter(entries, &(&1.worker == "ConversionWorker"))
 
   defp format_at(%NaiveDateTime{} = dt), do: Calendar.strftime(dt, "%Y-%m-%d %H:%M:%S UTC")
   defp format_at(%DateTime{} = dt), do: Calendar.strftime(dt, "%Y-%m-%d %H:%M:%S UTC")
@@ -172,19 +175,25 @@ defmodule OrchestratorWeb.LogsLive do
       <%!-- Header --%>
       <header class="mb-12 border-b-[3px] border-[#111111] pb-6 flex flex-col md:flex-row md:items-end justify-between">
         <div>
-          <h1 class="text-6xl md:text-8xl font-black tracking-tight leading-none">ERROR<br/>LOG.</h1>
+          <h1 class="text-6xl md:text-8xl font-black tracking-tight leading-none">ERROR<br />LOG.</h1>
           <p class="mt-4 text-lg font-light italic text-gray-600">
             Worker failures, freshest first.
             <span class="font-sans text-sm not-italic text-gray-400">
-              showing <%= length(@entries) %> of <%= @total %> persisted
+              showing {length(@entries)} of {@total} persisted
             </span>
           </p>
         </div>
         <div class="mt-6 md:mt-0 font-sans uppercase tracking-widest text-xs flex gap-6">
-          <.link navigate={~p"/"} class="border-b border-gray-400 pb-0.5 hover:text-gray-500 hover:border-gray-500 transition-colors">
+          <.link
+            navigate={~p"/"}
+            class="border-b border-gray-400 pb-0.5 hover:text-gray-500 hover:border-gray-500 transition-colors"
+          >
             Ingest
           </.link>
-          <.link navigate={~p"/gallery"} class="border-b border-gray-400 pb-0.5 hover:text-gray-500 hover:border-gray-500 transition-colors">
+          <.link
+            navigate={~p"/gallery"}
+            class="border-b border-gray-400 pb-0.5 hover:text-gray-500 hover:border-gray-500 transition-colors"
+          >
             Gallery
           </.link>
         </div>
@@ -192,7 +201,9 @@ defmodule OrchestratorWeb.LogsLive do
 
       <%!-- Filter + actions --%>
       <div class="flex items-center gap-2 mb-8 flex-wrap">
-        <span class="font-sans text-[9px] uppercase tracking-widest text-gray-400 shrink-0">Worker</span>
+        <span class="font-sans text-[9px] uppercase tracking-widest text-gray-400 shrink-0">
+          Worker
+        </span>
         <%= for {label, value, atom} <- [
           {"All", "all", :all},
           {"AI Curation", "AiCurationWorker", :ai},
@@ -204,16 +215,21 @@ defmodule OrchestratorWeb.LogsLive do
             class={[
               "font-sans text-[10px] uppercase tracking-wider px-3 py-1 border transition-colors",
               @worker_filter == atom && "border-[#111111] text-[#111111]",
-              @worker_filter != atom && "border-gray-200 text-gray-400 hover:border-gray-500 hover:text-gray-700"
+              @worker_filter != atom &&
+                "border-gray-200 text-gray-400 hover:border-gray-500 hover:text-gray-700"
             ]}
-          ><%= label %></button>
+          >
+            {label}
+          </button>
         <% end %>
         <div class="flex-1"></div>
         <button
           phx-click="clear"
           data-confirm="Clear all error log entries?"
           class="font-sans text-[10px] uppercase tracking-widest text-red-700 border border-red-300 px-3 py-1.5 hover:border-red-600 transition-colors"
-        >Clear</button>
+        >
+          Clear
+        </button>
       </div>
 
       <% visible = visible_entries(@entries, @worker_filter) %>
@@ -233,38 +249,40 @@ defmodule OrchestratorWeb.LogsLive do
                 class="w-full text-left px-4 py-3 flex items-start gap-4 hover:bg-gray-50 transition-colors"
               >
                 <span class="font-mono text-[10px] text-gray-400 shrink-0 mt-1 tabular-nums">
-                  <%= format_at(entry.inserted_at) %>
+                  {format_at(entry.inserted_at)}
                 </span>
                 <span class="font-sans text-[10px] uppercase tracking-wider text-gray-600 border border-gray-300 px-2 py-0.5 shrink-0 mt-0.5">
-                  <%= entry.worker %>
+                  {entry.worker}
                 </span>
                 <%= if entry.status do %>
                   <span class={[
                     "font-mono text-[10px] uppercase tracking-wider px-2 py-0.5 border shrink-0 mt-0.5",
                     status_class(entry.status)
                   ]}>
-                    <%= entry.status %>
+                    {entry.status}
                   </span>
                 <% end %>
                 <%= if entry.attempt && entry.max_attempts do %>
                   <span class="font-mono text-[10px] text-gray-400 shrink-0 mt-0.5">
-                    <%= entry.attempt %>/<%= entry.max_attempts %>
+                    {entry.attempt}/{entry.max_attempts}
                   </span>
                 <% end %>
                 <span class="flex-1 min-w-0">
                   <%= if entry.file do %>
-                    <span class="font-mono text-[11px] text-gray-700 mr-2"><%= entry.file %></span>
+                    <span class="font-mono text-[11px] text-gray-700 mr-2">{entry.file}</span>
                   <% end %>
-                  <span class="font-sans text-[12px] text-[#111111] break-words"><%= entry.reason %></span>
+                  <span class="font-sans text-[12px] text-[#111111] break-words">{entry.reason}</span>
                 </span>
                 <span class="font-sans text-[9px] uppercase tracking-widest text-gray-400 shrink-0 mt-1">
-                  <%= if expanded?, do: "−", else: "+" %>
+                  {if expanded?, do: "−", else: "+"}
                 </span>
               </button>
 
               <%= if expanded? do %>
                 <div class="border-t border-gray-200 bg-gray-50 px-4 py-3">
-                  <p class="font-sans text-[9px] uppercase tracking-widest text-gray-400 mb-2">Detail</p>
+                  <p class="font-sans text-[9px] uppercase tracking-widest text-gray-400 mb-2">
+                    Detail
+                  </p>
                   <pre class="font-mono text-[11px] text-gray-700 whitespace-pre-wrap break-words leading-snug"><%= pretty_detail(entry.detail) %></pre>
                 </div>
               <% end %>

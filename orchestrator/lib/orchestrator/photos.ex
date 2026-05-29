@@ -108,10 +108,10 @@ defmodule Orchestrator.Photos do
       Orchestrator.Photos.list_photos(filter: :for_projects, sort: :rating_desc)
   """
   def list_photos(opts \\ []) do
-    page    = Keyword.get(opts, :page, 1)
-    filter  = Keyword.get(opts, :filter, :all)
-    sort    = Keyword.get(opts, :sort, :newest)
-    search  = Keyword.get(opts, :search, "")
+    page = Keyword.get(opts, :page, 1)
+    filter = Keyword.get(opts, :filter, :all)
+    sort = Keyword.get(opts, :sort, :newest)
+    search = Keyword.get(opts, :search, "")
     project = Keyword.get(opts, :project, nil)
 
     base_query(filter)
@@ -142,8 +142,8 @@ defmodule Orchestrator.Photos do
       Orchestrator.Photos.count_photos(filter: :rejected)
   """
   def count_photos(opts \\ []) do
-    filter  = Keyword.get(opts, :filter, :all)
-    search  = Keyword.get(opts, :search, "")
+    filter = Keyword.get(opts, :filter, :all)
+    search = Keyword.get(opts, :search, "")
     project = Keyword.get(opts, :project, nil)
 
     base_query(filter)
@@ -151,6 +151,47 @@ defmodule Orchestrator.Photos do
     |> apply_project_filter(project)
     |> apply_search(search)
     |> Repo.aggregate(:count)
+  end
+
+  @doc """
+  Lightweight projection of the filtered photo set for vibe ranking.
+
+  Returns `{id, suggested_tags, preference_score}` tuples only — crucially NOT
+  full `%Photo{}` structs, so the whole library can be ranked by `vibe_score`
+  without loading + decoding every `clip_embedding` blob on each gallery
+  render. The gallery sorts these, slices the page, then loads the 60 full
+  rows via `list_by_ids_ordered/1`.
+
+  Accepts the same `:filter`, `:search`, `:project` opts as `list_photos/1`.
+  """
+  def list_for_vibe_ranking(opts \\ []) do
+    filter = Keyword.get(opts, :filter, :all)
+    search = Keyword.get(opts, :search, "")
+    project = Keyword.get(opts, :project, nil)
+
+    base_query(filter)
+    |> apply_filter(filter)
+    |> apply_project_filter(project)
+    |> apply_search(search)
+    |> select([p], {p.id, p.suggested_tags, p.preference_score})
+    |> Repo.all()
+  end
+
+  @doc """
+  Load full photos for the given ids, returned in the same order as `ids`.
+
+  Used after vibe ranking selects the page's ids, so the displayed order is
+  preserved. Missing ids are dropped.
+  """
+  def list_by_ids_ordered(ids) do
+    by_id =
+      from(p in Photo, where: p.id in ^ids)
+      |> Repo.all()
+      |> Map.new(&{&1.id, &1})
+
+    ids
+    |> Enum.map(&Map.get(by_id, &1))
+    |> Enum.reject(&is_nil/1)
   end
 
   @doc """
@@ -169,13 +210,16 @@ defmodule Orchestrator.Photos do
   """
   def page_size, do: @page_size
 
-  defp base_query(:failed),   do: from(p in Photo, where: p.curation_status == "failed")
+  defp base_query(:failed), do: from(p in Photo, where: p.curation_status == "failed")
   defp base_query(:rejected), do: from(p in Photo, where: p.curation_status == "rejected")
-  defp base_query(_),         do: from(p in Photo, where: p.curation_status not in ["rejected", "failed", "pending"])
 
-  defp apply_filter(q, :all),      do: q
-  defp apply_filter(q, :failed),   do: q
+  defp base_query(_),
+    do: from(p in Photo, where: p.curation_status not in ["rejected", "failed", "pending"])
+
+  defp apply_filter(q, :all), do: q
+  defp apply_filter(q, :failed), do: q
   defp apply_filter(q, :rejected), do: q
+
   defp apply_filter(q, :match),
     do: where(q, [p], p.manual_match == true or p.preference_score >= ^@match_threshold)
 
@@ -187,14 +231,24 @@ defmodule Orchestrator.Photos do
         (p.manual_match == false or is_nil(p.manual_match)) and
           (p.preference_score < ^@match_threshold or is_nil(p.preference_score))
       )
-  defp apply_filter(q, :rated),    do: where(q, [p], not is_nil(p.user_rating))
-  defp apply_filter(q, :unrated),  do: where(q, [p], is_nil(p.user_rating))
-  defp apply_filter(q, :for_projects), do: where(q, [p], not is_nil(p.user_rating) and p.user_rating >= 4 and (is_nil(p.project) or p.project == ""))
-  defp apply_filter(q, _),         do: q
+
+  defp apply_filter(q, :rated), do: where(q, [p], not is_nil(p.user_rating))
+  defp apply_filter(q, :unrated), do: where(q, [p], is_nil(p.user_rating))
+
+  defp apply_filter(q, :for_projects),
+    do:
+      where(
+        q,
+        [p],
+        not is_nil(p.user_rating) and p.user_rating >= 4 and
+          (is_nil(p.project) or p.project == "")
+      )
+
+  defp apply_filter(q, _), do: q
 
   defp apply_project_filter(q, nil), do: q
-  defp apply_project_filter(q, ""),  do: q
-  defp apply_project_filter(q, p),   do: where(q, [photo], photo.project == ^p)
+  defp apply_project_filter(q, ""), do: q
+  defp apply_project_filter(q, p), do: where(q, [photo], photo.project == ^p)
 
   @doc """
   Return all distinct project names assigned to non-rejected photos, sorted
@@ -223,18 +277,27 @@ defmodule Orchestrator.Photos do
   end
 
   defp apply_search(q, ""), do: q
+
   defp apply_search(q, search) do
     term = "%#{search}%"
     where(q, [p], ilike(p.subject, ^term) or ilike(p.artistic_mood, ^term))
   end
 
-  defp apply_sort(q, :newest),          do: order_by(q, [p], desc: p.inserted_at)
-  defp apply_sort(q, :rating_desc),     do: order_by(q, [p], [desc_nulls_last: p.user_rating, desc: p.inserted_at])
-  defp apply_sort(q, :preference_desc), do: order_by(q, [p], [desc_nulls_last: p.preference_score, desc: p.inserted_at])
-  defp apply_sort(q, :preference_asc),  do: order_by(q, [p], [asc_nulls_last: p.preference_score, desc: p.inserted_at])
-  defp apply_sort(q, _),                do: order_by(q, [p], desc: p.inserted_at)
+  defp apply_sort(q, :newest), do: order_by(q, [p], desc: p.inserted_at)
+
+  defp apply_sort(q, :rating_desc),
+    do: order_by(q, [p], desc_nulls_last: p.user_rating, desc: p.inserted_at)
+
+  defp apply_sort(q, :preference_desc),
+    do: order_by(q, [p], desc_nulls_last: p.preference_score, desc: p.inserted_at)
+
+  defp apply_sort(q, :preference_asc),
+    do: order_by(q, [p], asc_nulls_last: p.preference_score, desc: p.inserted_at)
+
+  defp apply_sort(q, _), do: order_by(q, [p], desc: p.inserted_at)
 
   defp paginate(q, :all), do: q
+
   defp paginate(q, page) do
     offset = (page - 1) * @page_size
     q |> limit(@page_size) |> offset(^offset)
@@ -259,12 +322,19 @@ defmodule Orchestrator.Photos do
     * `MapSet.t(String.t())` — stems that already exist.
   """
   def existing_stems(stems) do
+    # SQLite has no regexp_replace/ANY, so derive the stem (basename minus
+    # extension) in Elixir. The non-failed photo set is small (single-user,
+    # ~tens of thousands of rows), so pulling file_paths and filtering in
+    # memory is fine.
+    wanted = MapSet.new(stems)
+
     Repo.all(
       from p in Photo,
-        where: fragment("regexp_replace(regexp_replace(file_path, '^.*/', ''), '\\.[^.]+$', '') = ANY(?)", ^stems)
-          and p.curation_status not in ["failed"],
-        select: fragment("regexp_replace(regexp_replace(file_path, '^.*/', ''), '\\.[^.]+$', '')")
+        where: p.curation_status not in ["failed"],
+        select: p.file_path
     )
+    |> Enum.map(fn path -> path |> Path.basename() |> Path.rootname() end)
+    |> Enum.filter(&MapSet.member?(wanted, &1))
     |> MapSet.new()
   end
 
@@ -284,12 +354,15 @@ defmodule Orchestrator.Photos do
     * `MapSet.t(String.t())` — basenames already on disk and recorded.
   """
   def existing_basenames(basenames) do
-    paths = Enum.map(basenames, fn b ->
-      Path.join([:code.priv_dir(:orchestrator), "static", "uploads", b]) |> to_string()
-    end)
-    Repo.all(from p in Photo,
-      where: p.file_path in ^paths and p.curation_status not in ["failed"],
-      select: p.file_path
+    paths =
+      Enum.map(basenames, fn b ->
+        Path.join([:code.priv_dir(:orchestrator), "static", "uploads", b]) |> to_string()
+      end)
+
+    Repo.all(
+      from p in Photo,
+        where: p.file_path in ^paths and p.curation_status not in ["failed"],
+        select: p.file_path
     )
     |> Enum.map(&Path.basename/1)
     |> MapSet.new()
@@ -398,8 +471,8 @@ defmodule Orchestrator.Photos do
   ## Returns
 
     * `[{id, clip_embedding, user_rating}]` — a list of tuples, where
-      `clip_embedding` is a `%Pgvector{}` you can `Pgvector.to_list/1` to
-      marshal into JSON.
+      `clip_embedding` is already a plain list of floats (via the
+      `Orchestrator.Embedding` Ecto type) ready to marshal into JSON.
   """
   def list_rated_with_embeddings do
     Repo.all(
@@ -461,9 +534,7 @@ defmodule Orchestrator.Photos do
     Repo.transaction(fn ->
       Enum.each(updates, fn {id, score, version} ->
         from(p in Photo, where: p.id == ^id)
-        |> Repo.update_all(
-          set: [preference_score: score, preference_model_version: version]
-        )
+        |> Repo.update_all(set: [preference_score: score, preference_model_version: version])
       end)
     end)
 
@@ -496,8 +567,7 @@ defmodule Orchestrator.Photos do
   def list_photos_needing_quality_scores do
     Repo.all(
       from p in Photo,
-        where:
-          is_nil(p.technical_score) and p.curation_status == "complete",
+        where: is_nil(p.technical_score) and p.curation_status == "complete",
         select: {p.id, p.file_path},
         order_by: [asc: p.id]
     )
@@ -601,7 +671,10 @@ defmodule Orchestrator.Photos do
   """
   def delete_tag(id, tag) do
     photo = get_photo!(id)
-    new_tags = Enum.reject(photo.suggested_tags || [], &(String.downcase(&1) == String.downcase(tag)))
+
+    new_tags =
+      Enum.reject(photo.suggested_tags || [], &(String.downcase(&1) == String.downcase(tag)))
+
     photo |> Photo.changeset(%{suggested_tags: new_tags}) |> Repo.update()
   end
 
@@ -629,9 +702,11 @@ defmodule Orchestrator.Photos do
   """
   def delete_photo(id) do
     photo = get_photo!(id)
+
     if photo.file_path && File.exists?(photo.file_path) do
       File.rm(photo.file_path)
     end
+
     photo
     |> Photo.changeset(%{curation_status: "rejected", url: nil})
     |> Repo.update()
@@ -770,7 +845,10 @@ defmodule Orchestrator.Photos do
     {n, _} =
       Repo.update_all(
         from(p in Photo, where: p.id in ^ids),
-        set: [project: project, updated_at: NaiveDateTime.utc_now() |> NaiveDateTime.truncate(:second)]
+        set: [
+          project: project,
+          updated_at: NaiveDateTime.utc_now() |> NaiveDateTime.truncate(:second)
+        ]
       )
 
     {:ok, n}
@@ -800,7 +878,10 @@ defmodule Orchestrator.Photos do
     {n, _} =
       Repo.update_all(
         from(p in Photo, where: p.id in ^ids),
-        set: [curation_status: "rejected", updated_at: NaiveDateTime.utc_now() |> NaiveDateTime.truncate(:second)]
+        set: [
+          curation_status: "rejected",
+          updated_at: NaiveDateTime.utc_now() |> NaiveDateTime.truncate(:second)
+        ]
       )
 
     {:ok, n}
@@ -987,8 +1068,9 @@ defmodule Orchestrator.Photos do
     * `boolean()`
   """
   def already_processed?(file_path) do
-    Repo.exists?(from p in Photo,
-      where: p.file_path == ^file_path and p.curation_status in ["complete", "rejected"]
+    Repo.exists?(
+      from p in Photo,
+        where: p.file_path == ^file_path and p.curation_status in ["complete", "rejected"]
     )
   end
 
@@ -1011,7 +1093,13 @@ defmodule Orchestrator.Photos do
     %Photo{}
     |> Photo.changeset(Map.put(attrs, :curation_status, "failed"))
     |> Repo.insert(
-      on_conflict: [set: [failure_reason: attrs[:failure_reason] || attrs["failure_reason"], curation_status: "failed", updated_at: DateTime.utc_now()]],
+      on_conflict: [
+        set: [
+          failure_reason: attrs[:failure_reason] || attrs["failure_reason"],
+          curation_status: "failed",
+          updated_at: DateTime.utc_now()
+        ]
+      ],
       conflict_target: [:file_path]
     )
   end
@@ -1032,7 +1120,9 @@ defmodule Orchestrator.Photos do
     * `{n_deleted, nil}` — Ecto's `delete_all/2` shape.
   """
   def delete_failed_if_exists(file_path) do
-    Repo.delete_all(from p in Photo, where: p.file_path == ^file_path and p.curation_status == "failed")
+    Repo.delete_all(
+      from p in Photo, where: p.file_path == ^file_path and p.curation_status == "failed"
+    )
   end
 
   @doc """
@@ -1075,7 +1165,9 @@ defmodule Orchestrator.Photos do
     counts =
       Repo.all(
         from p in Photo,
-          where: not is_nil(p.project) and p.project != "" and p.curation_status not in ["rejected", "failed"],
+          where:
+            not is_nil(p.project) and p.project != "" and
+              p.curation_status not in ["rejected", "failed"],
           group_by: p.project,
           select: {p.project, count(p.id)},
           order_by: p.project
@@ -1115,6 +1207,7 @@ defmodule Orchestrator.Photos do
     tag = String.trim(tag)
     photo = get_photo!(id)
     existing = Enum.map(photo.suggested_tags || [], &String.downcase/1)
+
     if tag != "" and String.downcase(tag) not in existing do
       new_tags = (photo.suggested_tags || []) ++ [tag]
       photo |> Photo.changeset(%{suggested_tags: new_tags}) |> Repo.update()
@@ -1165,7 +1258,12 @@ defmodule Orchestrator.Photos do
       # => %{"street" => 4.2, "macro" => 2.1, ...}
   """
   def tag_affinity_profile do
-    rated = Repo.all(from p in Photo, where: not is_nil(p.user_rating), select: {p.suggested_tags, p.user_rating})
+    rated =
+      Repo.all(
+        from p in Photo,
+          where: not is_nil(p.user_rating),
+          select: {p.suggested_tags, p.user_rating}
+      )
 
     rated
     |> Enum.flat_map(fn {tags, rating} -> Enum.map(tags, &{String.downcase(&1), rating}) end)
@@ -1198,15 +1296,21 @@ defmodule Orchestrator.Photos do
       Orchestrator.Photos.vibe_score(photo, profile)
       # => 78
   """
-  def vibe_score(%Photo{suggested_tags: _tags}, profile) when map_size(profile) == 0 do
-    nil
-  end
+  def vibe_score(%Photo{suggested_tags: tags}, profile), do: vibe_score_for_tags(tags, profile)
 
-  def vibe_score(%Photo{suggested_tags: nil}, _profile), do: nil
-  def vibe_score(%Photo{suggested_tags: []}, _profile), do: nil
+  @doc """
+  Like `vibe_score/2` but takes a raw `suggested_tags` list instead of a full
+  `%Photo{}`. Lets the gallery rank the whole library from a lightweight
+  `{id, tags, preference_score}` projection without loading full photo structs
+  (and decoding every clip_embedding blob) just to sort.
+  """
+  def vibe_score_for_tags(_tags, profile) when map_size(profile) == 0, do: nil
+  def vibe_score_for_tags(nil, _profile), do: nil
+  def vibe_score_for_tags([], _profile), do: nil
 
-  def vibe_score(%Photo{suggested_tags: tags}, profile) do
-    scores = tags
+  def vibe_score_for_tags(tags, profile) do
+    scores =
+      tags
       |> Enum.map(&Map.get(profile, String.downcase(&1)))
       |> Enum.reject(&is_nil/1)
 
@@ -1214,8 +1318,8 @@ defmodule Orchestrator.Photos do
       nil
     else
       mean = Enum.sum(scores) / length(scores)
-      round((mean - 1) / 4 * 100)  # normalize 1-5 → 0-100
+      # normalize 1-5 → 0-100
+      round((mean - 1) / 4 * 100)
     end
   end
-
 end
