@@ -44,3 +44,10 @@ Thumbs.db
 .coverage
 htmlcov/
 .pytest_cache/
+
+# Vision-model GGUFs: multi-GB, downloaded at runtime into desktop/runtime/.
+# Never commit these (GitHub rejects >100MB files; the shell fetches them).
+desktop/runtime/
+
+# Erlang crash dumps
+erl_crash.dump
