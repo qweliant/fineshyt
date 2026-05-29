@@ -1,8 +1,8 @@
 # Fine.Shyt Desktop Shell (experimental)
 
-> Living on branch `experimental-tauri-native`. Currently **phase C2** of the native packaging plan — see `~/.claude/plans/qwelians-laptop-fineshyt-windows-and-doc-quiet-hanrahan.md` for the full roadmap.
+> Living on branch `experimental-tauri-native`. Phases C2, C5, and C3 are done; **C4 (freeze the Python ai_worker) is the last phase**. See the native-packaging plan doc for the full roadmap.
 
-A Tauri 2.x shell that wraps Fine.Shyt's existing Phoenix LiveView UI in a native window. The shell is responsible for **lifecycle**: spawning a containerised Postgres + Python ai_worker, spawning a **native Elixir release** for the orchestrator itself, polling Phoenix, and tearing it all down on quit. The UI itself is unchanged.
+A Tauri 2.x shell that wraps Fine.Shyt's existing Phoenix LiveView UI in a native window. The shell is responsible for **lifecycle**: spawning the containerised Python ai_worker, spawning a **native Elixir release** for the orchestrator (with a native SQLite database — no Postgres since C3), spawning a native `llama-server` for the vision LLM, polling Phoenix, and tearing it all down on quit. The UI itself is unchanged.
 
 ## Why this exists
 
@@ -14,15 +14,15 @@ Photographers shouldn't have to open PowerShell, run `git clone`, paste `make co
 | --- | --- | --- | --- |
 | C1 | done (superseded) | nothing | db, orchestrator, ai_worker, Ollama |
 | C2 | done | orchestrator (Elixir release) | db, ai_worker, Ollama |
-| **C5** | **current** | **orchestrator + llama-server (via brew)** | db, ai_worker |
-| C3 | not started | + Postgres (via SQLite migration) | ai_worker |
-| C4 | not started | + ai_worker (PyInstaller/uv-freeze) | — |
+| C5 | done | + llama-server (vision LLM, via brew) | db, ai_worker |
+| C3 | done | + SQLite database (Postgres removed) | ai_worker |
+| **C4** | **next** | **+ ai_worker (PyInstaller/Nuitka freeze)** | **— (zero host prereqs)** |
 
-Phases shipped out of original order: C5 was prioritised over C3 + C4 because Ollama was the most user-visible prereq (~5 GB model download + separate install) and the Tauri + llama.cpp pattern had the most-paved community path. See the plan doc for the reasoning.
+Phases shipped out of original order: C5 (Ollama removal) and C3 (Postgres → SQLite) were prioritised because Ollama (~5 GB download + separate install) and the DB container were the most-felt prereqs, and both had well-paved paths. C4 is last — freezing torch/CLIP is the hardest and biggest-binary phase. See the plan doc for the reasoning. **First measured lever for C4: the container ships CUDA torch (`+cu130`, ~2.8 GB of unused NVIDIA libs) on a CPU/Metal box — switching to CPU-only torch cuts site-packages 4.6 GB → ~1.2 GB before any freezing.**
 
 ## What it does NOT do (yet)
 
-- Bundle Postgres or the Python ai_worker — those are still containerised. Docker is still a host prereq.
+- Bundle the Python ai_worker — it's still containerised (C4 will freeze it). Docker is still a host prereq for that one service. (Postgres is gone — the orchestrator uses native SQLite since C3.)
 - Handle first-run config (PHOTO_LIBRARY, SECRET_KEY_BASE) interactively — edit `.env` per the root README. First-run wizard is a later phase.
 - Code-sign or auto-update — dev builds only.
 
@@ -30,7 +30,7 @@ Phases shipped out of original order: C5 was prioritised over C3 + C4 because Ol
 
 - Rust toolchain (`rustup`, `cargo`) — `cargo --version` should work.
 - Node.js — only needed if you want to use `cargo tauri` CLI for packaged builds. Dev mode (`cargo run`) doesn't require it.
-- Docker Desktop on the host (for the still-containerised db + ai_worker).
+- Docker Desktop on the host (for the still-containerised ai_worker — the only remaining container since C3 dropped Postgres).
 - `brew install llama.cpp` — provides the `llama-server` binary the shell spawns for the embedded vision LLM. (Replaces Ollama.)
 - A built Phoenix release at `orchestrator/_build/prod/rel/orchestrator/bin/server`. Build it with `make release` from the repo root.
 - The repo's normal `.env` set up (run `make compose-init` once at the repo root).
@@ -53,7 +53,7 @@ The boot flow you'll see in the terminal:
 ```text
 [fineshyt-desktop] startup: resolving repo root
 [fineshyt-desktop] startup: running `make compose-init` in ...
-[fineshyt-desktop] startup: starting db + ai_worker via `--profile c2`
+[fineshyt-desktop] startup: starting ai_worker via `--profile c2`
 [fineshyt-desktop] startup: spawning llama-server (vision LLM)
 [fineshyt-desktop] startup: waiting for llama-server on 127.0.0.1:11434 (first launch downloads ~5–7 GB)
 ... llama-server boot lines, including "server is listening on http://127.0.0.1:11434" ...
@@ -98,10 +98,10 @@ desktop/
 **Boot sequence:**
 
 1. Tauri opens the window with the splash HTML loaded from `frontend/index.html`.
-2. A background thread runs `make compose-init` (idempotent — bootstraps `.env` if needed) then `docker compose --profile compose up -d --build`.
-3. Same thread polls `127.0.0.1:4000` via TCP every 500ms (max 120s).
-4. When the port opens, the thread tells the main webview to navigate to `http://localhost:4000`.
-5. On window close, the shell runs `docker compose --profile compose down` to leave the system clean.
+2. A background thread runs `make compose-init` (idempotent — bootstraps `.env` if needed) then `docker compose --profile c2 up -d` (brings up just the ai_worker — the only container).
+3. It spawns `llama-server` (vision LLM) and waits for `:11434`, then spawns the native orchestrator release (which runs migrations against the SQLite db) and waits for Phoenix on `:4000`.
+4. When the port opens, the splash JS navigates to `http://localhost:4000`.
+5. On window close, the shell SIGTERMs the orchestrator + llama-server children and runs `docker compose --profile c2 down` to leave the system clean.
 
 If anything goes wrong (Docker not installed, `.env` missing required values, Phoenix doesn't come up in time), the splash page swaps in an error message instead of an infinite spinner.
 
