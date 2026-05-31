@@ -16,9 +16,57 @@ Photographers shouldn't have to open PowerShell, run `git clone`, paste `make co
 | C2 | done | orchestrator (Elixir release) | db, ai_worker, Ollama |
 | C5 | done | + llama-server (vision LLM, via brew) | db, ai_worker |
 | C3 | done | + SQLite database (Postgres removed) | ai_worker |
-| **C4** | **next** | **+ ai_worker (PyInstaller/Nuitka freeze)** | **— (zero host prereqs)** |
+| **C4** | **in progress — Nuitka spike done** | **+ ai_worker (frozen via Nuitka)** | **— (zero host prereqs)** |
 
-Phases shipped out of original order: C5 (Ollama removal) and C3 (Postgres → SQLite) were prioritised because Ollama (~5 GB download + separate install) and the DB container were the most-felt prereqs, and both had well-paved paths. C4 is last — freezing torch/CLIP is the hardest and biggest-binary phase. See the plan doc for the reasoning. **First measured lever for C4: the container ships CUDA torch (`+cu130`, ~2.8 GB of unused NVIDIA libs) on a CPU/Metal box — switching to CPU-only torch cuts site-packages 4.6 GB → ~1.2 GB before any freezing.**
+Phases shipped out of original order: C5 (Ollama removal) and C3 (Postgres → SQLite) were prioritised because Ollama (~5 GB download + separate install) and the DB container were the most-felt prereqs, and both had well-paved paths. C4 is last — freezing torch/CLIP is the hardest and biggest-binary phase. See the plan doc for the reasoning.
+
+**C4 progress:**
+
+1. **CPU-only torch** (`ai_worker/pyproject.toml` — pinned to `pytorch-cpu` index): cut site-packages **4.6 GB → 971 MB** by dropping `nvidia-*` + `triton`. Embedding parity vs the prior CUDA build: max abs diff `5.96e-08` (float32 noise). Prerequisite for freezing (CUDA's dynamic loading is what trips up the freezers).
+2. **Packaging spikes — Nuitka and PyApp** (both target `fineshyt_ai.serve:main`, a `uvicorn.run(app)` entry; `fastapi run` is a CLI wrapper that isn't freezable):
+
+   | Metric | Nuitka `--standalone` | PyApp launcher |
+   | --- | --- | --- |
+   | Build time (M3, cold) | ~90 min (7,973 modules → C → clang) | **~45 sec** (just compiles the Rust launcher) |
+   | Distributable artifact | 1.5 GB (binary + bundled libs/data) | **3 MB launcher** (embeds the 27 KB wheel) |
+   | First launch (truly cold, fresh user) | ~3 s after install | ~2–5 min (downloads Python + pip-installs deps) |
+   | First launch (deps cached) | ~3 s | ~10 s (uv reuses cache) |
+   | Warm `/embed` latency | 400–700 ms | ~400 ms |
+   | Runtime RSS (CLIP loaded) | ~1 GB | ~0.94 GB |
+   | `/embed` parity vs container | `4.25e-07` (float32 noise) | `2.66e-07` (float32 noise) |
+   | `/convert` smoke test | works | works |
+   | Iteration loop (code change → test) | re-freeze ≈ 90 min | rebuild wheel + launcher ≈ 30 s |
+   | CI matrix cost (3 OSes per release) | ~hours of runner time | ~minutes |
+   | Distribution model | Self-contained, offline-capable | Needs network on first launch (deps fetched from PyPI) |
+
+   **Recommendation: PyApp.** Build-time, artifact-size, and dev-iteration wins are decisive. The only Nuitka advantage — offline first-launch — doesn't help our shape: first-launch needs network anyway for the CLIP weights (1.7 GB) and the Qwen GGUF (4.4 GB), both downloaded from HuggingFace on first run. PyApp adds ~1 GB of pip-installed deps to that same first-launch download, which is acceptable for a one-time setup (this is the Ollama / `pip install` UX that ML users expect).
+
+   The Nuitka build is still functional in `ai_worker/build_nuitka/serve.dist/` if we want to revisit; PyApp is the production direction.
+
+   PyApp setup (in `ai_worker/`):
+   - `pyproject.toml` exposes `fineshyt-ai-worker` as a `[project.scripts]` entry → `fineshyt_ai.serve:main`.
+   - `[build-system]` uses hatchling; sdist excludes `build_nuitka/` and `.venv/`.
+   - Build wheel: `uv build` → `dist/ai_worker-0.1.0-py3-none-any.whl` (27 KB).
+   - Launcher: `cargo install pyapp --force --root <dir>` with env `PYAPP_PROJECT_PATH=…/ai_worker-0.1.0-py3-none-any.whl PYAPP_PROJECT_NAME=ai_worker PYAPP_PROJECT_VERSION=0.1.0 PYAPP_EXEC_SPEC=fineshyt_ai.serve:main PYAPP_UV_ENABLED=1`.
+
+**Tauri shell wired up:** `desktop/src-tauri/src/main.rs` spawns the PyApp launcher as a tracked child instead of running `docker compose up ai_worker`. The boot sequence is now all-native (orchestrator release + llama-server + PyApp launcher), shutdown SIGKILLs each child, and Docker is no longer touched at startup. **`make desktop-dev` now depends on `make ai-worker-launcher`**, which:
+
+1. `uv build --wheel` → `ai_worker/dist/ai_worker-*.whl`
+2. `cargo install pyapp` with `PYAPP_PROJECT_PATH` set to that wheel, `PYAPP_EXEC_SPEC=fineshyt_ai.serve:main`, `PYAPP_UV_ENABLED=1`, **`PYAPP_DISTRIBUTION_EMBED=1`** (so the launcher embeds python-build-standalone — no separate Python download at first launch)
+3. Moves the resulting binary to `desktop/runtime/bin/fineshyt-ai-worker`
+
+Launcher size with embedded Python: **~19 MB** (vs ~3 MB without embed). The +16 MB is python-build-standalone baked in — worth it for offline-capable first launch.
+
+**Gotchas still open:**
+
+- **Windows console flash.** PyApp's `cargo install pyapp` builds against the `console` subsystem by default, so on Windows the user sees a terminal flicker each time the Tauri shell spawns the launcher. The fix is a Cargo feature flag (or env var if PyApp surfaces one in the version we land on) that switches PyApp to `windows_subsystem = "windows"`. Can't be tested on macOS — wait until a Windows CI runner is up, then patch the `make ai-worker-launcher` target.
+- **First-launch deps download (~1 GB) is not bundle-able.** The wheel is 27 KB; torch + CLIP + scipy + sklearn + open_clip = ~1 GB from PyPI on first launch. With embedded Python the user only waits for that and the CLIP weights (1.7 GB) + Qwen GGUF (4.4 GB) on first run — no Python install on top. Total cold-fresh first launch: ~10–20 min depending on network. Subsequent launches are seconds.
+- **Linux torch-CPU pin.** On Linux, PyPI's default torch is the CUDA build (~3 GB extra). On Mac/Windows the default is already CPU. When the CI matrix adds Linux, the `ai-worker-launcher` target needs to pass an extra index (`PYAPP_PIP_EXTRA_ARGS=--extra-index-url …/whl/cpu`) or a constraints file specifically on Linux.
+
+**Still ahead:**
+
+- **CI matrix** (GH Actions: macOS + Windows + Linux runners) to build per-OS launchers + Tauri bundles on tag. Each platform-specific launcher is ~20 MB; the per-OS Tauri bundle wraps it.
+- **First-launch progress UI** in the splash — the Rust shell knows when each port is "still waiting"; surface that as "Installing AI worker (~1 GB, one-time)…" / "Downloading vision model (~5 GB, one-time)…" instead of a generic spinner.
 
 ## What it does NOT do (yet)
 

@@ -1,36 +1,42 @@
 // Hide the console window on Windows release builds — devs still get one in dev.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-//! Fine.Shyt desktop shell — Phase C2.
+//! Fine.Shyt desktop shell — Phase C4 (in progress).
 //!
-//! C2 boots Phoenix as a **native Elixir release binary** spawned as a
-//! child process of this Tauri shell. The orchestrator no longer runs
-//! inside Docker, and since C3 it uses a native SQLite database (no
-//! Postgres). The only service still containerised is the Python
-//! ai_worker (moves to C4).
+//! All three runtime services run **natively** as child processes of this
+//! Tauri shell — no Docker:
+//!   - **Orchestrator** = native Elixir release (C2).
+//!   - **Vision LLM** = native `llama-server` from llama.cpp (C5).
+//!   - **AI worker** = native PyApp launcher (C4) — a tiny Rust binary that
+//!     bootstraps a Python venv + the FastAPI worker on first run.
+//! Since C3 the database is a native SQLite file; Postgres + pgvector are
+//! gone.
 //!
 //! Boot sequence:
 //!
-//!   1. `make compose-init` — idempotent .env bootstrap.
-//!   2. `docker compose --profile c2 up -d` — bring up ai_worker
-//!      (NOT the orchestrator container, which we replace below).
-//!   3. Verify the release binary exists at
+//!   1. `make compose-init` — idempotent .env bootstrap (no Docker now;
+//!      still useful for SECRET_KEY_BASE + PHOTO_LIBRARY validation).
+//!   2. Spawn the PyApp ai_worker launcher; spawn `llama-server` (both
+//!      bind their own ports; they initialise in parallel).
+//!   3. TCP-poll both ports until each is listening. First launch of the
+//!      ai_worker pip-installs deps into a per-user venv (a few minutes
+//!      on a cold machine); first launch of llama-server downloads the
+//!      vision GGUF (~5–7 GB).
+//!   4. Verify the release binary exists at
 //!      `orchestrator/_build/prod/rel/orchestrator/bin/server`. If
 //!      missing, fail fast with a "run `make release` first" message.
-//!   4. Read SECRET_KEY_BASE from .env and assemble the env block.
-//!   5. Run `bin/migrate` (one-shot, idempotent).
-//!   6. Spawn `bin/server` as a tracked child process. Stash the
-//!      `Child` handle in Tauri managed state so cleanup can find it.
-//!   7. TCP-poll 127.0.0.1:4000 until Phoenix is listening.
-//!   8. The splash JS already polls Phoenix itself and redirects via
+//!   5. Read SECRET_KEY_BASE from .env and assemble the env block.
+//!   6. Run `bin/migrate` (one-shot, idempotent).
+//!   7. Spawn `bin/server` as a tracked child process. Stash all `Child`
+//!      handles in Tauri managed state so cleanup can find them.
+//!   8. TCP-poll 127.0.0.1:4000 until Phoenix is listening.
+//!   9. The splash JS already polls Phoenix itself and redirects via
 //!      `window.location.href` — Rust doesn't navigate.
 //!
-//! Shutdown sequence on window close:
-//!
-//!   1. SIGTERM the orchestrator child, wait briefly, SIGKILL if it
-//!      doesn't exit. Erlang's signal handler does a graceful BEAM
-//!      shutdown.
-//!   2. `docker compose --profile c2 down` to stop ai_worker.
+//! Shutdown sequence on window close: SIGKILL each tracked child
+//! (orchestrator, llama-server, ai_worker) and wait for it to exit.
+//! Erlang's signal handler does a graceful BEAM shutdown; the PyApp
+//! launcher tree is just Python so SIGKILL is fine.
 
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
@@ -49,7 +55,19 @@ const PHOENIX_PORT: u16 = 4000;
 const LLAMA_HOST: &str = "127.0.0.1";
 const LLAMA_PORT: u16 = 11434;
 
+/// Native ai_worker (Phase C4) — a PyApp launcher built by
+/// `make ai-worker-launcher`. It bootstraps a per-user Python venv +
+/// FastAPI on first run, then binds this port.
+const AI_WORKER_HOST: &str = "127.0.0.1";
+const AI_WORKER_PORT: u16 = 8000;
+const AI_WORKER_LAUNCHER_RELATIVE: &str = "desktop/runtime/bin/fineshyt-ai-worker";
+
 const POLL_TIMEOUT: Duration = Duration::from_secs(180);
+/// Longer fallback for the ai_worker's first launch: PyApp downloads
+/// Python + pip-installs deps (~1 GB) into the per-user venv before
+/// uvicorn binds. After the cache is populated subsequent launches are
+/// seconds.
+const AI_WORKER_POLL_TIMEOUT: Duration = Duration::from_secs(600);
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Path of the release binary relative to the repo root. Built by
@@ -67,11 +85,13 @@ const LLAMA_MODEL_HF: &str = "ggml-org/Qwen2.5-Omni-7B-GGUF";
 /// quit. None until we successfully spawn each one.
 struct OrchestratorChild(Mutex<Option<Child>>);
 struct LlamaServerChild(Mutex<Option<Child>>);
+struct AiWorkerChild(Mutex<Option<Child>>);
 
 fn main() {
     tauri::Builder::default()
         .manage(OrchestratorChild(Mutex::new(None)))
         .manage(LlamaServerChild(Mutex::new(None)))
+        .manage(AiWorkerChild(Mutex::new(None)))
         .setup(|app| {
             let app_handle = app.handle().clone();
             std::thread::spawn(move || run_startup_pipeline(&app_handle));
@@ -114,17 +134,23 @@ fn run_startup_pipeline(app: &AppHandle) {
         return;
     }
 
-    eprintln!("[fineshyt-desktop] startup: starting ai_worker via `--profile c2`");
-    if let Err(e) = start_services(&repo) {
-        emit_failure(
-            app,
-            format!(
-                "docker compose up failed.\n\n\
-                 Make sure Docker Desktop is running, then re-launch.\n\n\
-                 Underlying error:\n{e}"
-            ),
-        );
-        return;
+    eprintln!("[fineshyt-desktop] startup: spawning ai_worker (PyApp launcher)");
+    match spawn_ai_worker(&repo) {
+        Ok(child) => {
+            *app.state::<AiWorkerChild>().0.lock().unwrap() = Some(child);
+        }
+        Err(e) => {
+            emit_failure(
+                app,
+                format!(
+                    "Couldn't start the ai_worker.\n\n\
+                     Build the PyApp launcher once with `make ai-worker-launcher` \
+                     from the repo root, then re-launch.\n\n\
+                     Underlying error:\n{e}"
+                ),
+            );
+            return;
+        }
     }
 
     eprintln!("[fineshyt-desktop] startup: spawning llama-server (vision LLM)");
@@ -146,6 +172,27 @@ fn run_startup_pipeline(app: &AppHandle) {
             );
             return;
         }
+    }
+
+    // ai_worker and llama-server initialise in parallel — both children are
+    // already spawned. Wait sequentially for each port; total wall time is
+    // max(ai_worker_ready, llama_ready), not the sum.
+    eprintln!(
+        "[fineshyt-desktop] startup: waiting for ai_worker on {AI_WORKER_HOST}:{AI_WORKER_PORT} \
+         (first launch pip-installs ~1 GB of deps into a per-user venv)"
+    );
+    if let Err(e) = wait_for_ai_worker() {
+        emit_failure(
+            app,
+            format!(
+                "ai_worker started but never opened port {AI_WORKER_PORT}. On \
+                 first launch PyApp installs Python deps; if the network is \
+                 slow this can take several minutes — try again, or check \
+                 the launcher's logs in the terminal.\n\n\
+                 Underlying error:\n{e}"
+            ),
+        );
+        return;
     }
 
     eprintln!(
@@ -293,30 +340,48 @@ fn run_compose_init(repo: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn start_services(repo: &Path) -> Result<(), String> {
-    let output = Command::new("docker")
-        .args(["compose", "--profile", "c2", "up", "-d"])
-        .current_dir(repo)
-        .output()
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                "`docker` is not on PATH. Install Docker Desktop \
-                 (https://www.docker.com/products/docker-desktop/) and \
-                 launch it before re-opening Fine.Shyt."
-                    .to_string()
-            } else {
-                format!("couldn't spawn docker: {e}")
-            }
-        })?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+/// Spawn the PyApp ai_worker launcher (Phase C4 — replaces the previous
+/// Docker container). The launcher is a ~3 MB Rust binary that on first
+/// run pip-installs the FastAPI worker + its deps into a per-user venv
+/// (`~/Library/Application Support/pyapp/ai-worker/<hash>/<ver>/`); on
+/// subsequent runs it just re-execs the existing venv's Python entry.
+fn spawn_ai_worker(repo: &Path) -> Result<Child, String> {
+    let launcher = repo.join(AI_WORKER_LAUNCHER_RELATIVE);
+    if !launcher.is_file() {
         return Err(format!(
-            "docker compose up exited with {:?}\nstderr:\n{stderr}",
-            output.status.code()
+            "PyApp launcher not built. Expected: {}\n\n\
+             Build it once with `make ai-worker-launcher` from the repo \
+             root — uses uv + cargo, takes ~1 min.",
+            launcher.display()
         ));
     }
-    Ok(())
+
+    let uploads_dir = repo
+        .join("orchestrator")
+        .join("priv")
+        .join("static")
+        .join("uploads");
+
+    let mut cmd = Command::new(&launcher);
+    cmd.env("AI_WORKER_HOST", AI_WORKER_HOST);
+    cmd.env("AI_WORKER_PORT", AI_WORKER_PORT.to_string());
+    cmd.env("STATIC_UPLOADS_DIR", &uploads_dir);
+    // The worker calls llama-server at host:11434; from a native process
+    // that's just localhost (no host.docker.internal needed any more).
+    cmd.env("LLM_BASE_URL", format!("http://{LLAMA_HOST}:{LLAMA_PORT}/v1/"));
+    // Pipe logs so first-run pip output is visible alongside Tauri's own.
+    cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+
+    cmd.spawn().map_err(|e| {
+        format!(
+            "couldn't spawn {}: {e}",
+            launcher.display()
+        )
+    })
+}
+
+fn wait_for_ai_worker() -> Result<(), String> {
+    wait_for_port_with_timeout(AI_WORKER_HOST, AI_WORKER_PORT, AI_WORKER_POLL_TIMEOUT)
 }
 
 /// Spawn `llama-server` (from `brew install llama.cpp`) with the bundled
@@ -479,15 +544,20 @@ fn wait_for_phoenix() -> Result<(), String> {
 }
 
 /// Poll a TCP port until it accepts a connection or POLL_TIMEOUT elapses.
-/// Used by both wait_for_phoenix and wait_for_llama_server. We don't
-/// bother with HTTP — a successful TCP connect means the listener is
-/// up, which is good enough for "ready" in both cases.
+/// Used by Phoenix + llama-server; the ai_worker uses the longer-timeout
+/// variant below because PyApp's first launch can pip-install for several
+/// minutes. We don't bother with HTTP — a successful TCP connect means
+/// the listener is up, which is good enough for "ready" in all cases.
 fn wait_for_port(host: &str, port: u16) -> Result<(), String> {
+    wait_for_port_with_timeout(host, port, POLL_TIMEOUT)
+}
+
+fn wait_for_port_with_timeout(host: &str, port: u16, timeout: Duration) -> Result<(), String> {
     let addr = format!("{host}:{port}")
         .parse::<std::net::SocketAddr>()
         .map_err(|e| format!("couldn't parse {host}:{port}: {e}"))?;
 
-    let deadline = std::time::Instant::now() + POLL_TIMEOUT;
+    let deadline = std::time::Instant::now() + timeout;
     let mut last_error: Option<std::io::Error> = None;
 
     while std::time::Instant::now() < deadline {
@@ -507,8 +577,10 @@ fn wait_for_port(host: &str, port: u16) -> Result<(), String> {
 }
 
 /// Shutdown: stop both child processes (orchestrator + llama-server),
-/// then bring down the containerised services. We block here so the OS
-/// doesn't tear down the app before docker has settled.
+/// Kill every tracked child process. Since C4 there's no Docker to tear
+/// down — every service is a native child of this shell. SIGKILL is OK
+/// for all three: the Erlang release closes ports cleanly under it, and
+/// the PyApp launcher tree + llama-server are stateless re: this process.
 fn shutdown(app: &AppHandle) {
     eprintln!("[fineshyt-desktop] shutdown: stopping orchestrator child");
     if let Some(mut child) = app
@@ -521,8 +593,8 @@ fn shutdown(app: &AppHandle) {
         // Try SIGTERM first via Child::kill (which on Unix sends SIGKILL —
         // for graceful shutdown we'd want a libc::kill(pid, SIGTERM) call,
         // but Erlang's bin/server traps SIGKILL well enough that ports get
-        // closed and pg connections drop cleanly. C2.5: replace with a
-        // proper SIGTERM + wait + SIGKILL fallback.
+        // closed cleanly. C2.5: replace with a proper SIGTERM + wait +
+        // SIGKILL fallback.
         let _ = child.kill();
         let _ = child.wait();
     }
@@ -539,27 +611,10 @@ fn shutdown(app: &AppHandle) {
         let _ = child.wait();
     }
 
-    let Ok(repo) = repo_root() else {
-        eprintln!("[fineshyt-desktop] shutdown: couldn't resolve repo root");
-        return;
-    };
-
-    eprintln!("[fineshyt-desktop] shutdown: docker compose --profile c2 down");
-    let result = Command::new("docker")
-        .args(["compose", "--profile", "c2", "down"])
-        .current_dir(&repo)
-        .output();
-
-    match result {
-        Ok(out) if !out.status.success() => {
-            eprintln!(
-                "[fineshyt-desktop] shutdown: docker compose down exited with {:?}\nstderr:\n{}",
-                out.status.code(),
-                String::from_utf8_lossy(&out.stderr)
-            );
-        }
-        Err(e) => eprintln!("[fineshyt-desktop] shutdown: couldn't run docker compose down: {e}"),
-        _ => {}
+    eprintln!("[fineshyt-desktop] shutdown: stopping ai_worker child");
+    if let Some(mut child) = app.state::<AiWorkerChild>().0.lock().unwrap().take() {
+        let _ = child.kill();
+        let _ = child.wait();
     }
 
     let _ = app.emit("services-shutdown", ());

@@ -19,6 +19,28 @@ dependencies = [
     "scipy>=1.12",
 ]
 
+# Console script for freezers (Nuitka entry point) and PyApp (PYAPP_EXEC_SPEC).
+# `fineshyt_ai.serve:main` calls uvicorn.run on the FastAPI app — see that
+# module for the rationale (`fastapi run` is a CLI wrapper, not freezable).
+[project.scripts]
+fineshyt-ai-worker = "fineshyt_ai.serve:main"
+
+# Project name (`ai_worker`) doesn't match the source-layout package
+# (`src/fineshyt_ai/`), so hatchling needs the path spelled out. Required so
+# `uv build` produces a wheel PyApp can consume, and so `uv sync` installs the
+# console script entry point above.
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/fineshyt_ai"]
+
+# Sdist would otherwise sweep in build_nuitka/ (6+GB of intermediate Nuitka
+# objects) and .venv/. Include only the actual source.
+[tool.hatch.build.targets.sdist]
+include = ["src/fineshyt_ai/", "pyproject.toml", "README.md", "uv.lock"]
+
 # CLIP runs on CPU/Metal here (no NVIDIA GPU), but the default torch wheel is
 # the CUDA build (+cuXXX) which drags in ~2.8GB of unused nvidia libs + triton.
 # Pin torch/torchvision to the CPU-only index: site-packages 4.6GB → ~1.2GB,
@@ -50,5 +72,7 @@ select = ["E", "F", "I"]
 
 [dependency-groups]
 dev = [
+    "nuitka>=4.1.2",
+    "ordered-set>=4.1.0",
     "ruff>=0.15.8",
 ]

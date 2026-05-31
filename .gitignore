@@ -51,3 +51,10 @@ desktop/runtime/
 
 # Erlang crash dumps
 erl_crash.dump
+
+# Nuitka frozen-binary build artifacts (C4 spike + ongoing builds):
+# `serve.build` is ~6.5GB of intermediate `.o`s (keep locally for ccache
+# benefit on rebuilds); `serve.dist` is the ~1.5GB frozen binary + bundled
+# libs/data. Both are reproducible from pyproject + uv.lock + serve.py.
+ai_worker/build_nuitka/
+ai_worker/.venv/

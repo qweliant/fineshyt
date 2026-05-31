@@ -1,4 +1,4 @@
-.PHONY: dev db-up db-down setup export reset start-phoenix start-ai compose compose-init compose-up compose-down compose-build compose-logs desktop-dev desktop-build release c2-services c2-services-down c2-run c5-llama c5-llama-stop c5-llama-logs
+.PHONY: dev db-up db-down setup export reset start-phoenix start-ai compose compose-init compose-up compose-down compose-build compose-logs desktop-dev desktop-build release c2-services c2-services-down c2-run c5-llama c5-llama-stop c5-llama-logs ai-worker-launcher
 
 CINNA  := \033[38;5;153m
 KUROMI := \033[38;5;135m
@@ -157,7 +157,7 @@ compose-logs:
 ## unchanged. See desktop/README.md for the full picture and the C2+
 ## roadmap.
 
-desktop-dev:
+desktop-dev: ai-worker-launcher
 	@printf "$(CINNA)$(BOLD)→ launching desktop shell in dev mode...$(RESET)\n"
 	@cd desktop/src-tauri && cargo run
 
@@ -223,6 +223,57 @@ c5-llama-stop:
 
 c5-llama-logs:
 	@tail -f $(C5_LOG)
+
+## ---- Phase C4 — native ai_worker via PyApp launcher --------------------
+##
+## C4 replaces the containerised ai_worker with a PyApp launcher: a ~3 MB
+## Rust binary that bootstraps a per-user Python venv + the FastAPI worker
+## on first run (pip-installs ~1 GB of deps into
+## ~/Library/Application Support/pyapp/), then re-execs that venv on
+## subsequent launches. The desktop shell spawns this binary directly —
+## no Docker.
+##
+## Build flow:
+##   1. `uv build --wheel` — produces dist/ai_worker-X.Y.Z-py3-none-any.whl
+##      (just our 27 KB of source; deps come from PyPI at install time).
+##   2. `cargo install pyapp` with PYAPP_PROJECT_PATH pointing at that
+##      wheel — compiles a Rust launcher that embeds the wheel + a config
+##      pointing at `fineshyt_ai.serve:main` as the entry.
+##   3. Move the launcher into desktop/runtime/bin/.
+
+AI_WORKER_LAUNCHER := desktop/runtime/bin/fineshyt-ai-worker
+AI_WORKER_VERSION  := 0.1.0
+AI_WORKER_WHEEL    := ai_worker/dist/ai_worker-$(AI_WORKER_VERSION)-py3-none-any.whl
+
+ai-worker-launcher:
+	@if [ -x $(AI_WORKER_LAUNCHER) ]; then \
+		printf "$(KEROPPI)→ launcher already built at $(AI_WORKER_LAUNCHER) (delete to rebuild)$(RESET)\n"; \
+		exit 0; \
+	fi
+	@command -v cargo >/dev/null 2>&1 || \
+		(printf "$(KUROMI)✗ cargo not found. Install Rust from rustup.rs.$(RESET)\n"; exit 1)
+	@command -v uv >/dev/null 2>&1 || \
+		(printf "$(KUROMI)✗ uv not found. Install with 'curl -LsSf https://astral.sh/uv/install.sh | sh'.$(RESET)\n"; exit 1)
+	@mkdir -p $(dir $(AI_WORKER_LAUNCHER))
+	@printf "$(CINNA)$(BOLD)→ building ai_worker wheel...$(RESET)\n"
+	@cd ai_worker && uv build --wheel >/dev/null
+	@printf "$(CINNA)$(BOLD)→ compiling PyApp launcher (Rust, ~45s first time)...$(RESET)\n"
+	@TMP=$$(mktemp -d) && \
+		PYAPP_PROJECT_NAME=ai_worker \
+		PYAPP_PROJECT_VERSION=$(AI_WORKER_VERSION) \
+		PYAPP_PROJECT_PATH=$$(pwd)/$(AI_WORKER_WHEEL) \
+		PYAPP_EXEC_SPEC=fineshyt_ai.serve:main \
+		PYAPP_UV_ENABLED=1 \
+		PYAPP_DISTRIBUTION_EMBED=1 \
+		cargo install pyapp --force --quiet --root $$TMP && \
+		mv $$TMP/bin/pyapp $(AI_WORKER_LAUNCHER) && \
+		rm -rf $$TMP
+	@printf "$(KEROPPI)→ launcher ready at $(AI_WORKER_LAUNCHER) ($$(du -sh $(AI_WORKER_LAUNCHER) | cut -f1))$(RESET)\n"
+	@printf "$(KEROPPI)  • Python runtime is embedded — no Python download on first launch.$(RESET)\n"
+	@printf "$(KEROPPI)  • Deps (~1 GB: torch + CLIP + scipy + …) still pip-install on first run.$(RESET)\n"
+	@printf "$(KEROPPI)  • TODO: Windows console suppression — needs PyApp built with the$(RESET)\n"
+	@printf "$(KEROPPI)    'gui' subsystem (no terminal flash when the Tauri shell spawns it).$(RESET)\n"
+	@printf "$(KEROPPI)    Add a Cargo feature flag here once a Windows CI runner is up.$(RESET)\n"
 
 ## ---- Phase C2 — Elixir release as a local sidecar -----------------------
 ##
