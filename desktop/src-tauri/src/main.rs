@@ -136,7 +136,12 @@ fn run_startup_pipeline(app: &AppHandle) {
 
     eprintln!("[fineshyt-desktop] startup: spawning ai_worker (PyApp launcher)");
     match spawn_ai_worker(&repo) {
-        Ok(child) => {
+        Ok(mut child) => {
+            if let Err(e) = verify_alive(&mut child, "ai_worker", AI_WORKER_PORT) {
+                let _ = child.wait();
+                emit_failure(app, e);
+                return;
+            }
             *app.state::<AiWorkerChild>().0.lock().unwrap() = Some(child);
         }
         Err(e) => {
@@ -155,7 +160,12 @@ fn run_startup_pipeline(app: &AppHandle) {
 
     eprintln!("[fineshyt-desktop] startup: spawning llama-server (vision LLM)");
     match spawn_llama_server(&repo) {
-        Ok(child) => {
+        Ok(mut child) => {
+            if let Err(e) = verify_alive(&mut child, "llama-server", LLAMA_PORT) {
+                let _ = child.wait();
+                emit_failure(app, e);
+                return;
+            }
             *app.state::<LlamaServerChild>().0.lock().unwrap() = Some(child);
         }
         Err(e) => {
@@ -541,6 +551,30 @@ fn spawn_orchestrator(repo: &Path, env: &[(&'static str, String)]) -> Result<Chi
 
 fn wait_for_phoenix() -> Result<(), String> {
     wait_for_port(PHOENIX_HOST, PHOENIX_PORT)
+}
+
+/// Briefly verify a freshly-spawned child is still alive. Catches the most
+/// common silent failure mode: the child exits within ~1s because its port
+/// is already in use (a leaked previous run). Without this check the boot
+/// pipeline would poll a port that some *other* (leaked) process is
+/// serving, and either timeout 10 min later or — worse — succeed against
+/// the wrong process. The child's stderr is inherit'd so the real error
+/// message (e.g. "address already in use") appears in the terminal above.
+fn verify_alive(child: &mut Child, name: &str, port: u16) -> Result<(), String> {
+    std::thread::sleep(Duration::from_secs(1));
+    match child.try_wait() {
+        Ok(Some(status)) => Err(format!(
+            "{name} exited immediately ({status}).\n\n\
+             Almost always means port {port} is already in use by a leaked \
+             previous run. See the terminal above for the underlying error.\n\n\
+             Clean up with:\n  \
+             lsof -ti:{port} | xargs kill -9\n\
+             pkill -9 -f 'fineshyt-ai-worker|fineshyt_ai.serve|llama-server'\n\
+             then re-launch."
+        )),
+        Ok(None) => Ok(()),
+        Err(e) => Err(format!("couldn't check {name} status: {e}")),
+    }
 }
 
 /// Poll a TCP port until it accepts a connection or POLL_TIMEOUT elapses.

@@ -77,6 +77,10 @@ defmodule Orchestrator.Photos.Photo do
     field :project, :string
     field :captured_at, :naive_datetime
     field :burst_group, :integer
+    # Filename-copy group ID — siblings under macOS-style "X copy.ext"
+    # naming. Populated by mix fineshyt.detect_dup_copies (Phase 1 of the
+    # dedup work). See `burst_group` for the parallel concept.
+    field :dup_group, :integer
     field :curation_status, :string, default: "complete"
     field :failure_reason, :string
 
@@ -134,6 +138,7 @@ defmodule Orchestrator.Photos.Photo do
       :project,
       :captured_at,
       :burst_group,
+      :dup_group,
       :curation_status,
       :failure_reason,
       :source_path,

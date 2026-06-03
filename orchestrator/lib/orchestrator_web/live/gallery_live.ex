@@ -76,6 +76,7 @@ defmodule OrchestratorWeb.GalleryLive do
       |> assign(:selected, MapSet.new())
       |> assign(:bulk_project, "")
       |> assign(:burst_groups, [])
+      |> assign(:dup_groups, [])
       |> assign(:match_threshold, @match_threshold)
       |> load_photos()
 
@@ -214,16 +215,17 @@ defmodule OrchestratorWeb.GalleryLive do
         "rejected" -> :rejected
         "for_projects" -> :for_projects
         "bursts" -> :bursts
+        "copies" -> :copies
         _ -> :all
       end
 
     socket = socket |> assign(:selected, MapSet.new())
 
     socket =
-      if atom == :bursts do
-        assign(socket, :burst_groups, Photos.list_burst_groups())
-      else
-        socket
+      case atom do
+        :bursts -> assign(socket, :burst_groups, Photos.list_burst_groups())
+        :copies -> assign(socket, :dup_groups, Photos.list_dup_groups())
+        _ -> socket
       end
 
     {:noreply, reload(socket, filter: atom)}
@@ -531,6 +533,90 @@ defmodule OrchestratorWeb.GalleryLive do
     end
   end
 
+  # Dismiss a burst the user judges to be a false positive (most common
+  # cause: a batch of film scans that the CLIP+timestamp heuristic
+  # mistakes for a digital burst). Just clears burst_group on every
+  # member; the photos themselves are untouched.
+  @impl Phoenix.LiveView
+  def handle_event("dismiss_burst", %{"group" => group_str}, socket) do
+    group_id = String.to_integer(group_str)
+    {:ok, n} = Photos.clear_burst_group(group_id)
+
+    {:noreply,
+     socket
+     |> assign(:burst_groups, Photos.list_burst_groups())
+     |> put_flash(:info, "Dismissed burst (#{n} photos un-grouped).")
+     |> load_photos()}
+  end
+
+  # ── filename-copy dedup (parallel to bursts, no ML — pure string match) ──
+
+  @impl Phoenix.LiveView
+  def handle_event("detect_copies", _params, socket) do
+    Orchestrator.Workers.DupDetectionWorker.new(%{})
+    |> Oban.insert()
+
+    {:noreply, put_flash(socket, :info, "Copy detection started — takes a second.")}
+  end
+
+  @impl Phoenix.LiveView
+  def handle_event("keep_best_dup", %{"group" => group_str}, socket) do
+    group_id = String.to_integer(group_str)
+
+    case List.keyfind(socket.assigns.dup_groups, group_id, 0) do
+      {^group_id, [_keeper | rest]} when rest != [] ->
+        reject_ids = Enum.map(rest, & &1.id)
+        {:ok, n} = Photos.bulk_reject(reject_ids)
+
+        {:noreply,
+         socket
+         |> assign(:dup_groups, Photos.list_dup_groups())
+         |> put_flash(:info, "Kept original, rejected #{n} cop#{if n == 1, do: "y", else: "ies"}.")
+         |> load_photos()}
+
+      _ ->
+        {:noreply, socket}
+    end
+  end
+
+  # Parallel to dismiss_burst — for when the filename match was correct
+  # but the photos are legitimately distinct (e.g. CLIP failed to reject
+  # them at threshold 0.95 despite being different scenes).
+  @impl Phoenix.LiveView
+  def handle_event("dismiss_dup", %{"group" => group_str}, socket) do
+    group_id = String.to_integer(group_str)
+    {:ok, n} = Photos.clear_dup_group(group_id)
+
+    {:noreply,
+     socket
+     |> assign(:dup_groups, Photos.list_dup_groups())
+     |> put_flash(:info, "Dismissed copy group (#{n} photos un-grouped).")
+     |> load_photos()}
+  end
+
+  @impl Phoenix.LiveView
+  def handle_event("keep_best_all_dup", _params, socket) do
+    reject_ids =
+      Enum.flat_map(socket.assigns.dup_groups, fn {_gid, [_keeper | rest]} ->
+        Enum.map(rest, & &1.id)
+      end)
+
+    if reject_ids == [] do
+      {:noreply, socket}
+    else
+      {:ok, n} = Photos.bulk_reject(reject_ids)
+
+      {:noreply,
+       socket
+       |> assign(:dup_groups, Photos.list_dup_groups())
+       |> put_flash(
+         :info,
+         "Kept the original in each group, rejected #{n} cop#{if n == 1, do: "y", else: "ies"}."
+       )
+       |> load_photos()}
+    end
+  end
+
   # ── pubsub ────────────────────────────────────────────────────────────────
 
   @doc """
@@ -579,12 +665,42 @@ defmodule OrchestratorWeb.GalleryLive do
      |> load_photos()}
   end
 
+  def handle_info({:dup_detection_complete, n_groups}, socket) do
+    socket =
+      if socket.assigns.filter == :copies do
+        assign(socket, :dup_groups, Photos.list_dup_groups())
+      else
+        socket
+      end
+
+    {:noreply,
+     socket
+     |> put_flash(
+       :info,
+       "Detected #{n_groups} filename-copy group#{if n_groups == 1, do: "", else: "s"}."
+     )
+     |> load_photos()}
+  end
+
   def handle_info({:curation_failed, _ref, _basename, _reason}, socket) do
     # Reload so failed tab count stays fresh
     {:noreply, load_photos(socket)}
   end
 
   def handle_info(_unhandled, socket), do: {:noreply, socket}
+
+  # Compact captured_at for thumbnail overlays in the Bursts/Copies tabs.
+  # Used by both views to let the user reason about whether a "burst" is
+  # actually a burst (sub-second-apart frames) vs a batch of scans
+  # (identical or minute-spaced).
+  defp format_captured_at(nil), do: "—"
+
+  defp format_captured_at(%NaiveDateTime{} = dt) do
+    "#{dt.year}-#{pad(dt.month)}-#{pad(dt.day)} #{pad(dt.hour)}:#{pad(dt.minute)}"
+  end
+
+  defp pad(n) when n < 10, do: "0#{n}"
+  defp pad(n), do: "#{n}"
 
   # ── render ────────────────────────────────────────────────────────────────
 
@@ -687,6 +803,7 @@ defmodule OrchestratorWeb.GalleryLive do
           {"Match ✓", :match}, {"No Match ✗", :no_match},
           {"Rated", :rated}, {"Unrated", :unrated},
           {"Bursts", :bursts},
+          {"Copies", :copies},
           {"Rejected", :rejected}, {"Failed", :failed}
         ] do %>
           <button
@@ -776,30 +893,129 @@ defmodule OrchestratorWeb.GalleryLive do
           <%= for {group_id, photos} <- @burst_groups do %>
             <% [best | rest] = photos %>
             <div class="mb-6 border border-gray-200 bg-white/70 p-3">
-              <div class="flex items-center justify-between mb-2">
+              <div class="flex items-center justify-between mb-2 gap-2">
                 <span class="font-sans text-[10px] uppercase tracking-widest text-gray-500">
                   Burst #{group_id} · {length(photos)} photos
                 </span>
-                <button
-                  phx-click="keep_best"
-                  phx-value-group={group_id}
-                  data-confirm={"Keep the sharpest and reject #{length(rest)} other#{if length(rest) == 1, do: "", else: "s"}?"}
-                  class="font-sans text-[10px] uppercase tracking-widest text-purple-700 border border-purple-300 px-2 py-1 hover:border-purple-600 transition-colors"
-                >
-                  Keep Best
-                </button>
+                <div class="flex gap-2">
+                  <button
+                    phx-click="dismiss_burst"
+                    phx-value-group={group_id}
+                    data-confirm={"Dismiss this burst — un-group all #{length(photos)} photos?"}
+                    class="font-sans text-[10px] uppercase tracking-widest text-gray-500 border border-gray-300 px-2 py-1 hover:border-gray-700 transition-colors"
+                  >
+                    Not a Burst
+                  </button>
+                  <button
+                    phx-click="keep_best"
+                    phx-value-group={group_id}
+                    data-confirm={"Keep the sharpest and reject #{length(rest)} other#{if length(rest) == 1, do: "", else: "s"}?"}
+                    class="font-sans text-[10px] uppercase tracking-widest text-purple-700 border border-purple-300 px-2 py-1 hover:border-purple-600 transition-colors"
+                  >
+                    Keep Best
+                  </button>
+                </div>
               </div>
               <div class="flex gap-2 overflow-x-auto">
                 <%= for photo <- photos do %>
                   <div class={[
-                    "relative shrink-0 w-32 h-32 border-2",
+                    "relative shrink-0 w-40 h-40 border-2",
                     photo.id == best.id && "border-emerald-500",
                     photo.id != best.id && "border-gray-200 opacity-60"
                   ]}>
                     <img src={photo.url} class="w-full h-full object-cover" loading="lazy" />
-                    <div class="absolute bottom-0 left-0 right-0 bg-black/60 text-white font-sans text-[9px] px-1 py-0.5 text-center">
-                      sharp {photo.sharpness_score || "?"}
-                      {if photo.id == best.id, do: " ★", else: ""}
+                    <div class="absolute bottom-0 left-0 right-0 bg-black/70 text-white font-sans px-1 py-0.5 leading-tight">
+                      <div class="text-[10px] truncate">
+                        {Path.basename(photo.file_path)}{if photo.id == best.id, do: " ★", else: ""}
+                      </div>
+                      <div class="text-[9px] text-gray-300 flex justify-between">
+                        <span>sharp {photo.sharpness_score || "?"}</span>
+                        <span>{format_captured_at(photo.captured_at)}</span>
+                      </div>
+                    </div>
+                  </div>
+                <% end %>
+              </div>
+            </div>
+          <% end %>
+        </div>
+      <% end %>
+
+      <%!-- Copies view (filename-pattern duplicates: X.jpg + X copy.jpg) --%>
+      <%= if @filter == :copies do %>
+        <div class="mb-6 p-4 border border-amber-200 bg-amber-50/30">
+          <div class="flex items-center gap-4 mb-4">
+            <p class="font-sans text-xs text-amber-800 flex-1">
+              <%= if @dup_groups == [] do %>
+                No filename-copy groups detected yet. Click
+                <span class="font-bold">Detect Copies</span>
+                to find photos that share a name modulo
+                <code class="font-mono text-[11px]">copy</code>
+                / <code class="font-mono text-[11px]">(N)</code> suffixes.
+              <% else %>
+                {length(@dup_groups)} filename-copy group{if length(@dup_groups) != 1, do: "s"} found.
+                The original (no copy suffix) is shown first in each group; ★ marks the keeper.
+              <% end %>
+            </p>
+            <button
+              phx-click="detect_copies"
+              class="font-sans text-[10px] uppercase tracking-widest text-amber-800 border border-amber-300 px-3 py-1.5 hover:border-amber-600 transition-colors shrink-0"
+            >
+              Detect Copies
+            </button>
+            <%= if @dup_groups != [] do %>
+              <button
+                phx-click="keep_best_all_dup"
+                data-confirm={"Keep the original in all #{length(@dup_groups)} groups, reject the copies?"}
+                class="font-sans text-[10px] uppercase tracking-widest text-[#111111] border border-[#111111] px-3 py-1.5 hover:bg-[#111111] hover:text-[#fcfbf9] transition-colors shrink-0"
+              >
+                Keep Original All
+              </button>
+            <% end %>
+          </div>
+
+          <%= for {group_id, photos} <- @dup_groups do %>
+            <% [keeper | rest] = photos %>
+            <div class="mb-6 border border-gray-200 bg-white/70 p-3">
+              <div class="flex items-center justify-between mb-2 gap-2">
+                <span class="font-sans text-[10px] uppercase tracking-widest text-gray-500">
+                  Copies #{group_id} · {length(photos)} photos
+                </span>
+                <div class="flex gap-2">
+                  <button
+                    phx-click="dismiss_dup"
+                    phx-value-group={group_id}
+                    data-confirm={"Dismiss this group — un-group all #{length(photos)} photos?"}
+                    class="font-sans text-[10px] uppercase tracking-widest text-gray-500 border border-gray-300 px-2 py-1 hover:border-gray-700 transition-colors"
+                  >
+                    Not Duplicates
+                  </button>
+                  <button
+                    phx-click="keep_best_dup"
+                    phx-value-group={group_id}
+                    data-confirm={"Keep the original and reject #{length(rest)} cop#{if length(rest) == 1, do: "y", else: "ies"}?"}
+                    class="font-sans text-[10px] uppercase tracking-widest text-amber-800 border border-amber-300 px-2 py-1 hover:border-amber-600 transition-colors"
+                  >
+                    Keep Original
+                  </button>
+                </div>
+              </div>
+              <div class="flex gap-2 overflow-x-auto">
+                <%= for photo <- photos do %>
+                  <div class={[
+                    "relative shrink-0 w-40 h-40 border-2",
+                    photo.id == keeper.id && "border-emerald-500",
+                    photo.id != keeper.id && "border-gray-200 opacity-60"
+                  ]}>
+                    <img src={photo.url} class="w-full h-full object-cover" loading="lazy" />
+                    <div class="absolute bottom-0 left-0 right-0 bg-black/70 text-white font-sans px-1 py-0.5 leading-tight">
+                      <div class="text-[10px] truncate">
+                        {Path.basename(photo.file_path)}{if photo.id == keeper.id, do: " ★", else: ""}
+                      </div>
+                      <div class="text-[9px] text-gray-300 flex justify-between">
+                        <span>rating {photo.user_rating || "—"}</span>
+                        <span>{format_captured_at(photo.captured_at)}</span>
+                      </div>
                     </div>
                   </div>
                 <% end %>

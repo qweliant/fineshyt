@@ -42,9 +42,14 @@ if [ -z "$PHOTO_LIBRARIES_VALUE" ]; then
   exit 0
 fi
 
-# Validate every path exists on the host before we write the file. A
-# typo'd drive path silently produces an empty mount and confuses the
-# user, so fail loudly here.
+# Warn about missing paths (typo'd, drive unplugged) but DON'T hard-fail.
+# Originally we exited 1 here because compose mode would mount every path
+# and a missing one produced an empty bind-mount. Since C4 the desktop
+# path doesn't use compose at all — a missing drive there means "you
+# can't ingest from it right now" (gallery handles it gracefully at
+# ingest time), not "the app can't boot". For compose mode we just skip
+# the missing paths from the override, which is the same outcome as if
+# the user hadn't listed them.
 MISSING=""
 OLD_IFS="$IFS"
 IFS=:
@@ -57,9 +62,8 @@ done
 IFS="$OLD_IFS"
 
 if [ -n "$MISSING" ]; then
-  printf "✗ PHOTO_LIBRARIES contains paths that don't exist on this machine:%b\n" "$MISSING"
-  echo "  fix .env (typo? drive not mounted?) and re-run."
-  exit 1
+  printf "⚠ PHOTO_LIBRARIES contains paths not present right now (drive unplugged?):%b\n" "$MISSING"
+  echo "  skipping them from the compose override; desktop mode ignores this list anyway."
 fi
 
 # Write the override file. Only the orchestrator service needs these
@@ -83,6 +87,10 @@ fi
   for path in $PHOTO_LIBRARIES_VALUE; do
     [ -z "$path" ] && continue
     [ "$path" = "$PHOTO_LIBRARY_VALUE" ] && continue
+    # Skip paths that don't exist on the host — Docker would reject the
+    # bind-mount otherwise. Already warned above. Desktop mode doesn't
+    # use this file at all, so this only matters for `make compose`.
+    [ ! -d "$path" ] && continue
     echo "      - $path:$path:ro"
   done
   IFS="$OLD_IFS"

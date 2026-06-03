@@ -6,6 +6,12 @@ readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
     "fastapi[standard]>=0.128.8",
+    # Pin python-multipart explicitly: fastapi[standard] pulls it transitively,
+    # but PyApp's install resolves the wheel's deps fresh from PyPI rather than
+    # honoring uv.lock — so without an explicit pin, PyApp can land a different
+    # version than Docker's locked one, and `request.form()` starts returning
+    # "There was an error parsing the body" on /convert. Match the lock.
+    "python-multipart==0.0.22",
     "instructor>=1.14.5",
     "openai>=2.29.0",
     "python-dotenv>=1.2.1",

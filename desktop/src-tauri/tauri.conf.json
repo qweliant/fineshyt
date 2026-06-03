@@ -29,6 +29,13 @@
     "targets": "all",
     "category": "Photography",
     "shortDescription": "Local-first photo culling that learns your taste",
-    "longDescription": "Fine.Shyt is a self-hosted photo curation tool. Point it at a folder of photos, rate the ones you love, and it learns to surface more like that — all on your machine, nothing sent to the cloud."
+    "longDescription": "Fine.Shyt is a self-hosted photo curation tool. Point it at a folder of photos, rate the ones you love, and it learns to surface more like that — all on your machine, nothing sent to the cloud.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
   }
 }

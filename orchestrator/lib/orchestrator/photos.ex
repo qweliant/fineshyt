@@ -322,10 +322,15 @@ defmodule Orchestrator.Photos do
     * `MapSet.t(String.t())` — stems that already exist.
   """
   def existing_stems(stems) do
-    # SQLite has no regexp_replace/ANY, so derive the stem (basename minus
-    # extension) in Elixir. The non-failed photo set is small (single-user,
-    # ~tens of thousands of rows), so pulling file_paths and filtering in
-    # memory is fine.
+    # SQLite has no regexp_replace/ANY, so derive the stem in Elixir. The
+    # non-failed photo set is small (single-user, ~tens of thousands of
+    # rows), so pulling file_paths and filtering in memory is fine.
+    #
+    # We compare against `normalize_stem/1` (extension + copy-suffix strip)
+    # rather than plain `rootname`, so an incoming `IMG_001` collides with a
+    # stored `IMG_001 copy.jpg`. The caller (LocalBatchImportWorker) should
+    # pass *normalized* stems too, so `IMG_001 copy.NEF` on disk collides
+    # with the already-ingested `IMG_001.jpg`.
     wanted = MapSet.new(stems)
 
     Repo.all(
@@ -333,7 +338,7 @@ defmodule Orchestrator.Photos do
         where: p.curation_status not in ["failed"],
         select: p.file_path
     )
-    |> Enum.map(fn path -> path |> Path.basename() |> Path.rootname() end)
+    |> Enum.map(&normalize_stem/1)
     |> Enum.filter(&MapSet.member?(wanted, &1))
     |> MapSet.new()
   end
@@ -592,6 +597,13 @@ defmodule Orchestrator.Photos do
   Return every "complete" photo that has a CLIP embedding, suitable for
   burst detection. Result shape matches the Python worker's expected input.
 
+  Photos already grouped as filename copies (`dup_group IS NOT NULL`) are
+  excluded — they share their stem and are visually near-identical, so the
+  burst detector would otherwise surface them as 2-photo bursts even
+  though they belong under the Copies tab. Copies take precedence; if you
+  want copies to also be considered for burst grouping, clear their
+  `dup_group` first.
+
   ## Returns
 
     * `[{id, clip_embedding, sharpness_score, captured_at}]`
@@ -599,7 +611,9 @@ defmodule Orchestrator.Photos do
   def list_photos_for_burst_detection do
     Repo.all(
       from p in Photo,
-        where: not is_nil(p.clip_embedding) and p.curation_status == "complete",
+        where:
+          not is_nil(p.clip_embedding) and p.curation_status == "complete" and
+            is_nil(p.dup_group),
         select: {p.id, p.clip_embedding, p.sharpness_score, p.captured_at}
     )
   end
@@ -653,6 +667,225 @@ defmodule Orchestrator.Photos do
 
     Enum.group_by(photos, & &1.burst_group)
     |> Enum.sort_by(fn {group_id, _} -> group_id end)
+  end
+
+  @doc """
+  Clear `burst_group` on every member of the given group. Used by the gallery's
+  "Not a Burst" button to dismiss a false-positive burst (most often a batch
+  of film scans that the visual+temporal heuristic mistakes for a digital
+  burst). The photos themselves are untouched — only the grouping is cleared,
+  so they reappear as ordinary gallery rows.
+  """
+  def clear_burst_group(group_id) when is_integer(group_id) do
+    {n, _} =
+      from(p in Photo, where: p.burst_group == ^group_id)
+      |> Repo.update_all(set: [burst_group: nil])
+
+    {:ok, n}
+  end
+
+  @doc """
+  Clear `dup_group` on every member of the given group. Parallel to
+  `clear_burst_group/1` for the Copies tab's "Not Duplicates" dismiss
+  button. Useful when the filename heuristic matched but the user
+  recognises them as legitimately distinct photos that just happen to
+  share a generic stem.
+  """
+  def clear_dup_group(group_id) when is_integer(group_id) do
+    {n, _} =
+      from(p in Photo, where: p.dup_group == ^group_id)
+      |> Repo.update_all(set: [dup_group: nil])
+
+    {:ok, n}
+  end
+
+  @doc """
+  Normalize a basename's stem for filename-copy dedup.
+
+  Strips the file extension and any macOS-style copy suffix from the result.
+  Designed to collapse `"IMG_001.jpg"`, `"IMG_001 copy.jpg"`,
+  `"IMG_001 copy 2.jpg"`, `"IMG_001 (1).jpg"` to the same canonical `"IMG_001"`.
+
+  Used by both `existing_stems/1` (to skip ingesting copies of already-present
+  photos) and `detect_and_assign_dup_groups/0` (to group existing duplicates
+  retrospectively).
+
+  ## Examples
+
+      iex> Orchestrator.Photos.normalize_stem("/foo/IMG_001 copy 2.jpg")
+      "IMG_001"
+
+      iex> Orchestrator.Photos.normalize_stem("IMG_001 (3).jpg")
+      "IMG_001"
+  """
+  # Trailing-suffix patterns we treat as copy-of-original:
+  #   * ` copy`        — macOS Finder
+  #   * ` copy 2`      — macOS Finder, numbered
+  #   * ` copy_1`      — variant some tools emit
+  #   * ` (3)`         — Finder / web-browser
+  #   * ` 2`           — macOS Finder bare-number pattern (no "copy" word)
+  #   * `_1` … `_99`   — `convert.py`'s `unique_output_path` collision-suffix
+  #                      (and Lightroom-style export disambiguators). Capped
+  #                      at two digits so camera-numbered files like
+  #                      `DSC_1234` (`_1234` = sequence number) don't get
+  #                      stripped to `DSC`. CLIP-similarity (0.95) catches
+  #                      any remaining false positives.
+  #   * `h<6+ hex>`    — short content-hash suffix some older pipeline emitted
+  #                      (e.g. `000366490014h645e66.jpg`). Anchored on the `h`
+  #                      separator so it can't eat the trailing hex run of a
+  #                      bare numeric ID like `000366490014`.
+  #
+  # The stripper runs recursively (`strip_copy_suffixes/1`) so compound
+  # chains like " 2_1" (Finder copy → then auto-renamed again with _N)
+  # peel back layer-by-layer to the canonical stem.
+  @copy_suffix_re ~r/(?:\s*\(\d+\)|\s+copy(?:[\s_]\d+)?|_\d{1,2}|\s\d{1,2}|h[a-f0-9]{6,})$/i
+
+  def normalize_stem(path) when is_binary(path) do
+    path
+    |> Path.basename()
+    |> Path.rootname()
+    |> strip_copy_suffixes()
+    |> String.trim()
+  end
+
+  # Apply @copy_suffix_re repeatedly so compound chains (e.g. " 2_1": a
+  # Finder duplicate that was later auto-renamed with the _N collision
+  # suffix) collapse all the way back to the canonical stem.
+  defp strip_copy_suffixes(stem) do
+    stripped = String.replace(stem, @copy_suffix_re, "")
+    if stripped == stem, do: stem, else: strip_copy_suffixes(stripped)
+  end
+
+  @doc """
+  Scan every "complete" photo, group by `normalize_stem/1`, **filter each
+  group by CLIP cosine similarity to the keeper** (threshold 0.95), and
+  assign a shared `dup_group` integer to every group with ≥ 2 surviving
+  members. Groups with a single surviving member — or where the keeper
+  has no embedding to confirm against — are dropped.
+
+  The CLIP filter exists to kill the false-positive mode where generic
+  filenames (`Untitled.jpg`, `Untitled (4).jpg`, …) match by stem but are
+  completely different photos. Embeddings are already L2-normalised by
+  `/api/v1/embed`, so cosine similarity is just the dot product.
+
+  The "keeper" — the photo a user is most likely to want to KEEP, surfaced
+  first in `list_dup_groups/0` — is picked per group by, in order:
+
+    1. Filename **without** a copy/paren suffix (i.e. the original).
+    2. Highest `user_rating`.
+    3. Most recent `inserted_at`.
+
+  Returns `{n_groups, n_extras}` so the caller can summarise.
+  """
+  @dup_sim_threshold 0.95
+  # Naive epoch used as the tiebreak "earliest possible" timestamp by both
+  # sort_candidate_members/1 and sort_dup_members/1. Defined here at the
+  # top so both functions capture a non-nil value (module attributes in
+  # Elixir capture their current value at function-definition time).
+  @epoch ~N[1970-01-01 00:00:00]
+
+  def detect_and_assign_dup_groups do
+    photos =
+      Repo.all(
+        from p in Photo,
+          where: p.curation_status == "complete",
+          select: {p.id, p.file_path, p.user_rating, p.inserted_at, p.clip_embedding}
+      )
+
+    confirmed =
+      photos
+      |> Enum.group_by(fn {_id, path, _r, _at, _e} -> normalize_stem(path) end)
+      |> Enum.filter(fn {_stem, members} -> length(members) > 1 end)
+      |> Enum.flat_map(&confirm_with_similarity/1)
+
+    Repo.transaction(fn ->
+      from(p in Photo, where: not is_nil(p.dup_group))
+      |> Repo.update_all(set: [dup_group: nil])
+
+      confirmed
+      |> Enum.with_index(1)
+      |> Enum.each(fn {{_stem, members}, group_id} ->
+        ids = Enum.map(members, fn {id, _, _, _, _} -> id end)
+
+        from(p in Photo, where: p.id in ^ids)
+        |> Repo.update_all(set: [dup_group: group_id])
+      end)
+    end)
+
+    n_groups = length(confirmed)
+    n_extras = confirmed |> Enum.map(fn {_, m} -> length(m) - 1 end) |> Enum.sum()
+    {n_groups, n_extras}
+  end
+
+  # Within a filename-candidate group, keep only members whose CLIP
+  # embedding has cosine_sim >= 0.95 to the keeper's. Drop the group
+  # entirely if the keeper lacks an embedding (can't confirm) or if the
+  # filter leaves a singleton.
+  defp confirm_with_similarity({stem, members}) do
+    [keeper | rest] = sort_candidate_members(members)
+    {_, _, _, _, keeper_emb} = keeper
+
+    cond do
+      is_nil(keeper_emb) ->
+        []
+
+      true ->
+        confirmed_rest =
+          Enum.filter(rest, fn {_id, _path, _r, _at, emb} ->
+            emb && cosine_sim(keeper_emb, emb) >= @dup_sim_threshold
+          end)
+
+        if confirmed_rest == [], do: [], else: [{stem, [keeper | confirmed_rest]}]
+    end
+  end
+
+  # Same heuristic as sort_dup_members/1 but operates on the 5-tuple used
+  # during detection (id, path, rating, inserted_at, embedding).
+  defp sort_candidate_members(members) do
+    Enum.sort_by(members, fn {_id, path, rating, inserted_at, _emb} ->
+      has_copy = String.match?(Path.rootname(Path.basename(path)), @copy_suffix_re)
+      {has_copy, -(rating || 0), -NaiveDateTime.diff(inserted_at || @epoch, @epoch, :second)}
+    end)
+  end
+
+  # CLIP embeddings come out of /api/v1/embed L2-normalised, so cosine
+  # similarity reduces to the dot product.
+  defp cosine_sim(a, b) when is_list(a) and is_list(b) do
+    a |> Enum.zip(b) |> Enum.reduce(0.0, fn {x, y}, acc -> acc + x * y end)
+  end
+
+  @doc """
+  Return dup groups for the gallery — each group is a list of photos with
+  the "keeper" first, then siblings ordered by (filename has copy suffix,
+  rating desc, inserted_at desc).
+
+  The list shape mirrors `list_burst_groups/0` exactly so the gallery
+  template can reuse the same iteration shape.
+  """
+  def list_dup_groups do
+    photos =
+      Repo.all(
+        from p in Photo,
+          where: not is_nil(p.dup_group) and p.curation_status == "complete"
+      )
+
+    photos
+    |> Enum.group_by(& &1.dup_group)
+    |> Enum.map(fn {gid, members} -> {gid, sort_dup_members(members)} end)
+    |> Enum.sort_by(fn {group_id, _} -> group_id end)
+  end
+
+  # Keeper-first ordering. Same heuristic as detect_and_assign_dup_groups/0:
+  # original (no copy suffix) > highest rating > most recent. All three
+  # criteria are negated (or use a "false sorts first" boolean) so the
+  # plain ascending Enum.sort_by puts the keeper first.
+  defp sort_dup_members(members) do
+    Enum.sort_by(members, fn p ->
+      has_copy = String.match?(Path.rootname(Path.basename(p.file_path)), @copy_suffix_re)
+      rating = -(p.user_rating || 0)
+      neg_age = -NaiveDateTime.diff(p.inserted_at || @epoch, @epoch, :second)
+      {has_copy, rating, neg_age}
+    end)
   end
 
   @doc """

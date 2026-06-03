@@ -1,4 +1,4 @@
-.PHONY: dev db-up db-down setup export reset start-phoenix start-ai compose compose-init compose-up compose-down compose-build compose-logs desktop-dev desktop-build release c2-services c2-services-down c2-run c5-llama c5-llama-stop c5-llama-logs ai-worker-launcher
+.PHONY: dev db-up db-down setup export reset start-phoenix start-ai compose compose-init compose-up compose-down compose-build compose-logs desktop-dev desktop-build desktop-icon release c2-services c2-services-down c2-run c5-llama c5-llama-stop c5-llama-logs ai-worker-launcher
 
 CINNA  := \033[38;5;153m
 KUROMI := \033[38;5;135m
@@ -158,7 +158,8 @@ compose-logs:
 ## roadmap.
 
 desktop-dev: ai-worker-launcher
-	@printf "$(CINNA)$(BOLD)→ launching desktop shell in dev mode...$(RESET)\n"
+	@printf "$(CINNA)$(BOLD)→ launching desktop shell — Tauri/WKWebView takes ~30s to open the$(RESET)\n"
+	@printf "$(CINNA)$(BOLD)  window on a cold launch; the splash + boot pipeline run after that.$(RESET)\n"
 	@cd desktop/src-tauri && cargo run
 
 desktop-build:
@@ -167,6 +168,31 @@ desktop-build:
 		(printf "$(CINNA)→ installing tauri-cli (one time)...$(RESET)\n" && \
 		 cargo install tauri-cli --version "^2.0" --locked)
 	@cd desktop/src-tauri && cargo tauri build
+
+# Regenerates desktop/src-tauri/icons/{32,128,128@2x,icon.icns,icon.ico,...}
+# from desktop/src-tauri/icons/source.svg. The SVG is "FS" in the title's
+# brand styling. Rasterises via macOS's built-in qlmanage (WebKit) then
+# delegates to `cargo tauri icon` for the full bundle.icon set.
+#
+# Note: the desktop dock/window icon in DEV mode comes from macOS's default
+# for unbundled binaries — these assets only take effect on `make
+# desktop-build` once bundle.active is flipped to true in tauri.conf.json.
+desktop-icon:
+	@command -v qlmanage >/dev/null 2>&1 || \
+		(printf "$(KUROMI)✗ qlmanage not found (macOS-only). Render desktop/src-tauri/icons/source.svg to a 1024x1024 PNG some other way.$(RESET)\n"; exit 1)
+	@printf "$(CINNA)$(BOLD)→ rasterising source.svg to 1024x1024 PNG via qlmanage...$(RESET)\n"
+	@rm -f /tmp/source.svg.png
+	@qlmanage -t -s 1024 desktop/src-tauri/icons/source.svg -o /tmp >/dev/null 2>&1
+	@mv /tmp/source.svg.png /tmp/fineshyt-icon-source.png
+	@command -v cargo-tauri >/dev/null 2>&1 || \
+		(printf "$(CINNA)→ installing tauri-cli (one time)...$(RESET)\n" && \
+		 cargo install tauri-cli --version "^2.0" --locked)
+	@printf "$(CINNA)$(BOLD)→ generating icon set via cargo tauri icon...$(RESET)\n"
+	@cd desktop/src-tauri && cargo tauri icon /tmp/fineshyt-icon-source.png
+	@rm -f /tmp/fineshyt-icon-source.png
+	@printf "$(KEROPPI)→ icons regenerated in desktop/src-tauri/icons/$(RESET)\n"
+	@printf "$(KEROPPI)  (dev mode still shows the macOS default icon for unbundled binaries;$(RESET)\n"
+	@printf "$(KEROPPI)   the new icon takes effect on 'make desktop-build' bundles.)$(RESET)\n"
 
 ## ---- Phase C5 — embedded vision LLM via llama.cpp ----------------------
 ##
@@ -244,19 +270,26 @@ c5-llama-logs:
 AI_WORKER_LAUNCHER := desktop/runtime/bin/fineshyt-ai-worker
 AI_WORKER_VERSION  := 0.1.0
 AI_WORKER_WHEEL    := ai_worker/dist/ai_worker-$(AI_WORKER_VERSION)-py3-none-any.whl
+# Wheel-affecting source. make uses these mtimes to decide whether to rebuild,
+# so make ai-worker-launcher (and `make desktop-dev` which depends on it) is
+# a no-op when nothing changed — fixes the previous "always rebuilds" bug
+# where the recipe's early-exit `exit 0` couldn't actually short-circuit
+# subsequent recipe lines (each `@line` is a fresh shell in make).
+AI_WORKER_SOURCES  := $(shell find ai_worker/src/fineshyt_ai -name '*.py' 2>/dev/null) ai_worker/pyproject.toml ai_worker/uv.lock
 
-ai-worker-launcher:
-	@if [ -x $(AI_WORKER_LAUNCHER) ]; then \
-		printf "$(KEROPPI)→ launcher already built at $(AI_WORKER_LAUNCHER) (delete to rebuild)$(RESET)\n"; \
-		exit 0; \
-	fi
-	@command -v cargo >/dev/null 2>&1 || \
-		(printf "$(KUROMI)✗ cargo not found. Install Rust from rustup.rs.$(RESET)\n"; exit 1)
+ai-worker-launcher: $(AI_WORKER_LAUNCHER)
+
+$(AI_WORKER_WHEEL): $(AI_WORKER_SOURCES)
 	@command -v uv >/dev/null 2>&1 || \
 		(printf "$(KUROMI)✗ uv not found. Install with 'curl -LsSf https://astral.sh/uv/install.sh | sh'.$(RESET)\n"; exit 1)
-	@mkdir -p $(dir $(AI_WORKER_LAUNCHER))
 	@printf "$(CINNA)$(BOLD)→ building ai_worker wheel...$(RESET)\n"
 	@cd ai_worker && uv build --wheel >/dev/null
+	@touch $@
+
+$(AI_WORKER_LAUNCHER): $(AI_WORKER_WHEEL)
+	@command -v cargo >/dev/null 2>&1 || \
+		(printf "$(KUROMI)✗ cargo not found. Install Rust from rustup.rs.$(RESET)\n"; exit 1)
+	@mkdir -p $(dir $@)
 	@printf "$(CINNA)$(BOLD)→ compiling PyApp launcher (Rust, ~45s first time)...$(RESET)\n"
 	@TMP=$$(mktemp -d) && \
 		PYAPP_PROJECT_NAME=ai_worker \
@@ -264,16 +297,10 @@ ai-worker-launcher:
 		PYAPP_PROJECT_PATH=$$(pwd)/$(AI_WORKER_WHEEL) \
 		PYAPP_EXEC_SPEC=fineshyt_ai.serve:main \
 		PYAPP_UV_ENABLED=1 \
-		PYAPP_DISTRIBUTION_EMBED=1 \
 		cargo install pyapp --force --quiet --root $$TMP && \
-		mv $$TMP/bin/pyapp $(AI_WORKER_LAUNCHER) && \
+		mv $$TMP/bin/pyapp $@ && \
 		rm -rf $$TMP
-	@printf "$(KEROPPI)→ launcher ready at $(AI_WORKER_LAUNCHER) ($$(du -sh $(AI_WORKER_LAUNCHER) | cut -f1))$(RESET)\n"
-	@printf "$(KEROPPI)  • Python runtime is embedded — no Python download on first launch.$(RESET)\n"
-	@printf "$(KEROPPI)  • Deps (~1 GB: torch + CLIP + scipy + …) still pip-install on first run.$(RESET)\n"
-	@printf "$(KEROPPI)  • TODO: Windows console suppression — needs PyApp built with the$(RESET)\n"
-	@printf "$(KEROPPI)    'gui' subsystem (no terminal flash when the Tauri shell spawns it).$(RESET)\n"
-	@printf "$(KEROPPI)    Add a Cargo feature flag here once a Windows CI runner is up.$(RESET)\n"
+	@printf "$(KEROPPI)→ launcher ready at $@ ($$(du -sh $@ | cut -f1))$(RESET)\n"
 
 ## ---- Phase C2 — Elixir release as a local sidecar -----------------------
 ##
