@@ -14,23 +14,24 @@
 //!
 //! Boot sequence:
 //!
-//!   1. `make compose-init` — idempotent .env bootstrap (no Docker now;
-//!      still useful for SECRET_KEY_BASE + PHOTO_LIBRARY validation).
-//!   2. Spawn the PyApp ai_worker launcher; spawn `llama-server` (both
+//!   1. Spawn the PyApp ai_worker launcher; spawn `llama-server` (both
 //!      bind their own ports; they initialise in parallel).
-//!   3. TCP-poll both ports until each is listening. First launch of the
+//!   2. TCP-poll both ports until each is listening. First launch of the
 //!      ai_worker pip-installs deps into a per-user venv (a few minutes
 //!      on a cold machine); first launch of llama-server downloads the
 //!      vision GGUF (~5–7 GB).
-//!   4. Verify the release binary exists at
-//!      `orchestrator/_build/prod/rel/orchestrator/bin/server`. If
-//!      missing, fail fast with a "run `make release` first" message.
-//!   5. Read SECRET_KEY_BASE from .env and assemble the env block.
-//!   6. Run `bin/migrate` (one-shot, idempotent).
-//!   7. Spawn `bin/server` as a tracked child process. Stash all `Child`
+//!   3. Resolve the Phoenix release binary via Tauri's resource path
+//!      manager (dev: project layout, bundled: `<App>/Contents/Resources/
+//!      phoenix/bin/server`). Fail fast with a "run `make release` first"
+//!      message if missing in dev.
+//!   4. Ensure SECRET_KEY_BASE: read from `.env` (dev) or
+//!      `<app_data_dir>/secret_key_base` (bundled), generating on first
+//!      run if missing. Assemble the env block.
+//!   5. Run `bin/migrate` (one-shot, idempotent).
+//!   6. Spawn `bin/server` as a tracked child process. Stash all `Child`
 //!      handles in Tauri managed state so cleanup can find them.
-//!   8. TCP-poll 127.0.0.1:4000 until Phoenix is listening.
-//!   9. The splash JS already polls Phoenix itself and redirects via
+//!   7. TCP-poll 127.0.0.1:4000 until Phoenix is listening.
+//!   8. The splash JS already polls Phoenix itself and redirects via
 //!      `window.location.href` — Rust doesn't navigate.
 //!
 //! Shutdown sequence on window close: SIGKILL each tracked child
@@ -60,7 +61,12 @@ const LLAMA_PORT: u16 = 11434;
 /// FastAPI on first run, then binds this port.
 const AI_WORKER_HOST: &str = "127.0.0.1";
 const AI_WORKER_PORT: u16 = 8000;
-const AI_WORKER_LAUNCHER_RELATIVE: &str = "desktop/runtime/bin/fineshyt-ai-worker";
+/// Path of the launcher INSIDE a bundled `.app` (relative to
+/// `Resources/`). In dev (`cargo run`) Tauri's path manager points
+/// resource_dir() at the project's `runtime/` layout so the same
+/// relative path resolves either way. See `tauri.conf.json`'s
+/// `bundle.resources` for the source-side mapping.
+const AI_WORKER_LAUNCHER_BUNDLED: &str = "bin/fineshyt-ai-worker";
 
 const POLL_TIMEOUT: Duration = Duration::from_secs(180);
 /// Longer fallback for the ai_worker's first launch: PyApp downloads
@@ -70,10 +76,12 @@ const POLL_TIMEOUT: Duration = Duration::from_secs(180);
 const AI_WORKER_POLL_TIMEOUT: Duration = Duration::from_secs(600);
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 
-/// Path of the release binary relative to the repo root. Built by
-/// `make release` (which boils down to `MIX_ENV=prod mix release`).
-const RELEASE_BIN_RELATIVE: &str = "orchestrator/_build/prod/rel/orchestrator/bin/server";
-const RELEASE_MIGRATE_RELATIVE: &str = "orchestrator/_build/prod/rel/orchestrator/bin/migrate";
+/// Path of the release binary INSIDE a bundled `.app` (relative to
+/// `Resources/`). The whole release tree (~46 MB) ships under `phoenix/`
+/// via `tauri.conf.json`'s `bundle.resources` glob. Built by `make
+/// release` (which boils down to `MIX_ENV=prod mix release`).
+const RELEASE_BIN_BUNDLED: &str = "phoenix/bin/server";
+const RELEASE_MIGRATE_BUNDLED: &str = "phoenix/bin/migrate";
 
 /// Vision model the shell loads on launch. ggml-org's HuggingFace
 /// collection of multimodal GGUFs is the blessed source — llama-server's
@@ -116,26 +124,13 @@ fn run_startup_pipeline(app: &AppHandle) {
         }
     };
 
-    eprintln!(
-        "[fineshyt-desktop] startup: running `make compose-init` in {}",
-        repo.display()
-    );
-    if let Err(e) = run_compose_init(&repo) {
-        emit_failure(
-            app,
-            format!(
-                "make compose-init failed.\n\n\
-                 This usually means PHOTO_LIBRARY (or PHOTO_LIBRARIES) \
-                 isn't set in .env. Open the repo's .env file, set it \
-                 to the folder where your photos live, then re-launch.\n\n\
-                 Underlying error:\n{e}"
-            ),
-        );
-        return;
-    }
+    // No `make compose-init` step here: the bundled app has no Makefile,
+    // and the desktop path doesn't use docker-compose anyway. The maintainer
+    // can still run `make compose-init` manually in dev for the compose
+    // path. SECRET_KEY_BASE is handled below in `ensure_secret_key_base`.
 
     eprintln!("[fineshyt-desktop] startup: spawning ai_worker (PyApp launcher)");
-    match spawn_ai_worker(&repo) {
+    match spawn_ai_worker(app, &repo) {
         Ok(mut child) => {
             if let Err(e) = verify_alive(&mut child, "ai_worker", AI_WORKER_PORT) {
                 let _ = child.wait();
@@ -224,7 +219,13 @@ fn run_startup_pipeline(app: &AppHandle) {
     }
 
     eprintln!("[fineshyt-desktop] startup: locating release binary");
-    let release_bin = repo.join(RELEASE_BIN_RELATIVE);
+    let release_bin = match resolve_resource(app, RELEASE_BIN_BUNDLED) {
+        Ok(p) => p,
+        Err(e) => {
+            emit_failure(app, format!("couldn't resolve release path: {e}"));
+            return;
+        }
+    };
     if !release_bin.is_file() {
         emit_failure(
             app,
@@ -240,15 +241,14 @@ fn run_startup_pipeline(app: &AppHandle) {
         return;
     }
 
-    eprintln!("[fineshyt-desktop] startup: reading SECRET_KEY_BASE from .env");
-    let secret = match read_secret_key_base(&repo) {
+    eprintln!("[fineshyt-desktop] startup: ensuring SECRET_KEY_BASE");
+    let secret = match ensure_secret_key_base(app, &repo) {
         Ok(s) => s,
         Err(e) => {
             emit_failure(
                 app,
                 format!(
-                    "Couldn't read SECRET_KEY_BASE from .env. Try running \
-                     `make compose-init` to regenerate it.\n\n\
+                    "Couldn't read or generate SECRET_KEY_BASE.\n\n\
                      Underlying error:\n{e}"
                 ),
             );
@@ -256,10 +256,22 @@ fn run_startup_pipeline(app: &AppHandle) {
         }
     };
 
-    let env = release_env(&repo, &secret);
+    let env = match release_env(app, &repo, &secret) {
+        Ok(e) => e,
+        Err(e) => {
+            emit_failure(
+                app,
+                format!(
+                    "Couldn't resolve the orchestrator's data directories.\n\n\
+                     Underlying error:\n{e}"
+                ),
+            );
+            return;
+        }
+    };
 
     eprintln!("[fineshyt-desktop] startup: running orchestrator migrations");
-    if let Err(e) = run_migrate(&repo, &env) {
+    if let Err(e) = run_migrate(app, &repo, &env) {
         emit_failure(
             app,
             format!(
@@ -274,7 +286,7 @@ fn run_startup_pipeline(app: &AppHandle) {
     }
 
     eprintln!("[fineshyt-desktop] startup: spawning native orchestrator release");
-    let child = match spawn_orchestrator(&repo, &env) {
+    let child = match spawn_orchestrator(app, &repo, &env) {
         Ok(c) => c,
         Err(e) => {
             emit_failure(
@@ -324,30 +336,58 @@ fn repo_root() -> Result<PathBuf, String> {
         })
 }
 
-fn run_compose_init(repo: &Path) -> Result<(), String> {
-    let output = Command::new("make")
-        .arg("compose-init")
-        .current_dir(repo)
-        .output()
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                "`make` is not on PATH. Install Xcode Command Line Tools \
-                 (macOS) or your distro's build-essential package."
-                    .to_string()
-            } else {
-                format!("couldn't spawn make: {e}")
-            }
-        })?;
+/// Resolve a bundled resource path.
+///
+/// We don't go through `app.path().resource_dir()` because Tauri's path
+/// resolver returns "unknown path" when queried from a setup-spawned thread
+/// in some launch contexts (running the inner binary directly, vs being
+/// launched via `open`/NSWorkspace). Computing the resource directory from
+/// `current_exe()` directly is the same calculation Tauri does internally
+/// for bundled .app/.exe layouts, and works deterministically regardless of
+/// how the binary was started.
+///
+/// In dev (`cargo run`) the binary lives at `target/debug/` and we fall
+/// through to the repo's `desktop/runtime/` layout — the same paths
+/// tauri.conf.json's `bundle.resources` points at.
+fn resolve_resource(_app: &AppHandle, rel: &str) -> Result<PathBuf, String> {
+    let exe = std::env::current_exe()
+        .map_err(|e| format!("current_exe failed: {e}"))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        return Err(format!(
-            "make compose-init exited with {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
-            output.status.code()
-        ));
+    // Bundled macOS layout: <Bundle>.app/Contents/MacOS/<binary>
+    //   resources at        <Bundle>.app/Contents/Resources/<rel>
+    // The "Contents/MacOS" pair is the tell.
+    let in_bundle = exe
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        == Some("MacOS")
+        && exe
+            .parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            == Some("Contents");
+
+    if in_bundle {
+        let resources = exe
+            .parent()
+            .and_then(|p| p.parent())
+            .map(|p| p.join("Resources"))
+            .ok_or_else(|| "couldn't derive Resources from current_exe".to_string())?;
+        return Ok(resources.join(rel));
     }
-    Ok(())
+
+    // Dev fallback: tauri.conf.json's `bundle.resources` source paths are
+    // relative to desktop/src-tauri/ — `../runtime/...`. From the repo root
+    // that's `desktop/runtime/...`. We map the dest (`bin/...`,
+    // `phoenix/...`) back to the source layout so a single resolve call
+    // works in both modes.
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let runtime = manifest_dir
+        .parent()
+        .map(|p| p.join("runtime"))
+        .ok_or_else(|| "CARGO_MANIFEST_DIR has no parent".to_string())?;
+    Ok(runtime.join(rel))
 }
 
 /// Spawn the PyApp ai_worker launcher (Phase C4 — replaces the previous
@@ -355,8 +395,12 @@ fn run_compose_init(repo: &Path) -> Result<(), String> {
 /// run pip-installs the FastAPI worker + its deps into a per-user venv
 /// (`~/Library/Application Support/pyapp/ai-worker/<hash>/<ver>/`); on
 /// subsequent runs it just re-execs the existing venv's Python entry.
-fn spawn_ai_worker(repo: &Path) -> Result<Child, String> {
-    let launcher = repo.join(AI_WORKER_LAUNCHER_RELATIVE);
+///
+/// The launcher binary is shipped as a Tauri bundle resource — `app.path()
+/// .resource_dir()` works in both dev (resolves to the project layout)
+/// and bundled (`<App>/Contents/Resources/`).
+fn spawn_ai_worker(app: &AppHandle, repo: &Path) -> Result<Child, String> {
+    let launcher = resolve_resource(app, AI_WORKER_LAUNCHER_BUNDLED)?;
     if !launcher.is_file() {
         return Err(format!(
             "PyApp launcher not built. Expected: {}\n\n\
@@ -366,11 +410,7 @@ fn spawn_ai_worker(repo: &Path) -> Result<Child, String> {
         ));
     }
 
-    let uploads_dir = repo
-        .join("orchestrator")
-        .join("priv")
-        .join("static")
-        .join("uploads");
+    let (uploads_dir, _db_path) = data_paths(app, repo)?;
 
     let mut cmd = Command::new(&launcher);
     cmd.env("AI_WORKER_HOST", AI_WORKER_HOST);
@@ -445,60 +485,129 @@ fn wait_for_llama_server() -> Result<(), String> {
     wait_for_port(LLAMA_HOST, LLAMA_PORT)
 }
 
-/// Reads SECRET_KEY_BASE from the repo's .env file. We require this
-/// to be already set; compose-init upstream generates it.
-fn read_secret_key_base(repo: &Path) -> Result<String, String> {
-    let env_path = repo.join(".env");
-    let contents = std::fs::read_to_string(&env_path)
-        .map_err(|e| format!("read {}: {e}", env_path.display()))?;
+/// Read SECRET_KEY_BASE, generating + persisting one on first run.
+///
+/// Dev builds keep using the repo `.env` so the maintainer's existing value
+/// stays in place. Release builds persist to `<app_data_dir>/secret_key_base`
+/// — a one-line file (no .env parsing needed in the bundled shape). 48
+/// random bytes, base64-encoded, matching what `mix phx.gen.secret` writes.
+fn ensure_secret_key_base(app: &AppHandle, repo: &Path) -> Result<String, String> {
+    if cfg!(debug_assertions) {
+        return read_or_generate_in_env(repo);
+    }
 
-    for line in contents.lines() {
-        if let Some(value) = line.strip_prefix("SECRET_KEY_BASE=") {
-            let value = value.trim().trim_matches(|c| c == '"' || c == '\'');
-            if !value.is_empty() {
-                return Ok(value.to_string());
+    use tauri::Manager;
+    let data_root = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("couldn't resolve app_data_dir: {e}"))?;
+    std::fs::create_dir_all(&data_root)
+        .map_err(|e| format!("couldn't create {}: {e}", data_root.display()))?;
+
+    let secret_path = data_root.join("secret_key_base");
+    if secret_path.is_file() {
+        let s = std::fs::read_to_string(&secret_path)
+            .map_err(|e| format!("read {}: {e}", secret_path.display()))?;
+        let trimmed = s.trim();
+        if !trimmed.is_empty() {
+            return Ok(trimmed.to_string());
+        }
+    }
+
+    let secret = generate_secret_key_base();
+    std::fs::write(&secret_path, &secret)
+        .map_err(|e| format!("write {}: {e}", secret_path.display()))?;
+    Ok(secret)
+}
+
+fn read_or_generate_in_env(repo: &Path) -> Result<String, String> {
+    let env_path = repo.join(".env");
+
+    if env_path.is_file() {
+        let contents = std::fs::read_to_string(&env_path)
+            .map_err(|e| format!("read {}: {e}", env_path.display()))?;
+        for line in contents.lines() {
+            if let Some(value) = line.strip_prefix("SECRET_KEY_BASE=") {
+                let value = value.trim().trim_matches(|c| c == '"' || c == '\'');
+                if !value.is_empty() {
+                    return Ok(value.to_string());
+                }
             }
         }
     }
 
-    Err(format!(
-        "SECRET_KEY_BASE missing from {}. Run `make compose-init` to generate one.",
-        env_path.display()
-    ))
+    // Generate and append. .env may exist but lack the key, or be missing
+    // entirely — append-or-create is fine either way.
+    let secret = generate_secret_key_base();
+    let line = format!("SECRET_KEY_BASE={secret}\n");
+    let combined = match std::fs::read_to_string(&env_path) {
+        Ok(s) if s.ends_with('\n') => s + &line,
+        Ok(s) => s + "\n" + &line,
+        Err(_) => line,
+    };
+    std::fs::write(&env_path, combined)
+        .map_err(|e| format!("write {}: {e}", env_path.display()))?;
+    Ok(secret)
+}
+
+/// 48 random bytes → base64. Same shape `mix phx.gen.secret` emits.
+fn generate_secret_key_base() -> String {
+    use base64::Engine;
+    use rand::RngCore;
+    let mut bytes = [0u8; 48];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
 /// The env block we pass to bin/migrate and bin/server. Everything the
 /// release reads at runtime lives in config/runtime.exs — the values
 /// here mirror that file's expected vars.
 ///
-/// `STATIC_UPLOADS_DIR` is the most C2-specific one. We point it at the
-/// repo's existing `orchestrator/priv/static/uploads` so:
-///   - the user's existing ~12k photo JPEGs are served immediately
-///     (no Docker bind-mount gymnastics)
-///   - new ingests write to the same path, matching native dev's layout
-///   - swapping into a packaged-app future where uploads need to live
-///     in `~/Library/Application Support/Fine.Shyt/uploads` is a
-///     one-line change here.
-fn release_env(repo: &Path, secret: &str) -> Vec<(&'static str, String)> {
-    let uploads_dir = repo
-        .join("orchestrator")
-        .join("priv")
-        .join("static")
-        .join("uploads")
-        .to_string_lossy()
-        .into_owned();
+/// `STATIC_UPLOADS_DIR` + `DATABASE_PATH` are environment-split:
+///   - **Dev build** (`cargo run` / `make desktop-dev`) — point at the
+///     repo's `orchestrator/priv/...` so the maintainer's existing ~12k
+///     photo JPEGs + SQLite db keep working.
+///   - **Bundled .app** (`cargo tauri build`) — point at the OS-specific
+///     app-data dir (macOS: `~/Library/Application Support/Fine.Shyt/`).
+///     The Phoenix app creates the file + parent dir on boot
+///     (see `Orchestrator.Application.ensure_db_dir/0` +
+///     `ensure_uploads_symlink/0`).
+/// Where the orchestrator's mutable state lives (uploads dir + SQLite db).
+/// Dev builds keep using the in-repo `orchestrator/priv/` so the maintainer's
+/// existing data carries over; release builds move to the OS-specific app-data
+/// dir (Tauri picks the right thing per-OS — `~/Library/Application Support/
+/// Fine.Shyt/` on macOS, `%APPDATA%/Fine.Shyt/` on Windows, `$XDG_DATA_HOME/
+/// Fine.Shyt/` on Linux). Single source of truth for both `release_env` and
+/// `spawn_ai_worker`.
+fn data_paths(app: &AppHandle, repo: &Path) -> Result<(PathBuf, PathBuf), String> {
+    if cfg!(debug_assertions) {
+        let priv_dir = repo.join("orchestrator").join("priv");
+        Ok((
+            priv_dir.join("static").join("uploads"),
+            priv_dir.join("fineshyt.db"),
+        ))
+    } else {
+        use tauri::Manager;
+        let data_root = app
+            .path()
+            .app_data_dir()
+            .map_err(|e| format!("couldn't resolve app_data_dir: {e}"))?;
+        std::fs::create_dir_all(&data_root)
+            .map_err(|e| format!("couldn't create {}: {e}", data_root.display()))?;
+        Ok((data_root.join("uploads"), data_root.join("fineshyt.db")))
+    }
+}
 
-    // SQLite database file, co-located with uploads under the repo's
-    // orchestrator/priv. The Phoenix app creates the file + parent dir on
-    // boot (see Orchestrator.Application.ensure_db_dir/0).
-    let database_path = repo
-        .join("orchestrator")
-        .join("priv")
-        .join("fineshyt.db")
-        .to_string_lossy()
-        .into_owned();
+fn release_env(
+    app: &AppHandle,
+    repo: &Path,
+    secret: &str,
+) -> Result<Vec<(&'static str, String)>, String> {
+    let (uploads_dir, database_path) = data_paths(app, repo)?;
+    let uploads_dir = uploads_dir.to_string_lossy().into_owned();
+    let database_path = database_path.to_string_lossy().into_owned();
 
-    vec![
+    Ok(vec![
         ("DATABASE_PATH", database_path),
         ("SECRET_KEY_BASE", secret.to_string()),
         ("PHX_HOST", "localhost".to_string()),
@@ -507,11 +616,15 @@ fn release_env(repo: &Path, secret: &str) -> Vec<(&'static str, String)> {
         ("PORT", PHOENIX_PORT.to_string()),
         ("AI_WORKER_URL", "http://localhost:8000".to_string()),
         ("STATIC_UPLOADS_DIR", uploads_dir),
-    ]
+    ])
 }
 
-fn run_migrate(repo: &Path, env: &[(&'static str, String)]) -> Result<(), String> {
-    let migrate_bin = repo.join(RELEASE_MIGRATE_RELATIVE);
+fn run_migrate(
+    app: &AppHandle,
+    repo: &Path,
+    env: &[(&'static str, String)],
+) -> Result<(), String> {
+    let migrate_bin = resolve_resource(app, RELEASE_MIGRATE_BUNDLED)?;
     let mut cmd = Command::new(&migrate_bin);
     cmd.current_dir(repo);
     for (k, v) in env {
@@ -532,8 +645,12 @@ fn run_migrate(repo: &Path, env: &[(&'static str, String)]) -> Result<(), String
     Ok(())
 }
 
-fn spawn_orchestrator(repo: &Path, env: &[(&'static str, String)]) -> Result<Child, String> {
-    let server_bin = repo.join(RELEASE_BIN_RELATIVE);
+fn spawn_orchestrator(
+    app: &AppHandle,
+    repo: &Path,
+    env: &[(&'static str, String)],
+) -> Result<Child, String> {
+    let server_bin = resolve_resource(app, RELEASE_BIN_BUNDLED)?;
     let mut cmd = Command::new(&server_bin);
     cmd.current_dir(repo);
     for (k, v) in env {

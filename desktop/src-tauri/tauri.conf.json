@@ -25,9 +25,13 @@
     "withGlobalTauri": true
   },
   "bundle": {
-    "active": false,
+    "active": true,
     "targets": "all",
     "category": "Photography",
+    "resources": {
+      "../runtime/bin/fineshyt-ai-worker": "bin/fineshyt-ai-worker",
+      "../runtime/phoenix/": "phoenix/"
+    },
     "shortDescription": "Local-first photo culling that learns your taste",
     "longDescription": "Fine.Shyt is a self-hosted photo curation tool. Point it at a folder of photos, rate the ones you love, and it learns to surface more like that — all on your machine, nothing sent to the cloud.",
     "icon": [

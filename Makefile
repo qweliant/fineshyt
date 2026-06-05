@@ -1,4 +1,4 @@
-.PHONY: dev db-up db-down setup export reset start-phoenix start-ai compose compose-init compose-up compose-down compose-build compose-logs desktop-dev desktop-build desktop-icon release c2-services c2-services-down c2-run c5-llama c5-llama-stop c5-llama-logs ai-worker-launcher
+.PHONY: dev db-up db-down setup export reset start-phoenix start-ai compose compose-init compose-up compose-down compose-build compose-logs desktop-dev desktop-build desktop-icon desktop-stage-phoenix release c2-services c2-services-down c2-run c5-llama c5-llama-stop c5-llama-logs ai-worker-launcher
 
 CINNA  := \033[38;5;153m
 KUROMI := \033[38;5;135m
@@ -162,12 +162,30 @@ desktop-dev: ai-worker-launcher
 	@printf "$(CINNA)$(BOLD)  window on a cold launch; the splash + boot pipeline run after that.$(RESET)\n"
 	@cd desktop/src-tauri && cargo run
 
-desktop-build:
+desktop-build: ai-worker-launcher desktop-stage-phoenix
 	@printf "$(CINNA)$(BOLD)→ building desktop binary (release)...$(RESET)\n"
 	@command -v cargo-tauri >/dev/null 2>&1 || \
 		(printf "$(CINNA)→ installing tauri-cli (one time)...$(RESET)\n" && \
 		 cargo install tauri-cli --version "^2.0" --locked)
 	@cd desktop/src-tauri && cargo tauri build
+
+# Stage the Phoenix release into desktop/runtime/phoenix/ for bundling.
+# Two things this step does that a naive copy doesn't:
+#   1. Skips the priv/static/uploads symlink (`ensure_uploads_symlink`
+#      creates this at boot pointing at the user's photo library — Tauri's
+#      resource bundling follows symlinks, so without this exclude the
+#      .app would balloon by however many GB of photos the maintainer has).
+#   2. rsync preserves the directory structure exactly so `bin/server`
+#      stays a callable Erlang release entry point.
+# Re-runs cheaply since rsync only copies changed files.
+desktop-stage-phoenix: release
+	@printf "$(CINNA)$(BOLD)→ staging Phoenix release into desktop/runtime/phoenix/...$(RESET)\n"
+	@mkdir -p desktop/runtime/phoenix
+	@rsync -a --delete \
+		--exclude='lib/orchestrator-*/priv/static/uploads' \
+		--exclude='lib/orchestrator-*/priv/static/uploads/' \
+		orchestrator/_build/prod/rel/orchestrator/ desktop/runtime/phoenix/
+	@printf "$(KEROPPI)→ staged: $$(du -sh desktop/runtime/phoenix | cut -f1)$(RESET)\n"
 
 # Regenerates desktop/src-tauri/icons/{32,128,128@2x,icon.icns,icon.ico,...}
 # from desktop/src-tauri/icons/source.svg. The SVG is "FS" in the title's
