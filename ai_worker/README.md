@@ -1,6 +1,6 @@
 # ai_worker
 
-The Python / FastAPI inference microservice for [Fine.Shyt](../README.md). The Elixir [orchestrator](../orchestrator/) coordinates the pipeline and calls this service over HTTP for the ML-heavy steps.
+The Python / FastAPI inference microservice for [Fineshyt](../README.md). The Elixir [orchestrator](../orchestrator/) coordinates the pipeline and calls this service over HTTP for the ML-heavy steps.
 
 It's **stateless and filesystem-independent** — `/convert`, `/curate`, and `/embed` all receive image **bytes** as multipart uploads (the orchestrator reads the originals off disk and streams them), so this service needs no access to the user's photo library. That's what lets it run in a container even when photos live on a drive Docker can't mount.
 

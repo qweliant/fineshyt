@@ -87,7 +87,7 @@ defmodule Orchestrator.Photos.Photo do
     # XMP sidecar tracking. `source_path` is the original RAW/source file
     # the JPEG was converted from — XMP sidecars sit next to it as
     # `<source>.xmp`. `sidecar_synced_at` records the last time
-    # Fine.Shyt wrote the sidecar so we can skip-if-newer when the user's
+    # Fineshyt wrote the sidecar so we can skip-if-newer when the user's
     # editor has touched it since.
     field :source_path, :string
     field :sidecar_synced_at, :naive_datetime

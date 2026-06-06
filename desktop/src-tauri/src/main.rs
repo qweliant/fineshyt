@@ -1,7 +1,7 @@
 // Hide the console window on Windows release builds — devs still get one in dev.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-//! Fine.Shyt desktop shell — Phase C4 (in progress).
+//! Fineshyt desktop shell — Phase C4 (in progress).
 //!
 //! All three runtime services run **natively** as child processes of this
 //! Tauri shell — no Docker:
@@ -167,7 +167,7 @@ fn run_startup_pipeline(app: &AppHandle) {
             emit_failure(
                 app,
                 format!(
-                    "Couldn't start llama-server. Fine.Shyt embeds a local vision \
+                    "Couldn't start llama-server. Fineshyt embeds a local vision \
                      LLM (no Ollama needed); the runtime is provided by the \
                      `llama.cpp` package.\n\n\
                      Install it once with `brew install llama.cpp`, then \
@@ -233,7 +233,7 @@ fn run_startup_pipeline(app: &AppHandle) {
                 "The Phoenix release isn't built yet.\n\n\
                  Expected to find: {}\n\n\
                  Build it once with `make release` from the repo root, \
-                 then re-launch Fine.Shyt. The first build takes a few \
+                 then re-launch Fineshyt. The first build takes a few \
                  minutes; subsequent rebuilds are fast.",
                 release_bin.display()
             ),
@@ -568,7 +568,7 @@ fn generate_secret_key_base() -> String {
 ///     repo's `orchestrator/priv/...` so the maintainer's existing ~12k
 ///     photo JPEGs + SQLite db keep working.
 ///   - **Bundled .app** (`cargo tauri build`) — point at the OS-specific
-///     app-data dir (macOS: `~/Library/Application Support/Fine.Shyt/`).
+///     app-data dir (macOS: `~/Library/Application Support/Fineshyt/`).
 ///     The Phoenix app creates the file + parent dir on boot
 ///     (see `Orchestrator.Application.ensure_db_dir/0` +
 ///     `ensure_uploads_symlink/0`).
@@ -576,8 +576,8 @@ fn generate_secret_key_base() -> String {
 /// Dev builds keep using the in-repo `orchestrator/priv/` so the maintainer's
 /// existing data carries over; release builds move to the OS-specific app-data
 /// dir (Tauri picks the right thing per-OS — `~/Library/Application Support/
-/// Fine.Shyt/` on macOS, `%APPDATA%/Fine.Shyt/` on Windows, `$XDG_DATA_HOME/
-/// Fine.Shyt/` on Linux). Single source of truth for both `release_env` and
+/// Fineshyt/` on macOS, `%APPDATA%/Fineshyt/` on Windows, `$XDG_DATA_HOME/
+/// Fineshyt/` on Linux). Single source of truth for both `release_env` and
 /// `spawn_ai_worker`.
 fn data_paths(app: &AppHandle, repo: &Path) -> Result<(PathBuf, PathBuf), String> {
     if cfg!(debug_assertions) {

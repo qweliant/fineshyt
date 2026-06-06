@@ -7,7 +7,7 @@ defmodule Orchestrator.Sidecars do
   XMP is the universal interchange format for photo metadata: ratings,
   keywords, color labels, develop instructions. Every serious photo
   editor (Lightroom, darktable, Capture One, Bridge, ON1, exiftool) reads
-  and writes them. By round-tripping our metadata through XMP, Fine.Shyt
+  and writes them. By round-tripping our metadata through XMP, Fineshyt
   becomes interoperable with whatever editing tool the user already
   has, without requiring any vendor SDK.
 
@@ -20,7 +20,7 @@ defmodule Orchestrator.Sidecars do
     * `"off"`        — read and write are both disabled.
     * `"read"`       — read existing sidecars to seed metadata on
                        ingest; never write back. Default.
-    * `"read-write"` — read on ingest *and* write Fine.Shyt's metadata
+    * `"read-write"` — read on ingest *and* write Fineshyt's metadata
                        back as XMP after curation completes.
 
   Read is always safe (we never modify originals). Write requires opt-in
@@ -41,7 +41,7 @@ defmodule Orchestrator.Sidecars do
     * `dc:subject`           ← `suggested_tags`
     * `xmp:Label`            ← `"Pick"` if `manual_match`
 
-  Custom Fine.Shyt namespace (`fineshyt:`) for fields no standard
+  Custom Fineshyt namespace (`fineshyt:`) for fields no standard
   covers — other editors will ignore these silently:
 
     * `fineshyt:PreferenceScore`   ← `preference_score`
@@ -155,7 +155,7 @@ defmodule Orchestrator.Sidecars do
   end
 
   @doc """
-  Writes Fine.Shyt's metadata into the XMP sidecar next to the given
+  Writes Fineshyt's metadata into the XMP sidecar next to the given
   source file.
 
   No-op (returns `:skipped`) when:
@@ -230,7 +230,7 @@ defmodule Orchestrator.Sidecars do
       {:error, :exiftool_missing}
   end
 
-  # Registers Fine.Shyt's custom `fineshyt` XMP namespace so exiftool will
+  # Registers Fineshyt's custom `fineshyt` XMP namespace so exiftool will
   # write our AI-derived tags (Subject, ArtisticMood, etc.) instead of
   # rejecting them as undefined. Returns `[]` if the config file is missing
   # so reads/writes of standard tags still work in a stripped environment.

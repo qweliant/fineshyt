@@ -77,6 +77,7 @@ defmodule OrchestratorWeb.GalleryLive do
       |> assign(:bulk_project, "")
       |> assign(:burst_groups, [])
       |> assign(:dup_groups, [])
+      |> assign(:inspect_state, nil)
       |> assign(:match_threshold, @match_threshold)
       |> load_photos()
 

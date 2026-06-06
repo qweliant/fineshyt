@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Fine.Shyt",
+  "productName": "Fineshyt",
   "version": "0.1.0",
   "identifier": "com.qweliant.fineshyt",
   "build": {
@@ -10,7 +10,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Fine.Shyt",
+        "title": "Fineshyt",
         "width": 1280,
         "height": 800,
         "minWidth": 800,
@@ -33,7 +33,7 @@
       "../runtime/phoenix/": "phoenix/"
     },
     "shortDescription": "Local-first photo culling that learns your taste",
-    "longDescription": "Fine.Shyt is a self-hosted photo curation tool. Point it at a folder of photos, rate the ones you love, and it learns to surface more like that — all on your machine, nothing sent to the cloud.",
+    "longDescription": "Fineshyt is a self-hosted photo curation tool. Point it at a folder of photos, rate the ones you love, and it learns to surface more like that — all on your machine, nothing sent to the cloud.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

@@ -1,7 +1,7 @@
 [package]
 name = "fineshyt-desktop"
 version = "0.1.0"
-description = "Fine.Shyt desktop shell — Tauri 2.x webview wrapping the Phoenix LiveView UI"
+description = "Fineshyt desktop shell — Tauri 2.x webview wrapping the Phoenix LiveView UI"
 authors = ["Qwelian D. Tanner"]
 edition = "2021"
 rust-version = "1.77"

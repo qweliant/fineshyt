@@ -1,6 +1,6 @@
 # Orchestrator
 
-The Elixir / Phoenix / Oban service at the heart of [Fine.Shyt](../README.md) — it owns the LiveView UI, the job queue, the database, and the real-time pub/sub fanout. The Python [ai_worker](../ai_worker/) does the ML; this service coordinates everything else.
+The Elixir / Phoenix / Oban service at the heart of [Fineshyt](../README.md) — it owns the LiveView UI, the job queue, the database, and the real-time pub/sub fanout. The Python [ai_worker](../ai_worker/) does the ML; this service coordinates everything else.
 
 - **DB:** SQLite (WAL mode) via `ecto_sqlite3` — since C3 there's no Postgres. CLIP embeddings are stored as a float32 blob (`Orchestrator.Embedding`); there's no in-DB vector search, so a plain blob suffices.
 - **Jobs:** Oban on the Lite (SQLite) engine. Pipeline workers live in [lib/orchestrator/workers/](lib/orchestrator/workers/) — conversion, AI curation, CLIP embedding, preference train/score, burst detection.
@@ -28,6 +28,6 @@ mix fineshyt.export --target /path              # blog export + photos.json mani
 
 ## Learn more
 
-- Fine.Shyt architecture + RADIO design notes: [../README.md](../README.md)
+- Fineshyt architecture + RADIO design notes: [../README.md](../README.md)
 - Desktop shell + native packaging roadmap: [../desktop/README.md](../desktop/README.md)
 - Phoenix: [hexdocs.pm/phoenix](https://hexdocs.pm/phoenix/overview.html)

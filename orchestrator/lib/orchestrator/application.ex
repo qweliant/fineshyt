@@ -12,7 +12,7 @@ defmodule Orchestrator.Application do
     # ensure_uploads_symlink/0 below for the why.
     ensure_uploads_symlink()
 
-    # The SQLite file's parent dir (e.g. ~/Library/Application Support/Fine.Shyt)
+    # The SQLite file's parent dir (e.g. ~/Library/Application Support/Fineshyt)
     # may not exist yet on a fresh install. ecto_sqlite3 creates the db file
     # but not intermediate dirs, so make them before the Repo starts.
     ensure_db_dir()

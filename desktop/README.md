@@ -1,8 +1,8 @@
-# Fine.Shyt Desktop Shell (experimental)
+# Fineshyt Desktop Shell (experimental)
 
 > Living on branch `experimental-tauri-native`. Phases C2, C5, and C3 are done; **C4 (freeze the Python ai_worker) is the last phase**. See the native-packaging plan doc for the full roadmap.
 
-A Tauri 2.x shell that wraps Fine.Shyt's existing Phoenix LiveView UI in a native window. The shell is responsible for **lifecycle**: spawning the containerised Python ai_worker, spawning a **native Elixir release** for the orchestrator (with a native SQLite database — no Postgres since C3), spawning a native `llama-server` for the vision LLM, polling Phoenix, and tearing it all down on quit. The UI itself is unchanged.
+A Tauri 2.x shell that wraps Fineshyt's existing Phoenix LiveView UI in a native window. The shell is responsible for **lifecycle**: spawning the containerised Python ai_worker, spawning a **native Elixir release** for the orchestrator (with a native SQLite database — no Postgres since C3), spawning a native `llama-server` for the vision LLM, polling Phoenix, and tearing it all down on quit. The UI itself is unchanged.
 
 ## Why this exists
 

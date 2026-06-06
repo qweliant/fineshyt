@@ -2,7 +2,7 @@ defmodule Orchestrator.Repo.Migrations.AddSidecarFieldsToPhotos do
   use Ecto.Migration
 
   @moduledoc """
-  Adds the two columns that let Fine.Shyt round-trip metadata to/from
+  Adds the two columns that let Fineshyt round-trip metadata to/from
   XMP sidecars next to the user's original RAW/source files.
 
     * `source_path`         — absolute path of the original source file
@@ -13,7 +13,7 @@ defmodule Orchestrator.Repo.Migrations.AddSidecarFieldsToPhotos do
                               to skip-if-newer when the user's editor
                               has touched it since.
 
-  Both nullable because pre-Fine.Shyt-v(sidecars) photos won't have
+  Both nullable because pre-Fineshyt-v(sidecars) photos won't have
   this metadata.
   """
 

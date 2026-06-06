@@ -29,7 +29,7 @@ config :orchestrator, :ai_worker_url, System.get_env("AI_WORKER_URL", "http://12
 #   "off"        — read and write both disabled
 #   "read"       — read existing sidecars to seed metadata on ingest
 #                  (default; safe — never modifies user files)
-#   "read-write" — read on ingest AND write Fine.Shyt's metadata back
+#   "read-write" — read on ingest AND write Fineshyt's metadata back
 #                  as XMP after curation completes
 config :orchestrator, :sidecar_mode, System.get_env("FINESHYT_SIDECAR_MODE", "read")
 
@@ -59,7 +59,7 @@ if config_env() == :prod do
           System.user_home!(),
           "Library",
           "Application Support",
-          "Fine.Shyt",
+          "Fineshyt",
           "fineshyt.db"
         ])
 
