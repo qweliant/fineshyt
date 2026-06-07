@@ -665,7 +665,12 @@ defmodule Orchestrator.Photos do
           order_by: [asc: p.burst_group, desc: p.sharpness_score]
       )
 
-    Enum.group_by(photos, & &1.burst_group)
+    photos
+    |> Enum.group_by(& &1.burst_group)
+    # Singleton groups are "resolved" — the user has already kept one and
+    # rejected the rest (or all but one was rejected outside this UI). Drop
+    # them so the survey list only shows groups that still need a decision.
+    |> Enum.filter(fn {_id, members} -> length(members) > 1 end)
     |> Enum.sort_by(fn {group_id, _} -> group_id end)
   end
 
@@ -679,6 +684,20 @@ defmodule Orchestrator.Photos do
   def clear_burst_group(group_id) when is_integer(group_id) do
     {n, _} =
       from(p in Photo, where: p.burst_group == ^group_id)
+      |> Repo.update_all(set: [burst_group: nil])
+
+    {:ok, n}
+  end
+
+  @doc """
+  Clear `burst_group` on a specific list of photo ids. Used by the survey
+  UI when the user explicitly picks N keepers from a burst — the kept frames
+  exit the burst pool entirely (so the resolved group disappears), while
+  any unlisted member stays grouped (caller usually rejects those first).
+  """
+  def clear_burst_group_for_photos(ids) when is_list(ids) do
+    {n, _} =
+      from(p in Photo, where: p.id in ^ids)
       |> Repo.update_all(set: [burst_group: nil])
 
     {:ok, n}
@@ -871,6 +890,9 @@ defmodule Orchestrator.Photos do
 
     photos
     |> Enum.group_by(& &1.dup_group)
+    # See list_burst_groups/0 — singletons are resolved groups and shouldn't
+    # surface in the survey UI.
+    |> Enum.filter(fn {_id, members} -> length(members) > 1 end)
     |> Enum.map(fn {gid, members} -> {gid, sort_dup_members(members)} end)
     |> Enum.sort_by(fn {group_id, _} -> group_id end)
   end

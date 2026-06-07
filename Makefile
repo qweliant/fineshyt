@@ -157,10 +157,36 @@ compose-logs:
 ## unchanged. See desktop/README.md for the full picture and the C2+
 ## roadmap.
 
-desktop-dev: ai-worker-launcher
-	@printf "$(CINNA)$(BOLD)→ launching desktop shell — Tauri/WKWebView takes ~30s to open the$(RESET)\n"
-	@printf "$(CINNA)$(BOLD)  window on a cold launch; the splash + boot pipeline run after that.$(RESET)\n"
+## `cargo run` boots the Tauri shell, which spawns the **staged Phoenix
+## release** at `desktop/runtime/phoenix/bin/server` — not `mix phx.server`.
+## That means any change you make to .ex / .heex files only takes effect
+## after `make desktop-stage-phoenix` (or `make release`) re-runs. Kept
+## out of the dep chain on purpose — you remember to do this; we don't
+## want a multi-second mix release fired on every dev relaunch.
+desktop-dev: ai-worker-launcher desktop-kill-orphans
+	@printf "$(KITTY)$(BOLD)"
+	@printf "⠀⠀⠀⢠⡾⠲⠶⣤⣀⣠⣤⣤⣤⡿⠛⠿⡴⠾⠛⢻⡆⠀⠀⠀\n"
+	@printf "⠀⠀⠀⣼⠁⠀⠀⠀⠉⠁⠀⢀⣿⠐⡿⣿⠿⣶⣤⣤⣷⡀⠀⠀\n"
+	@printf "⠀⠀⠀⢹⡶⠀⠀⠀⠀⠀⠀⠌⢯⣡⣿⣿⣀⣸⣿⣦⢓⡟⠀⠀\n"
+	@printf "⠀⠀⢀⡿⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⠉⠹⣍⣭⣾⠁⠀⠀\n"
+	@printf "⠀⣀⣸⣇⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣸⣷⣤⡀\n"
+	@printf "⠈⠉⠹⣏⡁⠀⢸⣿⠀⠀⠀⠀⠀⠀⠀⠀⣿⡇⠀⢀⣸⣇⣀⠀\n"
+	@printf "⠀⠐⠋⢻⣅⣄⢀⣀⣀⡀⠀⠯⠽⠀⢀⣀⣀⡀⠀⣤⣿⠀⠉⠀  kitty is launching the desktop shell ✦\n"
+	@printf "⠀⠀⠴⠛⠙⣳⠋⠉⠉⠙⣆⠀⠀⢰⡟⠉⠈⠙⢷⠟⠉⠙⠂⠀  (Tauri/WKWebView takes ~30s on a cold launch)\n"
+	@printf "⠀⠀⠀⠀⠀⢻⣄⣠⣤⣴⠟⠛⠛⠛⢧⣤⣤⣀⡾⠀⠀⠀⠀⠀\n"
+	@printf "$(RESET)\n"
 	@cd desktop/src-tauri && cargo run
+
+# Kill leftover processes from a previous bundled .app run or a crashed dev
+# shell. The bundled Tauri shell can die without taking its child Phoenix
+# release + ai_worker + llama-server down with it — those get adopted by
+# launchd and silently keep holding :4000/:8000/:11434. When dev fires up
+# next, its own children either fail to bind or the webview connects to the
+# orphaned BEAM (which points at the bundled app's empty user-data DB), so
+# you see "0 photos" against your real 12k-photo dev library.
+desktop-kill-orphans:
+	@pkill -9 -f 'Fine\.Shyt\.app|Fineshyt\.app|fineshyt-ai-worker|fineshyt_ai\.serve|llama-server|/phoenix/erts.*beam\.smp' 2>/dev/null || true
+	@lsof -ti:4000 -i:8000 -i:11434 2>/dev/null | xargs -r kill -9 2>/dev/null || true
 
 desktop-build: ai-worker-launcher desktop-stage-phoenix
 	@printf "$(CINNA)$(BOLD)→ building desktop binary (release)...$(RESET)\n"

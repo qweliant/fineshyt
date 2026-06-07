@@ -247,7 +247,7 @@ defmodule OrchestratorWeb.CuratorLive do
         <%!-- Title --%>
         <div class="mb-16">
           <h1 class="text-[clamp(3rem,8vw,6rem)] font-black tracking-tight leading-none text-[#111111]">
-            FINE.<br />SHYT.
+            FINESHYT.
           </h1>
           <p class="mt-4 font-serif italic text-gray-400 text-lg">
             An algorithmic study of composition, light, and medium. Fine shyt if you will.
