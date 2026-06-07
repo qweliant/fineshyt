@@ -1,0 +1,159 @@
+# Fineshyt release pipeline — Phase 1: macOS-only.
+#
+# Goal: prove the CI pipeline by producing a downloadable .dmg on every
+# tagged push. Windows + Linux are Phase 2/3 follow-ups.
+#
+# Triggers:
+#   - push of a tag matching v* (e.g. v0.1.0)         → builds + attaches to GitHub Release
+#   - workflow_dispatch (manual button in Actions UI) → builds + uploads as workflow artifact
+#                                                       (useful for testing without tagging)
+#
+# What's NOT in scope here:
+#   - Code signing / notarization (post-MVP; needs Apple Developer cert in secrets)
+#   - Windows / Linux runners (Phase 2/3)
+#   - Bundling llama-server into the .dmg (Phase 2; right now the .dmg expects
+#     `brew install llama.cpp` on the user's machine, same as local dev)
+#   - Tauri Updater integration (premature for <10 users)
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write   # required for softprops/action-gh-release to attach the .dmg
+
+jobs:
+  macos:
+    name: macOS (arm64)
+    runs-on: macos-14
+    timeout-minutes: 45
+
+    env:
+      MIX_ENV: prod
+      # Skip prompts when mix asks to install Hex/Rebar on a fresh runner.
+      ELIXIR_ASK: "false"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ─── Toolchains ────────────────────────────────────────────────────────
+      - name: Setup Elixir + OTP
+        uses: erlef/setup-beam@v1
+        with:
+          # Pinned to the local dev versions to keep the release binary's
+          # behaviour identical to what we test on the developer's machine.
+          # Bump together — Elixir 1.19 only supports OTP 26/27/28.
+          otp-version: "28.0"
+          elixir-version: "1.19.5"
+
+      - name: Setup Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup uv (Python package manager)
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      # ─── Caches ────────────────────────────────────────────────────────────
+      # `make release` recompiles the orchestrator from a clean prod env, so we
+      # cache `deps/` and `_build/prod` separately. The hash key changes when
+      # `mix.lock` or any .ex/.exs file changes, but we also keep a fallback
+      # restore-key so unrelated source edits still hit a warm cache.
+      - name: Cache Mix deps + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            orchestrator/deps
+            orchestrator/_build
+          key: ${{ runner.os }}-mix-${{ hashFiles('orchestrator/mix.lock') }}-${{ hashFiles('orchestrator/**/*.ex', 'orchestrator/**/*.exs') }}
+          restore-keys: |
+            ${{ runner.os }}-mix-${{ hashFiles('orchestrator/mix.lock') }}-
+            ${{ runner.os }}-mix-
+
+      - name: Cache Cargo registry + git
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('desktop/src-tauri/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Cache Tauri target dir
+        uses: actions/cache@v4
+        with:
+          path: desktop/src-tauri/target
+          key: ${{ runner.os }}-tauri-target-${{ hashFiles('desktop/src-tauri/Cargo.lock', 'desktop/src-tauri/src/**/*.rs') }}
+          restore-keys: |
+            ${{ runner.os }}-tauri-target-
+
+      # ─── Build steps — mirror what `make desktop-build` does locally ───────
+      - name: Install Hex + Rebar
+        run: mix do local.hex --force, local.rebar --force
+
+      - name: Fetch Elixir deps
+        working-directory: orchestrator
+        run: mix deps.get --only prod
+
+      - name: Build Phoenix release
+        run: make release
+
+      # Tauri-cli is required for `cargo tauri build`. Install once and let the
+      # cargo-registry cache make subsequent runs cheap. `--locked` pins to
+      # whatever's in pyapp's own Cargo.lock so we don't pick up surprises.
+      - name: Install cargo-tauri
+        run: cargo install tauri-cli --version "^2.0" --locked
+
+      - name: Build PyApp ai_worker launcher
+        run: make ai-worker-launcher
+
+      - name: Stage Phoenix release into desktop/runtime/phoenix/
+        run: make desktop-stage-phoenix
+
+      # The actual Tauri bundle. `cargo tauri build` reads tauri.conf.json,
+      # produces the .app, signs (no-op without certs), and packages into .dmg.
+      - name: Build Tauri bundle (.app + .dmg)
+        working-directory: desktop/src-tauri
+        run: cargo tauri build
+
+      # ─── Surface the artifact ──────────────────────────────────────────────
+      # The .dmg path is deterministic from tauri.conf.json's productName +
+      # version. We resolve it via a shell glob so a productName / version
+      # bump doesn't silently break the upload step.
+      - name: Locate built .dmg
+        id: artifact
+        run: |
+          DMG=$(find desktop/src-tauri/target/release/bundle/dmg -name '*.dmg' -type f | head -1)
+          if [ -z "$DMG" ]; then
+            echo "::error::No .dmg found under desktop/src-tauri/target/release/bundle/dmg/"
+            ls -la desktop/src-tauri/target/release/bundle/ || true
+            exit 1
+          fi
+          echo "dmg_path=$DMG" >> "$GITHUB_OUTPUT"
+          echo "dmg_name=$(basename "$DMG")" >> "$GITHUB_OUTPUT"
+          ls -lh "$DMG"
+
+      # Always upload as a workflow artifact — useful for manual dispatch runs
+      # where there's no tag/release to attach to. 14-day retention is plenty.
+      - name: Upload .dmg as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.artifact.outputs.dmg_name }}
+          path: ${{ steps.artifact.outputs.dmg_path }}
+          retention-days: 14
+
+      # Tag-triggered runs also attach the .dmg to the matching GitHub Release.
+      # softprops/action-gh-release creates the release if it doesn't exist.
+      - name: Attach .dmg to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.artifact.outputs.dmg_path }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
