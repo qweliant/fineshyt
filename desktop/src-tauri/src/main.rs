@@ -124,11 +124,24 @@ fn run_startup_pipeline(app: &AppHandle) {
         }
     };
 
+    let first_run_ai = is_first_launch_ai_worker();
+    let first_run_llama = is_first_launch_llama(app);
+
     // No `make compose-init` step here: the bundled app has no Makefile,
     // and the desktop path doesn't use docker-compose anyway. The maintainer
     // can still run `make compose-init` manually in dev for the compose
     // path. SECRET_KEY_BASE is handled below in `ensure_secret_key_base`.
 
+    emit_phase(
+        app,
+        "Starting AI worker",
+        if first_run_ai {
+            "First launch — installing Python dependencies (~1 GB, 2–5 min). \
+             No progress bar yet, just patience."
+        } else {
+            "Loading the Python environment."
+        },
+    );
     eprintln!("[fineshyt-desktop] startup: spawning ai_worker (PyApp launcher)");
     match spawn_ai_worker(app, &repo) {
         Ok(mut child) => {
@@ -153,8 +166,18 @@ fn run_startup_pipeline(app: &AppHandle) {
         }
     }
 
+    emit_phase(
+        app,
+        "Starting vision LLM",
+        if first_run_llama {
+            "First launch — downloading the Qwen2.5-Omni-7B model (~4 GB, \
+             5–10 min on a fast connection). It runs entirely on your machine."
+        } else {
+            "Loading the vision model."
+        },
+    );
     eprintln!("[fineshyt-desktop] startup: spawning llama-server (vision LLM)");
-    match spawn_llama_server(&repo) {
+    match spawn_llama_server(&app, &repo) {
         Ok(mut child) => {
             if let Err(e) = verify_alive(&mut child, "llama-server", LLAMA_PORT) {
                 let _ = child.wait();
@@ -285,6 +308,7 @@ fn run_startup_pipeline(app: &AppHandle) {
         return;
     }
 
+    emit_phase(app, "Starting Phoenix", "Warming up the archive UI.");
     eprintln!("[fineshyt-desktop] startup: spawning native orchestrator release");
     let child = match spawn_orchestrator(app, &repo, &env) {
         Ok(c) => c,
@@ -445,10 +469,24 @@ fn wait_for_ai_worker() -> Result<(), String> {
 ///   -hf <repo>  auto-downloads both the main GGUF and the mmproj file
 ///               from the ggml-org HuggingFace collection on first launch.
 ///
-/// LLAMA_CACHE is set to desktop/runtime/models so downloaded weights
-/// live alongside the repo (gitignored) instead of in `~/.cache`.
-fn spawn_llama_server(repo: &Path) -> Result<Child, String> {
-    let cache_dir = repo.join("desktop").join("runtime").join("models");
+/// LLAMA_CACHE points at:
+///   * dev (`cargo run`): `<repo>/desktop/runtime/models` — keeps downloaded
+///     weights alongside the repo so iteration doesn't re-download a 4 GB
+///     GGUF on every clean.
+///   * bundled `.app` (release): `<app_data_dir>/llama-cache` — a writable
+///     per-user dir. The previous behaviour used `env!("CARGO_MANIFEST_DIR")`
+///     baked at build time, which resolved to the CI runner's path
+///     (`/Users/runner/work/fineshyt/...`) at runtime and crashed on every
+///     non-developer install with `Permission denied`.
+fn spawn_llama_server(app: &AppHandle, repo: &Path) -> Result<Child, String> {
+    let cache_dir = if cfg!(debug_assertions) {
+        repo.join("desktop").join("runtime").join("models")
+    } else {
+        app.path()
+            .app_data_dir()
+            .map_err(|e| format!("couldn't resolve app_data_dir: {e}"))?
+            .join("llama-cache")
+    };
     std::fs::create_dir_all(&cache_dir)
         .map_err(|e| format!("couldn't create {}: {e}", cache_dir.display()))?;
 
@@ -769,6 +807,65 @@ fn shutdown(app: &AppHandle) {
     }
 
     let _ = app.emit("services-shutdown", ());
+}
+
+/// Emit a phase-change event so the splash can show what we're doing and
+/// roughly how long it'll take. `detail` is shown in italic muted text under
+/// the headline `label`; pass an empty string to clear it.
+///
+/// The splash listens for `startup-phase` events and re-renders. Phases are
+/// emitted strictly forward — we never go backwards — so the user always
+/// sees progress, even if the steps themselves are slow.
+fn emit_phase(app: &AppHandle, label: &str, detail: &str) {
+    use tauri::Emitter;
+    let _ = app.emit(
+        "startup-phase",
+        serde_json::json!({ "label": label, "detail": detail }),
+    );
+}
+
+/// First-launch heuristics. PyApp writes its venv into a per-user dir on
+/// first run; llama-server downloads a multi-GB GGUF into LLAMA_CACHE. If
+/// neither dir exists yet, the user is about to wait a *long* time — and
+/// the splash needs to tell them so they don't think it's hung.
+fn is_first_launch_ai_worker() -> bool {
+    let home = match std::env::var_os("HOME") {
+        Some(h) => PathBuf::from(h),
+        None => return true,
+    };
+    let pyapp_data = if cfg!(target_os = "macos") {
+        home.join("Library/Application Support/pyapp")
+    } else {
+        home.join(".local/share/pyapp")
+    };
+    match std::fs::read_dir(&pyapp_data) {
+        Ok(mut iter) => iter.next().is_none(),
+        Err(_) => true,
+    }
+}
+
+fn is_first_launch_llama(app: &AppHandle) -> bool {
+    let cache_dir = if cfg!(debug_assertions) {
+        match repo_root() {
+            Ok(r) => r.join("desktop").join("runtime").join("models"),
+            Err(_) => return true,
+        }
+    } else {
+        match app.path().app_data_dir() {
+            Ok(p) => p.join("llama-cache"),
+            Err(_) => return true,
+        }
+    };
+    !has_gguf_files(&cache_dir)
+}
+
+fn has_gguf_files(dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries
+        .filter_map(Result::ok)
+        .any(|e| e.path().extension().is_some_and(|x| x == "gguf"))
 }
 
 fn emit_failure(app: &AppHandle, message: String) {

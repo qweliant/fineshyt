@@ -9,6 +9,7 @@
     --bg: #fcfbf9;
     --ink: #111111;
     --muted: #7a7a7a;
+    --faint: #a8a8a8;
     --line: #e5e5e5;
     --accent: #b94900;
   }
@@ -44,14 +45,31 @@
     letter-spacing: 0.4em;
     font-size: 10px;
     color: var(--muted);
-    margin: 0 0 56px;
+    margin: 0 0 48px;
   }
-  .status {
+  .phase-label {
+    font-family: "Inter", system-ui, sans-serif;
+    text-transform: uppercase;
+    letter-spacing: 0.24em;
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--ink);
+    margin: 0 0 10px;
+  }
+  .phase-detail {
     font-style: italic;
     color: var(--muted);
     font-size: 1.05rem;
-    margin: 0 0 24px;
+    margin: 0 0 28px;
     max-width: 36em;
+    line-height: 1.5;
+  }
+  .meta {
+    font-family: "JetBrains Mono", "Menlo", monospace;
+    font-size: 0.78rem;
+    color: var(--faint);
+    margin: 0 0 24px;
+    letter-spacing: 0.02em;
   }
   .spinner {
     width: 8px;
@@ -79,80 +97,114 @@
     color: #5a1f00;
     display: none;
   }
+  .tips {
+    margin: 40px auto 0;
+    max-width: 36em;
+    font-family: "Source Serif 4", Georgia, serif;
+    font-size: 0.95rem;
+    color: var(--muted);
+    line-height: 1.6;
+    text-align: left;
+    border-top: 1px solid var(--line);
+    padding-top: 20px;
+    display: none;
+  }
+  .tips.visible { display: block; }
+  .tips strong { color: var(--ink); font-weight: 600; }
   .hidden { display: none; }
 </style>
 </head>
 <body>
   <span class="micro">fineshyt · archival system</span>
   <h1>FINE.<br/>SHYT.</h1>
-  <p id="status" class="status">Starting services… first launch can take a minute or two.</p>
+
+  <p id="phase-label" class="phase-label">Booting</p>
+  <p id="phase-detail" class="phase-detail">Resolving services…</p>
+  <p id="meta" class="meta">elapsed 00:00</p>
   <div id="spinner" class="spinner"></div>
   <pre id="error" class="error"></pre>
 
-  <script type="module">
-    // Two paths to redirect once Phoenix is up:
-    //
-    //   1. Primary: this splash polls http://localhost:4000/ via fetch
-    //      every second. As soon as any response comes back (200, CORS
-    //      error, anything that means *something* is listening), we
-    //      redirect via window.location.href. This works regardless of
-    //      whether Tauri events fire correctly — it just uses the
-    //      browser's own navigation, which is bulletproof.
-    //
-    //   2. Backup: listen for the `services-failed` event from Rust so
-    //      we can show a useful error message if startup blew up before
-    //      Phoenix even booted.
-    //
-    // Originally we relied on a Rust-side `window.navigate(url)` call
-    // and a `services-ready` event, but on macOS WKWebView the
-    // cross-origin navigate from `tauri://localhost/...` to
-    // `http://localhost:4000/` silently no-ops in some Tauri 2 builds.
-    // Polling sidesteps that whole class of issue.
+  <div id="tips" class="tips">
+    <p><strong>While you wait —</strong> on a first launch, Fineshyt downloads a
+    vision-language model (~4 GB) that runs entirely on your machine. Nothing
+    is sent to a cloud service. Subsequent launches take about 30 seconds.</p>
+  </div>
 
+  <script type="module">
     const PHOENIX_URL = "http://localhost:4000/";
     const POLL_INTERVAL_MS = 1000;
+    const TIPS_DELAY_MS = 30_000;   // show "what's happening" tip after 30s
+    const startTime = Date.now();
 
-    function showError(message) {
-      document.getElementById("status").textContent = "Couldn't start fineshyt.";
-      document.getElementById("spinner").classList.add("hidden");
-      const err = document.getElementById("error");
-      err.textContent = message;
-      err.style.display = "block";
+    const $label = document.getElementById("phase-label");
+    const $detail = document.getElementById("phase-detail");
+    const $meta = document.getElementById("meta");
+    const $spinner = document.getElementById("spinner");
+    const $error = document.getElementById("error");
+    const $tips = document.getElementById("tips");
+
+    function fmtElapsed(ms) {
+      const sec = Math.floor(ms / 1000);
+      const m = String(Math.floor(sec / 60)).padStart(2, "0");
+      const s = String(sec % 60).padStart(2, "0");
+      return `${m}:${s}`;
     }
 
+    function tick() {
+      $meta.textContent = `elapsed ${fmtElapsed(Date.now() - startTime)}`;
+      if (Date.now() - startTime > TIPS_DELAY_MS) {
+        $tips.classList.add("visible");
+      }
+    }
+    setInterval(tick, 1000);
+
+    function setPhase(label, detail) {
+      if (label) $label.textContent = label;
+      if (detail !== undefined) $detail.textContent = detail || "";
+    }
+
+    function showError(message) {
+      setPhase("Couldn't start fineshyt", "");
+      $spinner.classList.add("hidden");
+      $error.textContent = message;
+      $error.style.display = "block";
+      $tips.classList.remove("visible");
+    }
+
+    // Phoenix poll — once it answers on :4000, navigate. Same logic as before:
+    // window.location.href is bulletproof in WKWebView where Rust-side
+    // navigates have been flaky.
     async function pollAndNavigate() {
       while (true) {
         try {
-          // `no-cors` lets fetch resolve even if Phoenix doesn't send
-          // CORS headers — we only care that it answered.
           await fetch(PHOENIX_URL, { mode: "no-cors", cache: "no-store" });
           window.location.href = PHOENIX_URL;
           return;
         } catch (_) {
-          // Network error — Phoenix not listening yet. Wait + retry.
           await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
         }
       }
     }
 
-    async function setupTauriFailureListener() {
-      // Only try Tauri's event API if it's actually exposed; otherwise
-      // we just rely on the polling path above and the user will see
-      // the spinner forever if startup truly blew up. Acceptable for C1.
+    async function setupTauriListeners() {
       const start = Date.now();
       while (!window.__TAURI__ && Date.now() - start < 3000) {
         await new Promise((r) => setTimeout(r, 50));
       }
+      if (!window.__TAURI__?.event?.listen) return;
+      const { listen } = window.__TAURI__.event;
 
-      if (window.__TAURI__?.event?.listen) {
-        const { listen } = window.__TAURI__.event;
-        await listen("services-failed", (e) => {
-          showError(String(e.payload || "unknown error"));
-        });
-      }
+      await listen("startup-phase", (e) => {
+        const payload = e.payload || {};
+        setPhase(payload.label, payload.detail);
+      });
+
+      await listen("services-failed", (e) => {
+        showError(String(e.payload || "unknown error"));
+      });
     }
 
-    setupTauriFailureListener();
+    setupTauriListeners();
     pollAndNavigate();
   </script>
 </body>
