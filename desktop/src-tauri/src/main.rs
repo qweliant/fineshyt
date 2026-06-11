@@ -95,11 +95,32 @@ struct OrchestratorChild(Mutex<Option<Child>>);
 struct LlamaServerChild(Mutex<Option<Child>>);
 struct AiWorkerChild(Mutex<Option<Child>>);
 
+/// Last-known startup state, queryable by the splash. Solves the race where
+/// Rust emits `services-failed` or `startup-phase` *before* the JS listener
+/// is registered — Tauri's `emit` is fire-and-forget, so without this, the
+/// fastest failure paths (e.g. llama-server not found) drop the event on
+/// the floor and the splash spins forever.
+#[derive(Default, Clone, serde::Serialize)]
+struct StartupState {
+    phase_label: Option<String>,
+    phase_detail: Option<String>,
+    failure: Option<String>,
+}
+
+struct StartupStateLock(Mutex<StartupState>);
+
+#[tauri::command]
+fn get_startup_state(state: tauri::State<'_, StartupStateLock>) -> StartupState {
+    state.0.lock().unwrap().clone()
+}
+
 fn main() {
     tauri::Builder::default()
         .manage(OrchestratorChild(Mutex::new(None)))
         .manage(LlamaServerChild(Mutex::new(None)))
         .manage(AiWorkerChild(Mutex::new(None)))
+        .manage(StartupStateLock(Mutex::new(StartupState::default())))
+        .invoke_handler(tauri::generate_handler![get_startup_state])
         .setup(|app| {
             let app_handle = app.handle().clone();
             std::thread::spawn(move || run_startup_pipeline(&app_handle));
@@ -490,8 +511,14 @@ fn spawn_llama_server(app: &AppHandle, repo: &Path) -> Result<Child, String> {
     std::fs::create_dir_all(&cache_dir)
         .map_err(|e| format!("couldn't create {}: {e}", cache_dir.display()))?;
 
+    let llama_bin = find_llama_server().ok_or_else(|| {
+        "`llama-server` couldn't be found. Install it once with \
+         `brew install llama.cpp`, then re-launch."
+            .to_string()
+    })?;
+
     let port_str = LLAMA_PORT.to_string();
-    let mut cmd = Command::new("llama-server");
+    let mut cmd = Command::new(&llama_bin);
     cmd.args([
         "-hf",
         LLAMA_MODEL_HF,
@@ -508,15 +535,48 @@ fn spawn_llama_server(app: &AppHandle, repo: &Path) -> Result<Child, String> {
     // alongside the other startup traces.
     cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
 
-    cmd.spawn().map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            "`llama-server` is not on PATH. Install it once with \
-             `brew install llama.cpp`."
-                .to_string()
-        } else {
-            format!("couldn't spawn llama-server: {e}")
+    cmd.spawn()
+        .map_err(|e| format!("couldn't spawn {}: {e}", llama_bin.display()))
+}
+
+/// Find the `llama-server` binary, working around a macOS quirk:
+/// `.app` bundles launched from Finder don't inherit the user's shell PATH,
+/// only the stripped-down launchd PATH (`/usr/bin:/bin:/usr/sbin:/sbin`).
+/// Homebrew installs to `/opt/homebrew/bin/` (Apple Silicon) or
+/// `/usr/local/bin/` (Intel), neither of which is in that minimal set.
+///
+/// We try the well-known install locations first, then fall back to a PATH
+/// lookup via `which` so dev launches (which DO have the shell PATH) keep
+/// working. This is a stopgap — Phase 2 should bundle llama-server into
+/// the .app/.msi so users don't need brew at all.
+fn find_llama_server() -> Option<PathBuf> {
+    // Apple Silicon Homebrew default. Most likely on modern Macs.
+    let known = [
+        "/opt/homebrew/bin/llama-server",
+        "/usr/local/bin/llama-server",
+        "/opt/local/bin/llama-server",
+    ];
+    for candidate in known {
+        let p = PathBuf::from(candidate);
+        if p.is_file() {
+            return Some(p);
         }
-    })
+    }
+    // Final fallback — full PATH lookup. This works in dev (cargo run
+    // inherits the shell PATH) but typically fails for .app launches.
+    let out = Command::new("/usr/bin/which")
+        .arg("llama-server")
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let path = String::from_utf8(out.stdout).ok()?.trim().to_string();
+    if path.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(path))
+    }
 }
 
 fn wait_for_llama_server() -> Result<(), String> {
@@ -813,11 +873,18 @@ fn shutdown(app: &AppHandle) {
 /// roughly how long it'll take. `detail` is shown in italic muted text under
 /// the headline `label`; pass an empty string to clear it.
 ///
-/// The splash listens for `startup-phase` events and re-renders. Phases are
-/// emitted strictly forward — we never go backwards — so the user always
-/// sees progress, even if the steps themselves are slow.
+/// We *both* emit a live event and persist the state to `StartupStateLock`.
+/// The split exists because Tauri emits are fire-and-forget — if the splash
+/// hasn't registered its listener yet (race common on cold launches), the
+/// event is lost. The persisted state lets the splash recover by calling
+/// `get_startup_state` after its listeners are wired.
 fn emit_phase(app: &AppHandle, label: &str, detail: &str) {
     use tauri::Emitter;
+    if let Some(state) = app.try_state::<StartupStateLock>() {
+        let mut st = state.0.lock().unwrap();
+        st.phase_label = Some(label.to_string());
+        st.phase_detail = Some(detail.to_string());
+    }
     let _ = app.emit(
         "startup-phase",
         serde_json::json!({ "label": label, "detail": detail }),
@@ -870,5 +937,8 @@ fn has_gguf_files(dir: &Path) -> bool {
 
 fn emit_failure(app: &AppHandle, message: String) {
     eprintln!("[fineshyt-desktop] startup failed:\n{message}");
+    if let Some(state) = app.try_state::<StartupStateLock>() {
+        state.0.lock().unwrap().failure = Some(message.clone());
+    }
     let _ = app.emit("services-failed", message);
 }

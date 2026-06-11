@@ -150,13 +150,14 @@
       return `${m}:${s}`;
     }
 
+    let tickHandle = null;
     function tick() {
       $meta.textContent = `elapsed ${fmtElapsed(Date.now() - startTime)}`;
       if (Date.now() - startTime > TIPS_DELAY_MS) {
         $tips.classList.add("visible");
       }
     }
-    setInterval(tick, 1000);
+    tickHandle = setInterval(tick, 1000);
 
     function setPhase(label, detail) {
       if (label) $label.textContent = label;
@@ -169,6 +170,13 @@
       $error.textContent = message;
       $error.style.display = "block";
       $tips.classList.remove("visible");
+      // Freeze the elapsed counter so the error screen doesn't keep ticking
+      // up minutes while the user tries to figure out what went wrong.
+      if (tickHandle) {
+        clearInterval(tickHandle);
+        tickHandle = null;
+      }
+      $meta.style.display = "none";
     }
 
     // Phoenix poll — once it answers on :4000, navigate. Same logic as before:
@@ -187,6 +195,8 @@
     }
 
     async function setupTauriListeners() {
+      // Wait for Tauri's JS API to be injected. On cold launches the script
+      // runs before the bridge is ready.
       const start = Date.now();
       while (!window.__TAURI__ && Date.now() - start < 3000) {
         await new Promise((r) => setTimeout(r, 50));
@@ -194,6 +204,8 @@
       if (!window.__TAURI__?.event?.listen) return;
       const { listen } = window.__TAURI__.event;
 
+      // Register live listeners FIRST so we don't miss anything that fires
+      // between now and the get_startup_state() call.
       await listen("startup-phase", (e) => {
         const payload = e.payload || {};
         setPhase(payload.label, payload.detail);
@@ -202,6 +214,30 @@
       await listen("services-failed", (e) => {
         showError(String(e.payload || "unknown error"));
       });
+
+      // Race recovery: Rust's startup pipeline runs in parallel with the
+      // webview loading. On the fastest failure paths (e.g. llama-server
+      // not found, fails in ~1s) Rust can emit `services-failed` BEFORE we
+      // got here to register the listener — Tauri's emit is fire-and-forget
+      // with no replay, so the event is lost. Query the state explicitly to
+      // recover any phase/failure that already happened.
+      try {
+        const invoke = window.__TAURI__.core?.invoke || window.__TAURI__.invoke;
+        if (typeof invoke === "function") {
+          const state = await invoke("get_startup_state");
+          if (state?.failure) {
+            showError(String(state.failure));
+            return;
+          }
+          if (state?.phase_label) {
+            setPhase(state.phase_label, state.phase_detail);
+          }
+        }
+      } catch (err) {
+        // Non-fatal — live listeners will pick up future events. We just
+        // can't recover ones that already fired.
+        console.warn("get_startup_state failed:", err);
+      }
     }
 
     setupTauriListeners();
