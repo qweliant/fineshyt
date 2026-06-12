@@ -549,6 +549,34 @@ fn spawn_llama_server(app: &AppHandle, repo: &Path) -> Result<Child, String> {
 /// lookup via `which` so dev launches (which DO have the shell PATH) keep
 /// working. This is a stopgap — Phase 2 should bundle llama-server into
 /// the .app/.msi so users don't need brew at all.
+/// Pick a `current_dir` for spawning a release-tree binary that's guaranteed
+/// to exist on the *target* machine — not the build machine.
+///
+/// We used to pass `repo` (`<CARGO_MANIFEST_DIR>/../..`) blindly, which is
+/// fine in dev but compile-time-baked to the CI runner's path in release
+/// builds (`/Users/runner/work/fineshyt/...`). `Command::spawn` returns
+/// `ENOENT` ("No such file or directory") when the `current_dir` doesn't
+/// exist, with the binary path in the error message — which made this look
+/// like a missing-binary bug for a long time. Same family as the
+/// LLAMA_CACHE issue but a different code path.
+///
+/// In dev (`cargo run`): use `repo` so any relative paths in subprocess
+/// behaviour line up with the maintainer's expectations.
+///
+/// In bundled releases: use the binary's own parent directory. Both the
+/// migrate and orchestrator scripts immediately `cd -P -- "$(dirname -- "$0")"`
+/// before exec'ing the BEAM, so the starting cwd doesn't matter for them —
+/// but it has to be a real directory or `Command::spawn` fails before the
+/// script ever runs.
+fn spawn_cwd(repo: &Path, bin: &Path) -> PathBuf {
+    if cfg!(debug_assertions) {
+        return repo.to_path_buf();
+    }
+    bin.parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("/"))
+}
+
 fn find_llama_server() -> Option<PathBuf> {
     // Apple Silicon Homebrew default. Most likely on modern Macs.
     let known = [
@@ -724,7 +752,7 @@ fn run_migrate(
 ) -> Result<(), String> {
     let migrate_bin = resolve_resource(app, RELEASE_MIGRATE_BUNDLED)?;
     let mut cmd = Command::new(&migrate_bin);
-    cmd.current_dir(repo);
+    cmd.current_dir(spawn_cwd(repo, &migrate_bin));
     for (k, v) in env {
         cmd.env(k, v);
     }
@@ -750,7 +778,7 @@ fn spawn_orchestrator(
 ) -> Result<Child, String> {
     let server_bin = resolve_resource(app, RELEASE_BIN_BUNDLED)?;
     let mut cmd = Command::new(&server_bin);
-    cmd.current_dir(repo);
+    cmd.current_dir(spawn_cwd(repo, &server_bin));
     for (k, v) in env {
         cmd.env(k, v);
     }
