@@ -6,6 +6,11 @@ src-tauri/Cargo.lock
 # Bundled assets cache
 .tauri/
 
+# Staged runtime — downloaded llama-server, built PyApp launcher, staged
+# Phoenix release. All reproducible via `make ai-worker-launcher`,
+# `make desktop-stage-llama`, and `make desktop-stage-phoenix`.
+runtime/
+
 # OS
 .DS_Store
 

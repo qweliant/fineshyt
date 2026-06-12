@@ -115,6 +115,14 @@ jobs:
       - name: Stage Phoenix release into desktop/runtime/phoenix/
         run: make desktop-stage-phoenix
 
+      # Download + extract llama-server (vision LLM runtime) so it can be
+      # bundled inside the .dmg. Removes the `brew install llama.cpp` prereq
+      # for end users — the .dmg is now self-contained for the LLM layer.
+      # Phase 2 of the distribution work. The pinned LLAMA_VERSION lives in
+      # the Makefile so it's reproducible across local + CI builds.
+      - name: Stage llama-server runtime
+        run: make desktop-stage-llama
+
       # The actual Tauri bundle. `cargo tauri build` reads tauri.conf.json,
       # produces the .app, signs (no-op without certs), and packages into .dmg.
       - name: Build Tauri bundle (.app + .dmg)

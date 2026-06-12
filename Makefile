@@ -188,12 +188,78 @@ desktop-kill-orphans:
 	@pkill -9 -f 'Fine\.Shyt\.app|Fineshyt\.app|fineshyt-ai-worker|fineshyt_ai\.serve|llama-server|/phoenix/erts.*beam\.smp' 2>/dev/null || true
 	@lsof -ti:4000 -i:8000 -i:11434 2>/dev/null | xargs -r kill -9 2>/dev/null || true
 
-desktop-build: ai-worker-launcher desktop-stage-phoenix
+desktop-build: ai-worker-launcher desktop-stage-phoenix desktop-stage-llama
 	@printf "$(CINNA)$(BOLD)→ building desktop binary (release)...$(RESET)\n"
 	@command -v cargo-tauri >/dev/null 2>&1 || \
 		(printf "$(CINNA)→ installing tauri-cli (one time)...$(RESET)\n" && \
 		 cargo install tauri-cli --version "^2.0" --locked)
 	@cd desktop/src-tauri && cargo tauri build
+
+# Download a prebuilt `llama-server` for the host platform from ggml-org's
+# releases and drop it at desktop/runtime/bin/. This is Phase 2 of the
+# distribution work: bundling llama-server inside the .app/.msi/.AppImage
+# removes the `brew install llama.cpp` prereq for users (Mac) and is the
+# only way to ship to Windows (no equivalent package manager).
+#
+# Pinning a specific build (`LLAMA_VERSION`) keeps the artifact reproducible
+# across machines and across time. Bump when you want a newer llama.cpp
+# (vision-model support gets better release over release). Override on the
+# command line: `make desktop-stage-llama LLAMA_VERSION=b6800`.
+#
+# Asset naming matches ggml-org's convention as of 2026:
+#   * Darwin arm64  → llama-<ver>-bin-macos-arm64.zip
+#   * Darwin x86_64 → llama-<ver>-bin-macos-x64.zip
+#   * Linux  x86_64 → llama-<ver>-bin-ubuntu-x64.zip
+# Windows is downloaded from the CI workflow directly (no make on a fresh
+# Windows runner; PowerShell does the unzipping).
+LLAMA_VERSION       ?= b6500
+LLAMA_DIR           := desktop/runtime/bin/llama
+LLAMA_SERVER        := $(LLAMA_DIR)/llama-server
+LLAMA_VERSION_FILE  := $(LLAMA_DIR)/.version
+
+desktop-stage-llama: $(LLAMA_SERVER)
+
+# Extract the whole llama.cpp `bin/` directory (binary + dynamic libs) into
+# desktop/runtime/bin/llama/. The bundled binary's rpath looks for dylibs
+# alongside itself, so we have to ship the dependencies as a unit — copying
+# just `llama-server` results in `Library not loaded: @rpath/libmtmd.dylib`
+# at first launch.
+$(LLAMA_SERVER): $(LLAMA_VERSION_FILE)
+	@mkdir -p $(LLAMA_DIR)
+	@OS=$$(uname -s); ARCH=$$(uname -m); \
+	case "$$OS-$$ARCH" in \
+		Darwin-arm64)  ASSET="llama-$(LLAMA_VERSION)-bin-macos-arm64.zip" ;; \
+		Darwin-x86_64) ASSET="llama-$(LLAMA_VERSION)-bin-macos-x64.zip" ;; \
+		Linux-x86_64)  ASSET="llama-$(LLAMA_VERSION)-bin-ubuntu-x64.zip" ;; \
+		*) printf "$(KUROMI)✗ unsupported host platform for llama-server staging: $$OS-$$ARCH$(RESET)\n"; exit 1 ;; \
+	esac; \
+	URL="https://github.com/ggml-org/llama.cpp/releases/download/$(LLAMA_VERSION)/$$ASSET"; \
+	printf "$(CINNA)$(BOLD)→ downloading llama-server $(LLAMA_VERSION) for $$OS-$$ARCH$(RESET)\n"; \
+	printf "$(CINNA)  $$URL$(RESET)\n"; \
+	TMP=$$(mktemp -d) && cd "$$TMP" && \
+		curl -fsSL "$$URL" -o llama.zip && \
+		unzip -q llama.zip && \
+		BIN_DIR=$$(find . -type d -name 'bin' | head -1) && \
+		[ -n "$$BIN_DIR" ] || BIN_DIR=$$(find . -name 'llama-server' -type f | head -1 | xargs dirname) && \
+		[ -n "$$BIN_DIR" ] || (printf "$(KUROMI)✗ llama-server not found inside $$ASSET$(RESET)\n"; exit 1) && \
+		cp -R "$$BIN_DIR/." "$(CURDIR)/$(LLAMA_DIR)/" && \
+		chmod +x "$(CURDIR)/$(LLAMA_SERVER)" && \
+		rm -rf "$$TMP"
+	@printf "$(KEROPPI)→ llama runtime staged at $(LLAMA_DIR) ($$(du -sh $(LLAMA_DIR) | cut -f1))$(RESET)\n"
+
+# Sentinel that tracks the currently-staged version so a `LLAMA_VERSION` bump
+# triggers a re-download. The recipe both writes the file AND deletes any
+# stale binary so the next $(LLAMA_SERVER) rule runs cleanly.
+$(LLAMA_VERSION_FILE):
+	@mkdir -p $(LLAMA_DIR)
+	@if [ -f $@ ] && [ "$$(cat $@)" = "$(LLAMA_VERSION)" ]; then \
+		touch $@; \
+	else \
+		printf "$(CINNA)→ llama-server version pin changed → $(LLAMA_VERSION)$(RESET)\n"; \
+		rm -rf $(LLAMA_DIR); \
+		mkdir -p $(LLAMA_DIR); \
+		echo $(LLAMA_VERSION) > $@; \
+	fi
 
 # Stage the Phoenix release into desktop/runtime/phoenix/ for bundling.
 # Two things this step does that a naive copy doesn't:

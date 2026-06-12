@@ -30,6 +30,7 @@
     "category": "Photography",
     "resources": {
       "../runtime/bin/fineshyt-ai-worker": "bin/fineshyt-ai-worker",
+      "../runtime/bin/llama/": "bin/llama/",
       "../runtime/phoenix/": "phoenix/"
     },
     "shortDescription": "Local-first photo culling that learns your taste",

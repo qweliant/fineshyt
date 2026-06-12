@@ -89,6 +89,18 @@ const RELEASE_MIGRATE_BUNDLED: &str = "phoenix/bin/migrate";
 /// Override at build time via env if you want a smaller/larger model.
 const LLAMA_MODEL_HF: &str = "ggml-org/Qwen2.5-Omni-7B-GGUF";
 
+/// Path of the `llama-server` binary INSIDE a bundled `.app` / `.msi` /
+/// `.AppImage`, relative to the platform's resource root (computed by
+/// `resolve_resource`). When this exists we use it; otherwise we fall
+/// back to brew probing (macOS dev) or a PATH lookup. Phase 2 of the
+/// distribution work — bundling here removes the `brew install llama.cpp`
+/// prereq for Mac users AND is the only way to ship to Windows where no
+/// such package manager exists by default.
+#[cfg(target_os = "windows")]
+const LLAMA_SERVER_BUNDLED: &str = "bin/llama/llama-server.exe";
+#[cfg(not(target_os = "windows"))]
+const LLAMA_SERVER_BUNDLED: &str = "bin/llama/llama-server";
+
 /// Tauri-managed state: child processes we own and need to clean up on
 /// quit. None until we successfully spawn each one.
 struct OrchestratorChild(Mutex<Option<Child>>);
@@ -391,6 +403,21 @@ fn repo_root() -> Result<PathBuf, String> {
 /// for bundled .app/.exe layouts, and works deterministically regardless of
 /// how the binary was started.
 ///
+/// Bundle layouts differ per platform:
+///
+///   * **macOS** — `<App>.app/Contents/MacOS/<binary>` with resources at
+///     `<App>.app/Contents/Resources/`. Detect via the `MacOS`/`Contents`
+///     parent pair.
+///   * **Windows** — `<install>\<binary>.exe` with resources in
+///     `<install>\resources\` (Tauri's WiX/NSIS layout). Detect via the
+///     `.exe` suffix on `current_exe`; the `resources` folder sits next
+///     to the binary.
+///   * **Linux** — for .AppImage, AppRun extracts to a temp dir and
+///     `current_exe` is in `usr/bin/`; resources live in `usr/share/<app>/`.
+///     For .deb installs the layout matches Windows-ish (resources next to
+///     the binary or in `/usr/share/`). We try `./resources/` first and
+///     fall through to the dev layout otherwise.
+///
 /// In dev (`cargo run`) the binary lives at `target/debug/` and we fall
 /// through to the repo's `desktop/runtime/` layout — the same paths
 /// tauri.conf.json's `bundle.resources` points at.
@@ -398,10 +425,8 @@ fn resolve_resource(_app: &AppHandle, rel: &str) -> Result<PathBuf, String> {
     let exe = std::env::current_exe()
         .map_err(|e| format!("current_exe failed: {e}"))?;
 
-    // Bundled macOS layout: <Bundle>.app/Contents/MacOS/<binary>
-    //   resources at        <Bundle>.app/Contents/Resources/<rel>
-    // The "Contents/MacOS" pair is the tell.
-    let in_bundle = exe
+    // (macOS) Bundle layout: detect via the Contents/MacOS pair.
+    let macos_bundle = exe
         .parent()
         .and_then(|p| p.file_name())
         .and_then(|n| n.to_str())
@@ -413,13 +438,22 @@ fn resolve_resource(_app: &AppHandle, rel: &str) -> Result<PathBuf, String> {
             .and_then(|n| n.to_str())
             == Some("Contents");
 
-    if in_bundle {
+    if macos_bundle {
         let resources = exe
             .parent()
             .and_then(|p| p.parent())
             .map(|p| p.join("Resources"))
             .ok_or_else(|| "couldn't derive Resources from current_exe".to_string())?;
         return Ok(resources.join(rel));
+    }
+
+    // (Windows / Linux bundle) Resources live next to the binary in a
+    // `resources/` folder. Probe for it; if found, that's the bundle layout.
+    if let Some(parent) = exe.parent() {
+        let resources = parent.join("resources");
+        if resources.is_dir() {
+            return Ok(resources.join(rel));
+        }
     }
 
     // Dev fallback: tauri.conf.json's `bundle.resources` source paths are
@@ -511,10 +545,18 @@ fn spawn_llama_server(app: &AppHandle, repo: &Path) -> Result<Child, String> {
     std::fs::create_dir_all(&cache_dir)
         .map_err(|e| format!("couldn't create {}: {e}", cache_dir.display()))?;
 
-    let llama_bin = find_llama_server().ok_or_else(|| {
-        "`llama-server` couldn't be found. Install it once with \
-         `brew install llama.cpp`, then re-launch."
-            .to_string()
+    let llama_bin = find_llama_server(app).ok_or_else(|| {
+        // Error wording is macOS-flavoured because that's the only platform
+        // where brew is a viable fallback; the bundled binary should be
+        // present on Windows + Linux releases.
+        #[cfg(target_os = "macos")]
+        let msg = "`llama-server` couldn't be found. Install it with \
+                   `brew install llama.cpp`, then re-launch.";
+        #[cfg(not(target_os = "macos"))]
+        let msg = "`llama-server` couldn't be found inside the app bundle. \
+                   The release is built without it — this is a packaging \
+                   bug; please file an issue.";
+        msg.to_string()
     })?;
 
     let port_str = LLAMA_PORT.to_string();
@@ -577,29 +619,57 @@ fn spawn_cwd(repo: &Path, bin: &Path) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/"))
 }
 
-fn find_llama_server() -> Option<PathBuf> {
-    // Apple Silicon Homebrew default. Most likely on modern Macs.
-    let known = [
-        "/opt/homebrew/bin/llama-server",
-        "/usr/local/bin/llama-server",
-        "/opt/local/bin/llama-server",
-    ];
-    for candidate in known {
-        let p = PathBuf::from(candidate);
+/// Find the `llama-server` binary across all the places it could live:
+///
+///   1. **Bundled inside the .app/.msi** (Phase 2 distribution shape).
+///      Preferred when present — works on every platform with no host
+///      dependency, removes the `brew install llama.cpp` prereq on macOS.
+///   2. **Homebrew install locations** (macOS dev fallback). `.app` bundles
+///      launched from Finder don't inherit the user's shell PATH, only the
+///      stripped-down launchd PATH (`/usr/bin:/bin:/usr/sbin:/sbin`). Brew
+///      lives at `/opt/homebrew/bin/` or `/usr/local/bin/`, neither in that
+///      minimal set, so we probe explicitly. macOS-only since neither Linux
+///      nor Windows have an analogous well-known location.
+///   3. **`which` / `where` PATH lookup** (developer terminal launches).
+///      Works when `cargo run` was the entry point and inherits the shell
+///      PATH. Falls back to nothing in `.app` launches without a bundled
+///      binary.
+fn find_llama_server(app: &AppHandle) -> Option<PathBuf> {
+    // (1) Bundled — preferred on every platform.
+    if let Ok(p) = resolve_resource(app, LLAMA_SERVER_BUNDLED) {
         if p.is_file() {
             return Some(p);
         }
     }
-    // Final fallback — full PATH lookup. This works in dev (cargo run
-    // inherits the shell PATH) but typically fails for .app launches.
-    let out = Command::new("/usr/bin/which")
-        .arg("llama-server")
-        .output()
-        .ok()?;
+
+    // (2) Homebrew probe — macOS only.
+    #[cfg(target_os = "macos")]
+    {
+        for candidate in [
+            "/opt/homebrew/bin/llama-server",
+            "/usr/local/bin/llama-server",
+            "/opt/local/bin/llama-server",
+        ] {
+            let p = PathBuf::from(candidate);
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+
+    // (3) PATH lookup — last resort. `which` on Unix, `where` on Windows.
+    #[cfg(target_os = "windows")]
+    let (cmd, arg) = ("C:\\Windows\\System32\\where.exe", "llama-server.exe");
+    #[cfg(not(target_os = "windows"))]
+    let (cmd, arg) = ("/usr/bin/which", "llama-server");
+
+    let out = Command::new(cmd).arg(arg).output().ok()?;
     if !out.status.success() {
         return None;
     }
-    let path = String::from_utf8(out.stdout).ok()?.trim().to_string();
+    let stdout = String::from_utf8(out.stdout).ok()?;
+    // `where` can return multiple paths on Windows; take the first.
+    let path = stdout.lines().next()?.trim().to_string();
     if path.is_empty() {
         None
     } else {
