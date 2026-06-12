@@ -267,16 +267,31 @@ $(LLAMA_VERSION_FILE):
 #      creates this at boot pointing at the user's photo library — Tauri's
 #      resource bundling follows symlinks, so without this exclude the
 #      .app would balloon by however many GB of photos the maintainer has).
-#   2. rsync preserves the directory structure exactly so `bin/server`
-#      stays a callable Erlang release entry point.
-# Re-runs cheaply since rsync only copies changed files.
+#   2. Preserves the directory structure exactly so `bin/server` stays a
+#      callable Erlang release entry point.
+#
+# Platform split:
+#   * macOS / Linux: rsync (incremental, symlink-aware, exact behaviour).
+#   * Windows (Git Bash on CI): rsync isn't installed; fall back to a
+#     clean-and-copy via `cp -R` + post-delete of the uploads dir. We can
+#     get away with this on Windows because the symlink case doesn't
+#     arise — CI builds from a fresh checkout where the uploads symlink
+#     was never created.
 desktop-stage-phoenix: release
 	@printf "$(CINNA)$(BOLD)→ staging Phoenix release into desktop/runtime/phoenix/...$(RESET)\n"
 	@mkdir -p desktop/runtime/phoenix
-	@rsync -a --delete \
-		--exclude='lib/orchestrator-*/priv/static/uploads' \
-		--exclude='lib/orchestrator-*/priv/static/uploads/' \
-		orchestrator/_build/prod/rel/orchestrator/ desktop/runtime/phoenix/
+	@case "$$(uname -s)" in \
+		MINGW*|MSYS*|CYGWIN*) \
+			rm -rf desktop/runtime/phoenix && \
+			mkdir -p desktop/runtime/phoenix && \
+			cp -R orchestrator/_build/prod/rel/orchestrator/. desktop/runtime/phoenix/ && \
+			rm -rf desktop/runtime/phoenix/lib/orchestrator-*/priv/static/uploads ;; \
+		*) \
+			rsync -a --delete \
+				--exclude='lib/orchestrator-*/priv/static/uploads' \
+				--exclude='lib/orchestrator-*/priv/static/uploads/' \
+				orchestrator/_build/prod/rel/orchestrator/ desktop/runtime/phoenix/ ;; \
+	esac
 	@printf "$(KEROPPI)→ staged: $$(du -sh desktop/runtime/phoenix | cut -f1)$(RESET)\n"
 
 # Regenerates desktop/src-tauri/icons/{32,128,128@2x,icon.icns,icon.ico,...}
