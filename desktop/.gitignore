@@ -1,7 +1,11 @@
 # Tauri build output
 src-tauri/target/
 src-tauri/gen/
-src-tauri/Cargo.lock
+# Cargo.lock is *not* ignored — the desktop crate is an application, not a
+# library, and CI needs exact dep versions to reproduce the local build.
+# Without it, `cargo update` resolves fresh deps on every CI run and trait
+# coherence conflicts (notably `time 0.3.48` vs `tauri-utils 2.9.2`) can
+# silently break the build. Committing the lock pins all transitive deps.
 
 # Bundled assets cache
 .tauri/

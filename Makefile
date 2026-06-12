@@ -282,10 +282,13 @@ desktop-stage-phoenix: release
 	@mkdir -p desktop/runtime/phoenix
 	@case "$$(uname -s)" in \
 		MINGW*|MSYS*|CYGWIN*) \
+			chmod -R +w desktop/runtime/phoenix 2>/dev/null || true; \
 			rm -rf desktop/runtime/phoenix && \
 			mkdir -p desktop/runtime/phoenix && \
-			cp -R orchestrator/_build/prod/rel/orchestrator/. desktop/runtime/phoenix/ && \
-			rm -rf desktop/runtime/phoenix/lib/orchestrator-*/priv/static/uploads ;; \
+			tar -C orchestrator/_build/prod/rel/orchestrator \
+				--exclude='lib/orchestrator-*/priv/static/uploads' \
+				--exclude='lib/orchestrator-*/priv/static/uploads/*' \
+				-cf - . | tar -C desktop/runtime/phoenix -xf - ;; \
 		*) \
 			rsync -a --delete \
 				--exclude='lib/orchestrator-*/priv/static/uploads' \
