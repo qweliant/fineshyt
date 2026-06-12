@@ -377,7 +377,11 @@ c5-llama-logs:
 ##      pointing at `fineshyt_ai.serve:main` as the entry.
 ##   3. Move the launcher into desktop/runtime/bin/.
 
-AI_WORKER_LAUNCHER := desktop/runtime/bin/fineshyt-ai-worker
+# Binary extension. On MSYS2 / Git Bash for Windows (used by the Windows CI
+# runner via `shell: bash`), `cargo install` emits `pyapp.exe`. Detect via
+# uname so the local Mac / Linux build still drops a plain `fineshyt-ai-worker`.
+AI_WORKER_EXE     := $(if $(findstring MINGW,$(shell uname -s 2>/dev/null))$(findstring MSYS,$(shell uname -s 2>/dev/null)),.exe,)
+AI_WORKER_LAUNCHER := desktop/runtime/bin/fineshyt-ai-worker$(AI_WORKER_EXE)
 AI_WORKER_VERSION  := 0.1.0
 AI_WORKER_WHEEL    := ai_worker/dist/ai_worker-$(AI_WORKER_VERSION)-py3-none-any.whl
 # Wheel-affecting source. make uses these mtimes to decide whether to rebuild,
@@ -408,7 +412,7 @@ $(AI_WORKER_LAUNCHER): $(AI_WORKER_WHEEL)
 		PYAPP_EXEC_SPEC=fineshyt_ai.serve:main \
 		PYAPP_UV_ENABLED=1 \
 		cargo install pyapp --force --quiet --root $$TMP && \
-		mv $$TMP/bin/pyapp $@ && \
+		mv $$TMP/bin/pyapp$(AI_WORKER_EXE) $@ && \
 		rm -rf $$TMP
 	@printf "$(KEROPPI)→ launcher ready at $@ ($$(du -sh $@ | cut -f1))$(RESET)\n"
 

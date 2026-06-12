@@ -1,18 +1,17 @@
-# Fineshyt release pipeline — Phase 1: macOS-only.
+# Fineshyt release pipeline.
 #
-# Goal: prove the CI pipeline by producing a downloadable .dmg on every
-# tagged push. Windows + Linux are Phase 2/3 follow-ups.
+# Phase 1 (DONE): macOS-only build proving the pipeline shape.
+# Phase 2 (DONE): bundled llama-server (removes brew prereq) + Windows runner.
+# Phase 3 (TODO): Linux runner, code signing, Tauri Updater integration.
 #
 # Triggers:
 #   - push of a tag matching v* (e.g. v0.1.0)         → builds + attaches to GitHub Release
-#   - workflow_dispatch (manual button in Actions UI) → builds + uploads as workflow artifact
+#   - workflow_dispatch (manual button in Actions UI) → builds + uploads as workflow artifacts
 #                                                       (useful for testing without tagging)
 #
 # What's NOT in scope here:
-#   - Code signing / notarization (post-MVP; needs Apple Developer cert in secrets)
-#   - Windows / Linux runners (Phase 2/3)
-#   - Bundling llama-server into the .dmg (Phase 2; right now the .dmg expects
-#     `brew install llama.cpp` on the user's machine, same as local dev)
+#   - Code signing / notarization (post-MVP; needs Apple Developer + Authenticode certs in secrets)
+#   - Linux runner (.AppImage / .deb)
 #   - Tauri Updater integration (premature for <10 users)
 name: release
 
@@ -162,6 +161,174 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ steps.artifact.outputs.dmg_path }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Phase 2 — Windows (x86_64)
+  #
+  # Mirrors the macOS job structure but:
+  #   * llama-server is downloaded via PowerShell (Makefile path is bash-only
+  #     and `bin/llama-server.exe` differs from `bin/llama-server` enough that
+  #     a parallel codepath is cleaner than templating the existing one)
+  #   * Tauri produces a `.msi` (WiX) or `.exe` (NSIS) depending on what's
+  #     available on `windows-latest` — we glob for either, take whichever exists
+  #   * `shell: bash` is used for Make targets — Git Bash ships with Git for
+  #     Windows which is preinstalled on the runner, gives us GNU `make` + the
+  #     usual POSIX tools so we don't have to port shell scripts
+  # ═══════════════════════════════════════════════════════════════════════════
+  windows:
+    name: Windows (x86_64)
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    env:
+      MIX_ENV: prod
+      ELIXIR_ASK: "false"
+      # Match the pinned llama.cpp build from the Makefile so the asset name
+      # in the PowerShell step doesn't drift from the local dev experience.
+      LLAMA_VERSION: b6500
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ─── Toolchains ────────────────────────────────────────────────────────
+      - name: Setup Elixir + OTP
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: "28.0"
+          elixir-version: "1.19.5"
+
+      - name: Setup Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      # ─── Caches ────────────────────────────────────────────────────────────
+      - name: Cache Mix deps + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            orchestrator/deps
+            orchestrator/_build
+          key: ${{ runner.os }}-mix-${{ hashFiles('orchestrator/mix.lock') }}-${{ hashFiles('orchestrator/**/*.ex', 'orchestrator/**/*.exs') }}
+          restore-keys: |
+            ${{ runner.os }}-mix-${{ hashFiles('orchestrator/mix.lock') }}-
+            ${{ runner.os }}-mix-
+
+      - name: Cache Cargo registry + git
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('desktop/src-tauri/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Cache Tauri target dir
+        uses: actions/cache@v4
+        with:
+          path: desktop/src-tauri/target
+          key: ${{ runner.os }}-tauri-target-${{ hashFiles('desktop/src-tauri/Cargo.lock', 'desktop/src-tauri/src/**/*.rs') }}
+          restore-keys: |
+            ${{ runner.os }}-tauri-target-
+
+      # ─── Build steps ───────────────────────────────────────────────────────
+      - name: Install Hex + Rebar
+        shell: bash
+        run: mix do local.hex --force, local.rebar --force
+
+      - name: Fetch Elixir deps
+        shell: bash
+        working-directory: orchestrator
+        run: mix deps.get --only prod
+
+      - name: Build Phoenix release
+        shell: bash
+        run: make release
+
+      - name: Install cargo-tauri
+        shell: bash
+        run: cargo install tauri-cli --version "^2.0" --locked
+
+      - name: Build PyApp ai_worker launcher
+        shell: bash
+        run: make ai-worker-launcher
+
+      - name: Stage Phoenix release into desktop/runtime/phoenix/
+        shell: bash
+        run: make desktop-stage-phoenix
+
+      # Windows llama-server download. ggml-org's Windows CPU-only asset has
+      # the binary + DLLs in a flat layout — `llama-server.exe`, `ggml.dll`,
+      # `llama.dll`, etc. We mirror the Mac shape: everything in
+      # `desktop/runtime/bin/llama/`.
+      - name: Stage llama-server runtime (Windows)
+        shell: pwsh
+        run: |
+          $version = $env:LLAMA_VERSION
+          $asset = "llama-$version-bin-win-cpu-x64.zip"
+          $url = "https://github.com/ggml-org/llama.cpp/releases/download/$version/$asset"
+          $dest = "desktop\runtime\bin\llama"
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          $tmp = Join-Path $env:RUNNER_TEMP "llama"
+          New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+          Write-Host "Downloading $url"
+          Invoke-WebRequest -Uri $url -OutFile (Join-Path $tmp "llama.zip") -UseBasicParsing
+          Expand-Archive -Path (Join-Path $tmp "llama.zip") -DestinationPath $tmp -Force
+          # The archive's internal layout has changed across releases. Find
+          # llama-server.exe wherever it ended up and copy its parent dir.
+          $serverExe = Get-ChildItem -Path $tmp -Filter "llama-server.exe" -Recurse | Select-Object -First 1
+          if (-not $serverExe) {
+            throw "llama-server.exe not found inside $asset"
+          }
+          Copy-Item -Path (Join-Path $serverExe.Directory.FullName "*") -Destination $dest -Recurse -Force
+          Get-ChildItem $dest | Select-Object Name, Length
+
+      - name: Build Tauri bundle (.msi + .exe)
+        shell: bash
+        working-directory: desktop/src-tauri
+        run: cargo tauri build
+
+      # ─── Surface the artifact ──────────────────────────────────────────────
+      # Tauri on Windows can produce both `.msi` (WiX) and `.exe` (NSIS) under
+      # target/release/bundle/. We prefer .msi since it integrates with Add/
+      # Remove Programs, but fall back to .exe if WiX isn't available on the
+      # runner image.
+      - name: Locate built installer
+        id: artifact
+        shell: pwsh
+        run: |
+          $msi = Get-ChildItem -Path "desktop\src-tauri\target\release\bundle\msi" -Filter "*.msi" -ErrorAction SilentlyContinue | Select-Object -First 1
+          $nsis = Get-ChildItem -Path "desktop\src-tauri\target\release\bundle\nsis" -Filter "*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          $artifact = if ($msi) { $msi } else { $nsis }
+          if (-not $artifact) {
+            Write-Host "::error::No .msi or .exe found under desktop\src-tauri\target\release\bundle\"
+            Get-ChildItem "desktop\src-tauri\target\release\bundle\" -Recurse -ErrorAction SilentlyContinue | Select-Object FullName
+            exit 1
+          }
+          "installer_path=$($artifact.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "installer_name=$($artifact.Name)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "Found: $($artifact.FullName) ($([math]::Round($artifact.Length / 1MB, 1)) MB)"
+
+      - name: Upload installer as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.artifact.outputs.installer_name }}
+          path: ${{ steps.artifact.outputs.installer_path }}
+          retention-days: 14
+
+      - name: Attach installer to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.artifact.outputs.installer_path }}
           draft: false
           prerelease: false
           generate_release_notes: true

@@ -66,6 +66,9 @@ const AI_WORKER_PORT: u16 = 8000;
 /// resource_dir() at the project's `runtime/` layout so the same
 /// relative path resolves either way. See `tauri.conf.json`'s
 /// `bundle.resources` for the source-side mapping.
+#[cfg(target_os = "windows")]
+const AI_WORKER_LAUNCHER_BUNDLED: &str = "bin/fineshyt-ai-worker.exe";
+#[cfg(not(target_os = "windows"))]
 const AI_WORKER_LAUNCHER_BUNDLED: &str = "bin/fineshyt-ai-worker";
 
 const POLL_TIMEOUT: Duration = Duration::from_secs(180);
@@ -80,7 +83,15 @@ const POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// `Resources/`). The whole release tree (~46 MB) ships under `phoenix/`
 /// via `tauri.conf.json`'s `bundle.resources` glob. Built by `make
 /// release` (which boils down to `MIX_ENV=prod mix release`).
+// Phoenix's release-overlay generates both POSIX shell scripts and Windows
+// .bat variants. Point at whichever one the current OS knows how to spawn.
+#[cfg(target_os = "windows")]
+const RELEASE_BIN_BUNDLED: &str = "phoenix/bin/server.bat";
+#[cfg(target_os = "windows")]
+const RELEASE_MIGRATE_BUNDLED: &str = "phoenix/bin/migrate.bat";
+#[cfg(not(target_os = "windows"))]
 const RELEASE_BIN_BUNDLED: &str = "phoenix/bin/server";
+#[cfg(not(target_os = "windows"))]
 const RELEASE_MIGRATE_BUNDLED: &str = "phoenix/bin/migrate";
 
 /// Vision model the shell loads on launch. ggml-org's HuggingFace
