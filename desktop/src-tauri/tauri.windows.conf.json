@@ -1,6 +1,5 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "_comment": "Windows-only overrides merged on top of tauri.conf.json. Tauri 2 picks this up automatically when targeting Windows. Needed because filenames carry .exe on Windows (PyApp launcher, llama-server) and the resource map can't have OS-conditional entries inline.",
   "bundle": {
     "resources": {
       "../runtime/bin/fineshyt-ai-worker.exe": "bin/fineshyt-ai-worker.exe",
