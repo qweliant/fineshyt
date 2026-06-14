@@ -189,6 +189,12 @@ jobs:
       # Match the pinned llama.cpp build from the Makefile so the asset name
       # in the PowerShell step doesn't drift from the local dev experience.
       LLAMA_VERSION: b6500
+      # GitHub's `windows-latest` image picked up `ImageOS=win25-vs2026` in
+      # mid-2026, which `erlef/setup-beam`'s OS sniffer doesn't recognize
+      # (it expects `win25` without the VS suffix). Pin the value the
+      # action understands; we don't actually depend on which VS toolchain
+      # is provisioned beyond MSVC being present.
+      ImageOS: win25
 
     steps:
       - name: Checkout
