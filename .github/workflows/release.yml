@@ -156,12 +156,15 @@ jobs:
 
       # Tag-triggered runs also attach the .dmg to the matching GitHub Release.
       # softprops/action-gh-release creates the release if it doesn't exist.
-      - name: Attach .dmg to GitHub Release
+      # `draft: true` keeps the release mutable so the parallel Windows job can
+      # also attach its .msi — published releases are immutable on GitHub.
+      # Manually click "Publish" in the Releases UI once both artifacts land.
+      - name: Attach .dmg to GitHub Release (draft)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ steps.artifact.outputs.dmg_path }}
-          draft: false
+          draft: true
           prerelease: false
           generate_release_notes: true
 
@@ -330,11 +333,11 @@ jobs:
           path: ${{ steps.artifact.outputs.installer_path }}
           retention-days: 14
 
-      - name: Attach installer to GitHub Release
+      - name: Attach installer to GitHub Release (draft)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ steps.artifact.outputs.installer_path }}
-          draft: false
+          draft: true
           prerelease: false
           generate_release_notes: true
