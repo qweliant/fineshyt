@@ -108,10 +108,10 @@ defmodule Orchestrator.Photos do
       Orchestrator.Photos.list_photos(filter: :for_projects, sort: :rating_desc)
   """
   def list_photos(opts \\ []) do
-    page    = Keyword.get(opts, :page, 1)
-    filter  = Keyword.get(opts, :filter, :all)
-    sort    = Keyword.get(opts, :sort, :newest)
-    search  = Keyword.get(opts, :search, "")
+    page = Keyword.get(opts, :page, 1)
+    filter = Keyword.get(opts, :filter, :all)
+    sort = Keyword.get(opts, :sort, :newest)
+    search = Keyword.get(opts, :search, "")
     project = Keyword.get(opts, :project, nil)
 
     base_query(filter)
@@ -142,8 +142,8 @@ defmodule Orchestrator.Photos do
       Orchestrator.Photos.count_photos(filter: :rejected)
   """
   def count_photos(opts \\ []) do
-    filter  = Keyword.get(opts, :filter, :all)
-    search  = Keyword.get(opts, :search, "")
+    filter = Keyword.get(opts, :filter, :all)
+    search = Keyword.get(opts, :search, "")
     project = Keyword.get(opts, :project, nil)
 
     base_query(filter)
@@ -151,6 +151,47 @@ defmodule Orchestrator.Photos do
     |> apply_project_filter(project)
     |> apply_search(search)
     |> Repo.aggregate(:count)
+  end
+
+  @doc """
+  Lightweight projection of the filtered photo set for vibe ranking.
+
+  Returns `{id, suggested_tags, preference_score}` tuples only — crucially NOT
+  full `%Photo{}` structs, so the whole library can be ranked by `vibe_score`
+  without loading + decoding every `clip_embedding` blob on each gallery
+  render. The gallery sorts these, slices the page, then loads the 60 full
+  rows via `list_by_ids_ordered/1`.
+
+  Accepts the same `:filter`, `:search`, `:project` opts as `list_photos/1`.
+  """
+  def list_for_vibe_ranking(opts \\ []) do
+    filter = Keyword.get(opts, :filter, :all)
+    search = Keyword.get(opts, :search, "")
+    project = Keyword.get(opts, :project, nil)
+
+    base_query(filter)
+    |> apply_filter(filter)
+    |> apply_project_filter(project)
+    |> apply_search(search)
+    |> select([p], {p.id, p.suggested_tags, p.preference_score})
+    |> Repo.all()
+  end
+
+  @doc """
+  Load full photos for the given ids, returned in the same order as `ids`.
+
+  Used after vibe ranking selects the page's ids, so the displayed order is
+  preserved. Missing ids are dropped.
+  """
+  def list_by_ids_ordered(ids) do
+    by_id =
+      from(p in Photo, where: p.id in ^ids)
+      |> Repo.all()
+      |> Map.new(&{&1.id, &1})
+
+    ids
+    |> Enum.map(&Map.get(by_id, &1))
+    |> Enum.reject(&is_nil/1)
   end
 
   @doc """
@@ -169,13 +210,16 @@ defmodule Orchestrator.Photos do
   """
   def page_size, do: @page_size
 
-  defp base_query(:failed),   do: from(p in Photo, where: p.curation_status == "failed")
+  defp base_query(:failed), do: from(p in Photo, where: p.curation_status == "failed")
   defp base_query(:rejected), do: from(p in Photo, where: p.curation_status == "rejected")
-  defp base_query(_),         do: from(p in Photo, where: p.curation_status not in ["rejected", "failed", "pending"])
 
-  defp apply_filter(q, :all),      do: q
-  defp apply_filter(q, :failed),   do: q
+  defp base_query(_),
+    do: from(p in Photo, where: p.curation_status not in ["rejected", "failed", "pending"])
+
+  defp apply_filter(q, :all), do: q
+  defp apply_filter(q, :failed), do: q
   defp apply_filter(q, :rejected), do: q
+
   defp apply_filter(q, :match),
     do: where(q, [p], p.manual_match == true or p.preference_score >= ^@match_threshold)
 
@@ -187,14 +231,24 @@ defmodule Orchestrator.Photos do
         (p.manual_match == false or is_nil(p.manual_match)) and
           (p.preference_score < ^@match_threshold or is_nil(p.preference_score))
       )
-  defp apply_filter(q, :rated),    do: where(q, [p], not is_nil(p.user_rating))
-  defp apply_filter(q, :unrated),  do: where(q, [p], is_nil(p.user_rating))
-  defp apply_filter(q, :for_projects), do: where(q, [p], not is_nil(p.user_rating) and p.user_rating >= 4 and (is_nil(p.project) or p.project == ""))
-  defp apply_filter(q, _),         do: q
+
+  defp apply_filter(q, :rated), do: where(q, [p], not is_nil(p.user_rating))
+  defp apply_filter(q, :unrated), do: where(q, [p], is_nil(p.user_rating))
+
+  defp apply_filter(q, :for_projects),
+    do:
+      where(
+        q,
+        [p],
+        not is_nil(p.user_rating) and p.user_rating >= 4 and
+          (is_nil(p.project) or p.project == "")
+      )
+
+  defp apply_filter(q, _), do: q
 
   defp apply_project_filter(q, nil), do: q
-  defp apply_project_filter(q, ""),  do: q
-  defp apply_project_filter(q, p),   do: where(q, [photo], photo.project == ^p)
+  defp apply_project_filter(q, ""), do: q
+  defp apply_project_filter(q, p), do: where(q, [photo], photo.project == ^p)
 
   @doc """
   Return all distinct project names assigned to non-rejected photos, sorted
@@ -223,18 +277,27 @@ defmodule Orchestrator.Photos do
   end
 
   defp apply_search(q, ""), do: q
+
   defp apply_search(q, search) do
     term = "%#{search}%"
     where(q, [p], ilike(p.subject, ^term) or ilike(p.artistic_mood, ^term))
   end
 
-  defp apply_sort(q, :newest),          do: order_by(q, [p], desc: p.inserted_at)
-  defp apply_sort(q, :rating_desc),     do: order_by(q, [p], [desc_nulls_last: p.user_rating, desc: p.inserted_at])
-  defp apply_sort(q, :preference_desc), do: order_by(q, [p], [desc_nulls_last: p.preference_score, desc: p.inserted_at])
-  defp apply_sort(q, :preference_asc),  do: order_by(q, [p], [asc_nulls_last: p.preference_score, desc: p.inserted_at])
-  defp apply_sort(q, _),                do: order_by(q, [p], desc: p.inserted_at)
+  defp apply_sort(q, :newest), do: order_by(q, [p], desc: p.inserted_at)
+
+  defp apply_sort(q, :rating_desc),
+    do: order_by(q, [p], desc_nulls_last: p.user_rating, desc: p.inserted_at)
+
+  defp apply_sort(q, :preference_desc),
+    do: order_by(q, [p], desc_nulls_last: p.preference_score, desc: p.inserted_at)
+
+  defp apply_sort(q, :preference_asc),
+    do: order_by(q, [p], asc_nulls_last: p.preference_score, desc: p.inserted_at)
+
+  defp apply_sort(q, _), do: order_by(q, [p], desc: p.inserted_at)
 
   defp paginate(q, :all), do: q
+
   defp paginate(q, page) do
     offset = (page - 1) * @page_size
     q |> limit(@page_size) |> offset(^offset)
@@ -259,12 +322,24 @@ defmodule Orchestrator.Photos do
     * `MapSet.t(String.t())` — stems that already exist.
   """
   def existing_stems(stems) do
+    # SQLite has no regexp_replace/ANY, so derive the stem in Elixir. The
+    # non-failed photo set is small (single-user, ~tens of thousands of
+    # rows), so pulling file_paths and filtering in memory is fine.
+    #
+    # We compare against `normalize_stem/1` (extension + copy-suffix strip)
+    # rather than plain `rootname`, so an incoming `IMG_001` collides with a
+    # stored `IMG_001 copy.jpg`. The caller (LocalBatchImportWorker) should
+    # pass *normalized* stems too, so `IMG_001 copy.NEF` on disk collides
+    # with the already-ingested `IMG_001.jpg`.
+    wanted = MapSet.new(stems)
+
     Repo.all(
       from p in Photo,
-        where: fragment("regexp_replace(regexp_replace(file_path, '^.*/', ''), '\\.[^.]+$', '') = ANY(?)", ^stems)
-          and p.curation_status not in ["failed"],
-        select: fragment("regexp_replace(regexp_replace(file_path, '^.*/', ''), '\\.[^.]+$', '')")
+        where: p.curation_status not in ["failed"],
+        select: p.file_path
     )
+    |> Enum.map(&normalize_stem/1)
+    |> Enum.filter(&MapSet.member?(wanted, &1))
     |> MapSet.new()
   end
 
@@ -284,12 +359,15 @@ defmodule Orchestrator.Photos do
     * `MapSet.t(String.t())` — basenames already on disk and recorded.
   """
   def existing_basenames(basenames) do
-    paths = Enum.map(basenames, fn b ->
-      Path.join([:code.priv_dir(:orchestrator), "static", "uploads", b]) |> to_string()
-    end)
-    Repo.all(from p in Photo,
-      where: p.file_path in ^paths and p.curation_status not in ["failed"],
-      select: p.file_path
+    paths =
+      Enum.map(basenames, fn b ->
+        Path.join([:code.priv_dir(:orchestrator), "static", "uploads", b]) |> to_string()
+      end)
+
+    Repo.all(
+      from p in Photo,
+        where: p.file_path in ^paths and p.curation_status not in ["failed"],
+        select: p.file_path
     )
     |> Enum.map(&Path.basename/1)
     |> MapSet.new()
@@ -398,8 +476,8 @@ defmodule Orchestrator.Photos do
   ## Returns
 
     * `[{id, clip_embedding, user_rating}]` — a list of tuples, where
-      `clip_embedding` is a `%Pgvector{}` you can `Pgvector.to_list/1` to
-      marshal into JSON.
+      `clip_embedding` is already a plain list of floats (via the
+      `Orchestrator.Embedding` Ecto type) ready to marshal into JSON.
   """
   def list_rated_with_embeddings do
     Repo.all(
@@ -461,9 +539,7 @@ defmodule Orchestrator.Photos do
     Repo.transaction(fn ->
       Enum.each(updates, fn {id, score, version} ->
         from(p in Photo, where: p.id == ^id)
-        |> Repo.update_all(
-          set: [preference_score: score, preference_model_version: version]
-        )
+        |> Repo.update_all(set: [preference_score: score, preference_model_version: version])
       end)
     end)
 
@@ -496,8 +572,7 @@ defmodule Orchestrator.Photos do
   def list_photos_needing_quality_scores do
     Repo.all(
       from p in Photo,
-        where:
-          is_nil(p.technical_score) and p.curation_status == "complete",
+        where: is_nil(p.technical_score) and p.curation_status == "complete",
         select: {p.id, p.file_path},
         order_by: [asc: p.id]
     )
@@ -522,6 +597,13 @@ defmodule Orchestrator.Photos do
   Return every "complete" photo that has a CLIP embedding, suitable for
   burst detection. Result shape matches the Python worker's expected input.
 
+  Photos already grouped as filename copies (`dup_group IS NOT NULL`) are
+  excluded — they share their stem and are visually near-identical, so the
+  burst detector would otherwise surface them as 2-photo bursts even
+  though they belong under the Copies tab. Copies take precedence; if you
+  want copies to also be considered for burst grouping, clear their
+  `dup_group` first.
+
   ## Returns
 
     * `[{id, clip_embedding, sharpness_score, captured_at}]`
@@ -529,7 +611,9 @@ defmodule Orchestrator.Photos do
   def list_photos_for_burst_detection do
     Repo.all(
       from p in Photo,
-        where: not is_nil(p.clip_embedding) and p.curation_status == "complete",
+        where:
+          not is_nil(p.clip_embedding) and p.curation_status == "complete" and
+            is_nil(p.dup_group),
         select: {p.id, p.clip_embedding, p.sharpness_score, p.captured_at}
     )
   end
@@ -581,8 +665,249 @@ defmodule Orchestrator.Photos do
           order_by: [asc: p.burst_group, desc: p.sharpness_score]
       )
 
-    Enum.group_by(photos, & &1.burst_group)
+    photos
+    |> Enum.group_by(& &1.burst_group)
+    # Singleton groups are "resolved" — the user has already kept one and
+    # rejected the rest (or all but one was rejected outside this UI). Drop
+    # them so the survey list only shows groups that still need a decision.
+    |> Enum.filter(fn {_id, members} -> length(members) > 1 end)
     |> Enum.sort_by(fn {group_id, _} -> group_id end)
+  end
+
+  @doc """
+  Clear `burst_group` on every member of the given group. Used by the gallery's
+  "Not a Burst" button to dismiss a false-positive burst (most often a batch
+  of film scans that the visual+temporal heuristic mistakes for a digital
+  burst). The photos themselves are untouched — only the grouping is cleared,
+  so they reappear as ordinary gallery rows.
+  """
+  def clear_burst_group(group_id) when is_integer(group_id) do
+    {n, _} =
+      from(p in Photo, where: p.burst_group == ^group_id)
+      |> Repo.update_all(set: [burst_group: nil])
+
+    {:ok, n}
+  end
+
+  @doc """
+  Clear `burst_group` on a specific list of photo ids. Used by the survey
+  UI when the user explicitly picks N keepers from a burst — the kept frames
+  exit the burst pool entirely (so the resolved group disappears), while
+  any unlisted member stays grouped (caller usually rejects those first).
+  """
+  def clear_burst_group_for_photos(ids) when is_list(ids) do
+    {n, _} =
+      from(p in Photo, where: p.id in ^ids)
+      |> Repo.update_all(set: [burst_group: nil])
+
+    {:ok, n}
+  end
+
+  @doc """
+  Clear `dup_group` on every member of the given group. Parallel to
+  `clear_burst_group/1` for the Copies tab's "Not Duplicates" dismiss
+  button. Useful when the filename heuristic matched but the user
+  recognises them as legitimately distinct photos that just happen to
+  share a generic stem.
+  """
+  def clear_dup_group(group_id) when is_integer(group_id) do
+    {n, _} =
+      from(p in Photo, where: p.dup_group == ^group_id)
+      |> Repo.update_all(set: [dup_group: nil])
+
+    {:ok, n}
+  end
+
+  @doc """
+  Normalize a basename's stem for filename-copy dedup.
+
+  Strips the file extension and any macOS-style copy suffix from the result.
+  Designed to collapse `"IMG_001.jpg"`, `"IMG_001 copy.jpg"`,
+  `"IMG_001 copy 2.jpg"`, `"IMG_001 (1).jpg"` to the same canonical `"IMG_001"`.
+
+  Used by both `existing_stems/1` (to skip ingesting copies of already-present
+  photos) and `detect_and_assign_dup_groups/0` (to group existing duplicates
+  retrospectively).
+
+  ## Examples
+
+      iex> Orchestrator.Photos.normalize_stem("/foo/IMG_001 copy 2.jpg")
+      "IMG_001"
+
+      iex> Orchestrator.Photos.normalize_stem("IMG_001 (3).jpg")
+      "IMG_001"
+  """
+  # Trailing-suffix patterns we treat as copy-of-original:
+  #   * ` copy`        — macOS Finder
+  #   * ` copy 2`      — macOS Finder, numbered
+  #   * ` copy_1`      — variant some tools emit
+  #   * ` (3)`         — Finder / web-browser
+  #   * ` 2`           — macOS Finder bare-number pattern (no "copy" word)
+  #   * `_1` … `_99`   — `convert.py`'s `unique_output_path` collision-suffix
+  #                      (and Lightroom-style export disambiguators). Capped
+  #                      at two digits so camera-numbered files like
+  #                      `DSC_1234` (`_1234` = sequence number) don't get
+  #                      stripped to `DSC`. CLIP-similarity (0.95) catches
+  #                      any remaining false positives.
+  #   * `h<6+ hex>`    — short content-hash suffix some older pipeline emitted
+  #                      (e.g. `000366490014h645e66.jpg`). Anchored on the `h`
+  #                      separator so it can't eat the trailing hex run of a
+  #                      bare numeric ID like `000366490014`.
+  #
+  # The stripper runs recursively (`strip_copy_suffixes/1`) so compound
+  # chains like " 2_1" (Finder copy → then auto-renamed again with _N)
+  # peel back layer-by-layer to the canonical stem.
+  @copy_suffix_re ~r/(?:\s*\(\d+\)|\s+copy(?:[\s_]\d+)?|_\d{1,2}|\s\d{1,2}|h[a-f0-9]{6,})$/i
+
+  def normalize_stem(path) when is_binary(path) do
+    path
+    |> Path.basename()
+    |> Path.rootname()
+    |> strip_copy_suffixes()
+    |> String.trim()
+  end
+
+  # Apply @copy_suffix_re repeatedly so compound chains (e.g. " 2_1": a
+  # Finder duplicate that was later auto-renamed with the _N collision
+  # suffix) collapse all the way back to the canonical stem.
+  defp strip_copy_suffixes(stem) do
+    stripped = String.replace(stem, @copy_suffix_re, "")
+    if stripped == stem, do: stem, else: strip_copy_suffixes(stripped)
+  end
+
+  @doc """
+  Scan every "complete" photo, group by `normalize_stem/1`, **filter each
+  group by CLIP cosine similarity to the keeper** (threshold 0.95), and
+  assign a shared `dup_group` integer to every group with ≥ 2 surviving
+  members. Groups with a single surviving member — or where the keeper
+  has no embedding to confirm against — are dropped.
+
+  The CLIP filter exists to kill the false-positive mode where generic
+  filenames (`Untitled.jpg`, `Untitled (4).jpg`, …) match by stem but are
+  completely different photos. Embeddings are already L2-normalised by
+  `/api/v1/embed`, so cosine similarity is just the dot product.
+
+  The "keeper" — the photo a user is most likely to want to KEEP, surfaced
+  first in `list_dup_groups/0` — is picked per group by, in order:
+
+    1. Filename **without** a copy/paren suffix (i.e. the original).
+    2. Highest `user_rating`.
+    3. Most recent `inserted_at`.
+
+  Returns `{n_groups, n_extras}` so the caller can summarise.
+  """
+  @dup_sim_threshold 0.95
+  # Naive epoch used as the tiebreak "earliest possible" timestamp by both
+  # sort_candidate_members/1 and sort_dup_members/1. Defined here at the
+  # top so both functions capture a non-nil value (module attributes in
+  # Elixir capture their current value at function-definition time).
+  @epoch ~N[1970-01-01 00:00:00]
+
+  def detect_and_assign_dup_groups do
+    photos =
+      Repo.all(
+        from p in Photo,
+          where: p.curation_status == "complete",
+          select: {p.id, p.file_path, p.user_rating, p.inserted_at, p.clip_embedding}
+      )
+
+    confirmed =
+      photos
+      |> Enum.group_by(fn {_id, path, _r, _at, _e} -> normalize_stem(path) end)
+      |> Enum.filter(fn {_stem, members} -> length(members) > 1 end)
+      |> Enum.flat_map(&confirm_with_similarity/1)
+
+    Repo.transaction(fn ->
+      from(p in Photo, where: not is_nil(p.dup_group))
+      |> Repo.update_all(set: [dup_group: nil])
+
+      confirmed
+      |> Enum.with_index(1)
+      |> Enum.each(fn {{_stem, members}, group_id} ->
+        ids = Enum.map(members, fn {id, _, _, _, _} -> id end)
+
+        from(p in Photo, where: p.id in ^ids)
+        |> Repo.update_all(set: [dup_group: group_id])
+      end)
+    end)
+
+    n_groups = length(confirmed)
+    n_extras = confirmed |> Enum.map(fn {_, m} -> length(m) - 1 end) |> Enum.sum()
+    {n_groups, n_extras}
+  end
+
+  # Within a filename-candidate group, keep only members whose CLIP
+  # embedding has cosine_sim >= 0.95 to the keeper's. Drop the group
+  # entirely if the keeper lacks an embedding (can't confirm) or if the
+  # filter leaves a singleton.
+  defp confirm_with_similarity({stem, members}) do
+    [keeper | rest] = sort_candidate_members(members)
+    {_, _, _, _, keeper_emb} = keeper
+
+    cond do
+      is_nil(keeper_emb) ->
+        []
+
+      true ->
+        confirmed_rest =
+          Enum.filter(rest, fn {_id, _path, _r, _at, emb} ->
+            emb && cosine_sim(keeper_emb, emb) >= @dup_sim_threshold
+          end)
+
+        if confirmed_rest == [], do: [], else: [{stem, [keeper | confirmed_rest]}]
+    end
+  end
+
+  # Same heuristic as sort_dup_members/1 but operates on the 5-tuple used
+  # during detection (id, path, rating, inserted_at, embedding).
+  defp sort_candidate_members(members) do
+    Enum.sort_by(members, fn {_id, path, rating, inserted_at, _emb} ->
+      has_copy = String.match?(Path.rootname(Path.basename(path)), @copy_suffix_re)
+      {has_copy, -(rating || 0), -NaiveDateTime.diff(inserted_at || @epoch, @epoch, :second)}
+    end)
+  end
+
+  # CLIP embeddings come out of /api/v1/embed L2-normalised, so cosine
+  # similarity reduces to the dot product.
+  defp cosine_sim(a, b) when is_list(a) and is_list(b) do
+    a |> Enum.zip(b) |> Enum.reduce(0.0, fn {x, y}, acc -> acc + x * y end)
+  end
+
+  @doc """
+  Return dup groups for the gallery — each group is a list of photos with
+  the "keeper" first, then siblings ordered by (filename has copy suffix,
+  rating desc, inserted_at desc).
+
+  The list shape mirrors `list_burst_groups/0` exactly so the gallery
+  template can reuse the same iteration shape.
+  """
+  def list_dup_groups do
+    photos =
+      Repo.all(
+        from p in Photo,
+          where: not is_nil(p.dup_group) and p.curation_status == "complete"
+      )
+
+    photos
+    |> Enum.group_by(& &1.dup_group)
+    # See list_burst_groups/0 — singletons are resolved groups and shouldn't
+    # surface in the survey UI.
+    |> Enum.filter(fn {_id, members} -> length(members) > 1 end)
+    |> Enum.map(fn {gid, members} -> {gid, sort_dup_members(members)} end)
+    |> Enum.sort_by(fn {group_id, _} -> group_id end)
+  end
+
+  # Keeper-first ordering. Same heuristic as detect_and_assign_dup_groups/0:
+  # original (no copy suffix) > highest rating > most recent. All three
+  # criteria are negated (or use a "false sorts first" boolean) so the
+  # plain ascending Enum.sort_by puts the keeper first.
+  defp sort_dup_members(members) do
+    Enum.sort_by(members, fn p ->
+      has_copy = String.match?(Path.rootname(Path.basename(p.file_path)), @copy_suffix_re)
+      rating = -(p.user_rating || 0)
+      neg_age = -NaiveDateTime.diff(p.inserted_at || @epoch, @epoch, :second)
+      {has_copy, rating, neg_age}
+    end)
   end
 
   @doc """
@@ -601,7 +926,10 @@ defmodule Orchestrator.Photos do
   """
   def delete_tag(id, tag) do
     photo = get_photo!(id)
-    new_tags = Enum.reject(photo.suggested_tags || [], &(String.downcase(&1) == String.downcase(tag)))
+
+    new_tags =
+      Enum.reject(photo.suggested_tags || [], &(String.downcase(&1) == String.downcase(tag)))
+
     photo |> Photo.changeset(%{suggested_tags: new_tags}) |> Repo.update()
   end
 
@@ -629,9 +957,11 @@ defmodule Orchestrator.Photos do
   """
   def delete_photo(id) do
     photo = get_photo!(id)
+
     if photo.file_path && File.exists?(photo.file_path) do
       File.rm(photo.file_path)
     end
+
     photo
     |> Photo.changeset(%{curation_status: "rejected", url: nil})
     |> Repo.update()
@@ -770,7 +1100,10 @@ defmodule Orchestrator.Photos do
     {n, _} =
       Repo.update_all(
         from(p in Photo, where: p.id in ^ids),
-        set: [project: project, updated_at: NaiveDateTime.utc_now() |> NaiveDateTime.truncate(:second)]
+        set: [
+          project: project,
+          updated_at: NaiveDateTime.utc_now() |> NaiveDateTime.truncate(:second)
+        ]
       )
 
     {:ok, n}
@@ -800,7 +1133,10 @@ defmodule Orchestrator.Photos do
     {n, _} =
       Repo.update_all(
         from(p in Photo, where: p.id in ^ids),
-        set: [curation_status: "rejected", updated_at: NaiveDateTime.utc_now() |> NaiveDateTime.truncate(:second)]
+        set: [
+          curation_status: "rejected",
+          updated_at: NaiveDateTime.utc_now() |> NaiveDateTime.truncate(:second)
+        ]
       )
 
     {:ok, n}
@@ -987,8 +1323,9 @@ defmodule Orchestrator.Photos do
     * `boolean()`
   """
   def already_processed?(file_path) do
-    Repo.exists?(from p in Photo,
-      where: p.file_path == ^file_path and p.curation_status in ["complete", "rejected"]
+    Repo.exists?(
+      from p in Photo,
+        where: p.file_path == ^file_path and p.curation_status in ["complete", "rejected"]
     )
   end
 
@@ -1011,7 +1348,13 @@ defmodule Orchestrator.Photos do
     %Photo{}
     |> Photo.changeset(Map.put(attrs, :curation_status, "failed"))
     |> Repo.insert(
-      on_conflict: [set: [failure_reason: attrs[:failure_reason] || attrs["failure_reason"], curation_status: "failed", updated_at: DateTime.utc_now()]],
+      on_conflict: [
+        set: [
+          failure_reason: attrs[:failure_reason] || attrs["failure_reason"],
+          curation_status: "failed",
+          updated_at: DateTime.utc_now()
+        ]
+      ],
       conflict_target: [:file_path]
     )
   end
@@ -1032,7 +1375,9 @@ defmodule Orchestrator.Photos do
     * `{n_deleted, nil}` — Ecto's `delete_all/2` shape.
   """
   def delete_failed_if_exists(file_path) do
-    Repo.delete_all(from p in Photo, where: p.file_path == ^file_path and p.curation_status == "failed")
+    Repo.delete_all(
+      from p in Photo, where: p.file_path == ^file_path and p.curation_status == "failed"
+    )
   end
 
   @doc """
@@ -1075,7 +1420,9 @@ defmodule Orchestrator.Photos do
     counts =
       Repo.all(
         from p in Photo,
-          where: not is_nil(p.project) and p.project != "" and p.curation_status not in ["rejected", "failed"],
+          where:
+            not is_nil(p.project) and p.project != "" and
+              p.curation_status not in ["rejected", "failed"],
           group_by: p.project,
           select: {p.project, count(p.id)},
           order_by: p.project
@@ -1115,6 +1462,7 @@ defmodule Orchestrator.Photos do
     tag = String.trim(tag)
     photo = get_photo!(id)
     existing = Enum.map(photo.suggested_tags || [], &String.downcase/1)
+
     if tag != "" and String.downcase(tag) not in existing do
       new_tags = (photo.suggested_tags || []) ++ [tag]
       photo |> Photo.changeset(%{suggested_tags: new_tags}) |> Repo.update()
@@ -1165,7 +1513,12 @@ defmodule Orchestrator.Photos do
       # => %{"street" => 4.2, "macro" => 2.1, ...}
   """
   def tag_affinity_profile do
-    rated = Repo.all(from p in Photo, where: not is_nil(p.user_rating), select: {p.suggested_tags, p.user_rating})
+    rated =
+      Repo.all(
+        from p in Photo,
+          where: not is_nil(p.user_rating),
+          select: {p.suggested_tags, p.user_rating}
+      )
 
     rated
     |> Enum.flat_map(fn {tags, rating} -> Enum.map(tags, &{String.downcase(&1), rating}) end)
@@ -1198,15 +1551,21 @@ defmodule Orchestrator.Photos do
       Orchestrator.Photos.vibe_score(photo, profile)
       # => 78
   """
-  def vibe_score(%Photo{suggested_tags: _tags}, profile) when map_size(profile) == 0 do
-    nil
-  end
+  def vibe_score(%Photo{suggested_tags: tags}, profile), do: vibe_score_for_tags(tags, profile)
 
-  def vibe_score(%Photo{suggested_tags: nil}, _profile), do: nil
-  def vibe_score(%Photo{suggested_tags: []}, _profile), do: nil
+  @doc """
+  Like `vibe_score/2` but takes a raw `suggested_tags` list instead of a full
+  `%Photo{}`. Lets the gallery rank the whole library from a lightweight
+  `{id, tags, preference_score}` projection without loading full photo structs
+  (and decoding every clip_embedding blob) just to sort.
+  """
+  def vibe_score_for_tags(_tags, profile) when map_size(profile) == 0, do: nil
+  def vibe_score_for_tags(nil, _profile), do: nil
+  def vibe_score_for_tags([], _profile), do: nil
 
-  def vibe_score(%Photo{suggested_tags: tags}, profile) do
-    scores = tags
+  def vibe_score_for_tags(tags, profile) do
+    scores =
+      tags
       |> Enum.map(&Map.get(profile, String.downcase(&1)))
       |> Enum.reject(&is_nil/1)
 
@@ -1214,8 +1573,8 @@ defmodule Orchestrator.Photos do
       nil
     else
       mean = Enum.sum(scores) / length(scores)
-      round((mean - 1) / 4 * 100)  # normalize 1-5 → 0-100
+      # normalize 1-5 → 0-100
+      round((mean - 1) / 4 * 100)
     end
   end
-
 end

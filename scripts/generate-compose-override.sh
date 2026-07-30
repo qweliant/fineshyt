@@ -26,6 +26,11 @@ if [ ! -f "$ENV_FILE" ]; then
 fi
 
 PHOTO_LIBRARIES_VALUE=$(grep -E '^PHOTO_LIBRARIES=' "$ENV_FILE" | head -1 | cut -d= -f2- || true)
+# We also need PHOTO_LIBRARY: the base compose.yml already path-mirrors it,
+# so we must NOT also emit a mount for it in the override (Docker errors
+# out with `mount source path ... file exists` on duplicate bind-mounts
+# to overlapping host_mnt subtrees).
+PHOTO_LIBRARY_VALUE=$(grep -E '^PHOTO_LIBRARY=' "$ENV_FILE" | head -1 | cut -d= -f2- || true)
 
 # Empty or unset → remove our generated file (but never delete a file the
 # user wrote by hand).
@@ -37,9 +42,14 @@ if [ -z "$PHOTO_LIBRARIES_VALUE" ]; then
   exit 0
 fi
 
-# Validate every path exists on the host before we write the file. A
-# typo'd drive path silently produces an empty mount and confuses the
-# user, so fail loudly here.
+# Warn about missing paths (typo'd, drive unplugged) but DON'T hard-fail.
+# Originally we exited 1 here because compose mode would mount every path
+# and a missing one produced an empty bind-mount. Since C4 the desktop
+# path doesn't use compose at all — a missing drive there means "you
+# can't ingest from it right now" (gallery handles it gracefully at
+# ingest time), not "the app can't boot". For compose mode we just skip
+# the missing paths from the override, which is the same outcome as if
+# the user hadn't listed them.
 MISSING=""
 OLD_IFS="$IFS"
 IFS=:
@@ -52,13 +62,20 @@ done
 IFS="$OLD_IFS"
 
 if [ -n "$MISSING" ]; then
-  printf "✗ PHOTO_LIBRARIES contains paths that don't exist on this machine:%b\n" "$MISSING"
-  echo "  fix .env (typo? drive not mounted?) and re-run."
-  exit 1
+  printf "⚠ PHOTO_LIBRARIES contains paths not present right now (drive unplugged?):%b\n" "$MISSING"
+  echo "  skipping them from the compose override; desktop mode ignores this list anyway."
 fi
 
-# Write the override file. Both services need the same set of mounts since
-# they share file paths via the database.
+# Write the override file. Only the orchestrator service needs these
+# mounts: in full `compose` mode it runs containerized and reads source
+# files off disk to stream them to the ai_worker. The ai_worker itself is
+# filesystem-independent (it receives source bytes as multipart uploads),
+# so it gets no photo-library mounts — emitting them would just risk the
+# `mkdir /host_mnt/...: file exists` collisions seen with exFAT drives.
+#
+# Skip any path that equals PHOTO_LIBRARY — the base compose.yml already
+# emits a path-mirrored bind-mount for it on the orchestrator, and Docker
+# rejects the resulting duplicate mount with `mkdir /host_mnt/...: file exists`.
 {
   echo "$GENERATED_HEADER"
   echo "# regenerated automatically by 'make compose-init' whenever"
@@ -69,16 +86,19 @@ fi
   IFS=:
   for path in $PHOTO_LIBRARIES_VALUE; do
     [ -z "$path" ] && continue
-    echo "      - $path:$path:ro"
-  done
-  echo "  ai_worker:"
-  echo "    volumes:"
-  for path in $PHOTO_LIBRARIES_VALUE; do
-    [ -z "$path" ] && continue
+    [ "$path" = "$PHOTO_LIBRARY_VALUE" ] && continue
+    # Skip paths that don't exist on the host — Docker would reject the
+    # bind-mount otherwise. Already warned above. Desktop mode doesn't
+    # use this file at all, so this only matters for `make compose`.
+    [ ! -d "$path" ] && continue
     echo "      - $path:$path:ro"
   done
   IFS="$OLD_IFS"
 } > "$OVERRIDE_FILE"
 
 DRIVE_COUNT=$(echo "$PHOTO_LIBRARIES_VALUE" | tr ':' '\n' | grep -c . || true)
-echo "→ wrote $OVERRIDE_FILE with $DRIVE_COUNT drive(s)"
+SKIPPED_NOTE=""
+if echo "$PHOTO_LIBRARIES_VALUE" | tr ':' '\n' | grep -qxF "$PHOTO_LIBRARY_VALUE" 2>/dev/null; then
+  SKIPPED_NOTE=" (skipped PHOTO_LIBRARY entry; base compose mounts it)"
+fi
+echo "→ wrote $OVERRIDE_FILE with $DRIVE_COUNT drive(s)$SKIPPED_NOTE"

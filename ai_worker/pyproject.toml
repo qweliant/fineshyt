@@ -1,11 +1,21 @@
 [project]
 name = "ai_worker"
 version = "0.1.0"
-description = "Add your description here"
+description = "Worker for AI tasks, including image processing and model inference."
 readme = "README.md"
-requires-python = ">=3.9"
+# >=3.10, not >=3.9: the pinned python-multipart declares Requires-Python
+# >=3.10, so uv (which resolves across the whole declared range, not just
+# the interpreter in hand) fails the lock outright on >=3.9. Nothing here
+# ever ran on 3.9 — PyApp bootstraps 3.12 and the Docker image is 3.12.
+requires-python = ">=3.10"
 dependencies = [
     "fastapi[standard]>=0.128.8",
+    # Pin python-multipart explicitly: fastapi[standard] pulls it transitively,
+    # but PyApp's install resolves the wheel's deps fresh from PyPI rather than
+    # honoring uv.lock — so without an explicit pin, PyApp can land a different
+    # version than Docker's locked one, and `request.form()` starts returning
+    # "There was an error parsing the body" on /convert. Match the lock.
+    "python-multipart==0.0.22",
     "instructor>=1.14.5",
     "openai>=2.29.0",
     "python-dotenv>=1.2.1",
@@ -19,6 +29,48 @@ dependencies = [
     "scipy>=1.12",
 ]
 
+# Console script for freezers (Nuitka entry point) and PyApp (PYAPP_EXEC_SPEC).
+# `fineshyt_ai.serve:main` calls uvicorn.run on the FastAPI app — see that
+# module for the rationale (`fastapi run` is a CLI wrapper, not freezable).
+[project.scripts]
+fineshyt-ai-worker = "fineshyt_ai.serve:main"
+
+# Project name (`ai_worker`) doesn't match the source-layout package
+# (`src/fineshyt_ai/`), so hatchling needs the path spelled out. Required so
+# `uv build` produces a wheel PyApp can consume, and so `uv sync` installs the
+# console script entry point above.
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/fineshyt_ai"]
+
+# Sdist would otherwise sweep in build_nuitka/ (6+GB of intermediate Nuitka
+# objects) and .venv/. Include only the actual source.
+[tool.hatch.build.targets.sdist]
+include = ["src/fineshyt_ai/", "pyproject.toml", "README.md", "uv.lock"]
+
+# CLIP runs on CPU/Metal here (no NVIDIA GPU), but the default torch wheel is
+# the CUDA build (+cuXXX) which drags in ~2.8GB of unused nvidia libs + triton.
+# Pin torch/torchvision to the CPU-only index: site-packages 4.6GB → ~1.2GB,
+# which both shrinks the Docker image and is the prerequisite for the C4 freeze
+# (CUDA's dynamic loading is exactly what trips up PyInstaller/Nuitka).
+#
+# FUTURE (way later): expose a GPU opt-in for users who have an NVIDIA card —
+# a `cuda` optional-dependencies extra + conflicting source so `uv sync --extra
+# cuda` pulls CUDA torch, while the default (desktop bundle, Alan, Mac) stays
+# CPU. Note the LLM already GPU-accelerates via llama-server; this extra only
+# speeds the CLIP embedding step, so it's low priority.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+torchvision = { index = "pytorch-cpu" }
+
 [tool.ruff]
 line-length = 100
 
@@ -30,5 +82,7 @@ select = ["E", "F", "I"]
 
 [dependency-groups]
 dev = [
+    "nuitka>=4.1.2",
+    "ordered-set>=4.1.0",
     "ruff>=0.15.8",
 ]

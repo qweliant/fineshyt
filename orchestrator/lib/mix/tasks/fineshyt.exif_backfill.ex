@@ -23,7 +23,9 @@ defmodule Mix.Tasks.Fineshyt.ExifBackfill do
 
   def run(args) do
     {opts, _, _} = OptionParser.parse(args, strict: [source: :string])
-    source_dir = opts[:source] || raise "Usage: mix fineshyt.exif_backfill --source /path/to/originals"
+
+    source_dir =
+      opts[:source] || raise "Usage: mix fineshyt.exif_backfill --source /path/to/originals"
 
     unless File.dir?(source_dir) do
       raise "Source directory not found: #{source_dir}"
@@ -75,7 +77,9 @@ defmodule Mix.Tasks.Fineshyt.ExifBackfill do
           end
         end)
 
-      IO.puts("Done. Updated: #{updated}, skipped (no match/no EXIF): #{skipped}, failed: #{failed}")
+      IO.puts(
+        "Done. Updated: #{updated}, skipped (no match/no EXIF): #{skipped}, failed: #{failed}"
+      )
     end
   end
 

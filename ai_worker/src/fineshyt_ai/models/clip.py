@@ -6,8 +6,7 @@ requests don't load the model twice.
 """
 
 import threading
-from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 from fineshyt_ai.config import CLIP_DEVICE, CLIP_MODEL_NAME, CLIP_PRETRAINED, logger
 from fineshyt_ai.imaging.io import open_as_pil
@@ -58,12 +57,16 @@ def get_clip():
         return model, preprocess, device
 
 
-def embed_image(path: Path) -> list[float]:
-    """Return the L2-normalized CLIP image embedding for the file at `path`."""
+def embed_image(fp: BinaryIO, ext: str) -> list[float]:
+    """Return the L2-normalized CLIP image embedding for the image in `fp`.
+
+    Takes a binary file-like object + extension rather than a path so the
+    caller can stream bytes that never touch this container's filesystem.
+    """
     model, preprocess, device = get_clip()
     torch = _state["torch"]
 
-    img = open_as_pil(path)
+    img = open_as_pil(fp, ext)
     tensor = preprocess(img).unsqueeze(0).to(device)
     with torch.no_grad():
         feats = model.encode_image(tensor)

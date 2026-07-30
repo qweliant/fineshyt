@@ -137,17 +137,35 @@ defmodule OrchestratorWeb.ReviewLive do
   @impl Phoenix.LiveView
   def handle_event("key", %{"key" => key}, socket) do
     case key do
-      "ArrowRight" -> {:noreply, advance(socket, +1)}
-      "ArrowLeft"  -> {:noreply, advance(socket, -1)}
-      " "          -> {:noreply, advance(socket, +1)}
-      k when k in ~w(x X) -> {:noreply, reject_current(socket)}
-      k when k in ~w(p P) -> {:noreply, rate_current(socket, 5)}
-      k when k in ~w(u U 0) -> {:noreply, unrate_current(socket)}
+      "ArrowRight" ->
+        {:noreply, advance(socket, +1)}
+
+      "ArrowLeft" ->
+        {:noreply, advance(socket, -1)}
+
+      " " ->
+        {:noreply, advance(socket, +1)}
+
+      k when k in ~w(x X) ->
+        {:noreply, reject_current(socket)}
+
+      k when k in ~w(p P) ->
+        {:noreply, rate_current(socket, 5)}
+
+      k when k in ~w(u U 0) ->
+        {:noreply, unrate_current(socket)}
+
       k when k in ~w(1 2 3 4 5) ->
         {:noreply, rate_current(socket, String.to_integer(k))}
-      "?"          -> {:noreply, assign(socket, :show_help, !socket.assigns.show_help)}
-      "Escape"     -> {:noreply, assign(socket, :show_help, false)}
-      _            -> {:noreply, socket}
+
+      "?" ->
+        {:noreply, assign(socket, :show_help, !socket.assigns.show_help)}
+
+      "Escape" ->
+        {:noreply, assign(socket, :show_help, false)}
+
+      _ ->
+        {:noreply, socket}
     end
   end
 
@@ -164,10 +182,12 @@ defmodule OrchestratorWeb.ReviewLive do
   def handle_event("reject", _, socket), do: {:noreply, reject_current(socket)}
   def handle_event("unrate", _, socket), do: {:noreply, unrate_current(socket)}
 
-  def handle_event("toggle_help", _, socket), do: {:noreply, assign(socket, :show_help, !socket.assigns.show_help)}
+  def handle_event("toggle_help", _, socket),
+    do: {:noreply, assign(socket, :show_help, !socket.assigns.show_help)}
 
   def handle_event("set_mode", %{"mode" => m}, socket) do
     mode = parse_mode(m)
+
     {:noreply,
      socket
      |> assign(:mode, mode)
@@ -182,7 +202,9 @@ defmodule OrchestratorWeb.ReviewLive do
 
   def handle_event("set_project", %{"name" => name}, socket) do
     case current(socket.assigns) do
-      nil -> {:noreply, socket}
+      nil ->
+        {:noreply, socket}
+
       photo ->
         case Photos.set_project(photo.id, name) do
           {:ok, updated} ->
@@ -201,7 +223,9 @@ defmodule OrchestratorWeb.ReviewLive do
 
   def handle_event("clear_project", _, socket) do
     case current(socket.assigns) do
-      nil -> {:noreply, socket}
+      nil ->
+        {:noreply, socket}
+
       photo ->
         {:ok, updated} = Photos.set_project(photo.id, "")
         {:noreply, socket |> patch_current(updated) |> flash_for("project cleared")}
@@ -210,23 +234,30 @@ defmodule OrchestratorWeb.ReviewLive do
 
   def handle_event("save_project_input", _, socket) do
     name = String.trim(socket.assigns.project_input)
-    if name == "", do: {:noreply, socket}, else: handle_event("set_project", %{"name" => name}, socket)
+
+    if name == "",
+      do: {:noreply, socket},
+      else: handle_event("set_project", %{"name" => name}, socket)
   end
 
   # ── decision helpers ──────────────────────────────────────────────────────
 
   defp parse_rating(v) when is_integer(v) and v in 1..5, do: v
+
   defp parse_rating(v) when is_binary(v) do
     case Integer.parse(v) do
       {n, ""} when n in 1..5 -> n
       _ -> nil
     end
   end
+
   defp parse_rating(_), do: nil
 
   defp rate_current(socket, value) do
     case current(socket.assigns) do
-      nil -> socket
+      nil ->
+        socket
+
       photo ->
         case Photos.rate_photo(photo.id, value) do
           {:ok, updated} ->
@@ -248,7 +279,9 @@ defmodule OrchestratorWeb.ReviewLive do
 
   defp unrate_current(socket) do
     case current(socket.assigns) do
-      nil -> socket
+      nil ->
+        socket
+
       photo ->
         case Photos.override_curation(photo.id, %{user_rating: nil}) do
           {:ok, updated} -> socket |> patch_current(updated) |> flash_for("rating cleared")
@@ -329,7 +362,10 @@ defmodule OrchestratorWeb.ReviewLive do
     >
       <%!-- Top bar --%>
       <header class="border-b border-gray-800 px-6 py-3 flex items-center gap-6">
-        <.link navigate={~p"/gallery"} class="font-sans text-[10px] uppercase tracking-widest text-gray-500 hover:text-gray-200 transition-colors">
+        <.link
+          navigate={~p"/gallery"}
+          class="font-sans text-[10px] uppercase tracking-widest text-gray-500 hover:text-gray-200 transition-colors"
+        >
           ← Gallery
         </.link>
         <span class="font-sans text-[10px] uppercase tracking-widest text-gray-600">/</span>
@@ -342,41 +378,51 @@ defmodule OrchestratorWeb.ReviewLive do
             class={[
               "font-sans text-[10px] uppercase tracking-wider px-3 py-1 border transition-colors",
               @mode == :cull && "border-[#fcfbf9] text-[#fcfbf9]",
-              @mode != :cull && "border-gray-700 text-gray-500 hover:border-gray-500 hover:text-gray-300"
+              @mode != :cull &&
+                "border-gray-700 text-gray-500 hover:border-gray-500 hover:text-gray-300"
             ]}
-          >Cull · <%= @cull_count %></button>
+          >
+            Cull · {@cull_count}
+          </button>
           <button
             phx-click="set_mode"
             phx-value-mode="rate"
             class={[
               "font-sans text-[10px] uppercase tracking-wider px-3 py-1 border transition-colors",
               @mode == :rate && "border-[#fcfbf9] text-[#fcfbf9]",
-              @mode != :rate && "border-gray-700 text-gray-500 hover:border-gray-500 hover:text-gray-300"
+              @mode != :rate &&
+                "border-gray-700 text-gray-500 hover:border-gray-500 hover:text-gray-300"
             ]}
-          >Rate · <%= @rated_count %></button>
+          >
+            Rate · {@rated_count}
+          </button>
         </div>
 
         <div class="flex-1"></div>
 
         <%= if @queue != [] do %>
           <span class="font-mono text-[11px] text-gray-500 tabular-nums">
-            <%= @index + 1 %> / <%= length(@queue) %>
+            {@index + 1} / {length(@queue)}
           </span>
         <% end %>
 
         <button
           phx-click="toggle_help"
           class="font-sans text-[10px] uppercase tracking-widest text-gray-500 hover:text-gray-200 transition-colors border border-gray-700 hover:border-gray-400 px-2 py-1"
-        >?</button>
+        >
+          ?
+        </button>
       </header>
 
       <%= if @queue == [] do %>
         <div class="flex flex-col items-center justify-center" style="height: calc(100vh - 60px);">
           <p class="font-serif italic text-gray-500 text-2xl mb-2">
-            <%= if @mode == :cull, do: "Cull queue is empty.", else: "Nothing to rate yet." %>
+            {if @mode == :cull, do: "Cull queue is empty.", else: "Nothing to rate yet."}
           </p>
           <p class="font-sans text-[11px] uppercase tracking-widest text-gray-700">
-            <%= if @mode == :cull, do: "Beautiful. Switch to Rate mode or head back to the gallery.", else: "Cull some photos first." %>
+            {if @mode == :cull,
+              do: "Beautiful. Switch to Rate mode or head back to the gallery.",
+              else: "Cull some photos first."}
           </p>
         </div>
       <% else %>
@@ -399,11 +445,11 @@ defmodule OrchestratorWeb.ReviewLive do
             <%!-- Floating filename + flash --%>
             <div class="absolute top-4 left-4 right-4 flex items-start justify-between gap-4 pointer-events-none">
               <p class="font-mono text-[10px] text-gray-600 truncate max-w-[60%]">
-                <%= Path.basename(photo.file_path || "") %>
+                {Path.basename(photo.file_path || "")}
               </p>
               <%= if @flash_msg do %>
                 <p class="font-sans text-[11px] uppercase tracking-widest text-[#fcfbf9] bg-[#111111]/90 border border-gray-700 px-2 py-1">
-                  <%= @flash_msg %>
+                  {@flash_msg}
                 </p>
               <% end %>
             </div>
@@ -437,64 +483,84 @@ defmodule OrchestratorWeb.ReviewLive do
                     class={[
                       "text-2xl leading-none transition-colors",
                       photo.user_rating && photo.user_rating >= star && "text-[#fcfbf9]",
-                      !(photo.user_rating && photo.user_rating >= star) && "text-gray-700 hover:text-gray-400"
+                      !(photo.user_rating && photo.user_rating >= star) &&
+                        "text-gray-700 hover:text-gray-400"
                     ]}
-                  >★</button>
+                  >
+                    ★
+                  </button>
                 <% end %>
                 <%= if photo.user_rating do %>
                   <button
                     phx-click="unrate"
                     title="clear rating"
                     class="ml-2 font-sans text-[9px] uppercase tracking-widest text-gray-600 hover:text-gray-300 transition-colors"
-                  >clear</button>
+                  >
+                    clear
+                  </button>
                 <% end %>
               </div>
 
               <button
                 phx-click="reject"
                 class="font-sans text-[10px] uppercase tracking-widest text-red-400 border border-red-900 hover:border-red-500 hover:text-red-300 px-3 py-1.5 transition-colors"
-              >× reject</button>
+              >
+                × reject
+              </button>
             </div>
           </div>
 
           <%!-- Side panel --%>
           <aside class="border-l border-gray-800 bg-[#0c0c0c] overflow-y-auto">
             <div class="p-6 space-y-6">
-
               <%!-- Subject + critique --%>
               <div>
-                <p class="font-sans text-[9px] uppercase tracking-widest text-gray-600 mb-1">Subject</p>
-                <p class="font-serif text-base text-[#fcfbf9] leading-snug"><%= photo.subject || "—" %></p>
+                <p class="font-sans text-[9px] uppercase tracking-widest text-gray-600 mb-1">
+                  Subject
+                </p>
+                <p class="font-serif text-base text-[#fcfbf9] leading-snug">{photo.subject || "—"}</p>
               </div>
 
               <%= if photo.artistic_mood do %>
                 <div>
-                  <p class="font-sans text-[9px] uppercase tracking-widest text-gray-600 mb-1">Mood</p>
-                  <p class="font-serif italic text-sm text-gray-300"><%= photo.artistic_mood %></p>
+                  <p class="font-sans text-[9px] uppercase tracking-widest text-gray-600 mb-1">
+                    Mood
+                  </p>
+                  <p class="font-serif italic text-sm text-gray-300">{photo.artistic_mood}</p>
                 </div>
               <% end %>
 
               <%= if photo.lighting_critique do %>
                 <div>
-                  <p class="font-sans text-[9px] uppercase tracking-widest text-gray-600 mb-1">Light</p>
-                  <p class="font-serif italic text-sm text-gray-400 leading-snug"><%= photo.lighting_critique %></p>
+                  <p class="font-sans text-[9px] uppercase tracking-widest text-gray-600 mb-1">
+                    Light
+                  </p>
+                  <p class="font-serif italic text-sm text-gray-400 leading-snug">
+                    {photo.lighting_critique}
+                  </p>
                 </div>
               <% end %>
 
               <%= if photo.preference_score do %>
                 <div>
-                  <p class="font-sans text-[9px] uppercase tracking-widest text-gray-600 mb-1">Preference</p>
-                  <p class="font-mono text-sm text-gray-300"><%= photo.preference_score %><span class="text-gray-700"> / 100</span></p>
+                  <p class="font-sans text-[9px] uppercase tracking-widest text-gray-600 mb-1">
+                    Preference
+                  </p>
+                  <p class="font-mono text-sm text-gray-300">
+                    {photo.preference_score}<span class="text-gray-700"> / 100</span>
+                  </p>
                 </div>
               <% end %>
 
               <%= if photo.suggested_tags && photo.suggested_tags != [] do %>
                 <div>
-                  <p class="font-sans text-[9px] uppercase tracking-widest text-gray-600 mb-2">Tags</p>
+                  <p class="font-sans text-[9px] uppercase tracking-widest text-gray-600 mb-2">
+                    Tags
+                  </p>
                   <div class="flex flex-wrap gap-1">
                     <%= for tag <- photo.suggested_tags do %>
                       <span class="font-sans text-[10px] uppercase tracking-wider text-gray-400 border border-gray-700 px-2 py-0.5">
-                        <%= String.downcase(tag) %>
+                        {String.downcase(tag)}
                       </span>
                     <% end %>
                   </div>
@@ -503,14 +569,20 @@ defmodule OrchestratorWeb.ReviewLive do
 
               <%!-- Project --%>
               <div>
-                <p class="font-sans text-[9px] uppercase tracking-widest text-gray-600 mb-2">Project</p>
+                <p class="font-sans text-[9px] uppercase tracking-widest text-gray-600 mb-2">
+                  Project
+                </p>
                 <%= if photo.project && photo.project != "" do %>
                   <div class="flex items-center gap-2 mb-2">
-                    <span class="font-mono text-[11px] text-[#fcfbf9] border border-gray-600 px-2 py-1"><%= photo.project %></span>
+                    <span class="font-mono text-[11px] text-[#fcfbf9] border border-gray-600 px-2 py-1">
+                      {photo.project}
+                    </span>
                     <button
                       phx-click="clear_project"
                       class="font-sans text-[9px] uppercase tracking-widest text-gray-600 hover:text-red-400 transition-colors"
-                    >clear</button>
+                    >
+                      clear
+                    </button>
                   </div>
                 <% end %>
 
@@ -523,9 +595,12 @@ defmodule OrchestratorWeb.ReviewLive do
                         class={[
                           "font-mono text-[10px] px-2 py-0.5 border transition-colors",
                           photo.project == proj && "border-[#fcfbf9] text-[#fcfbf9]",
-                          photo.project != proj && "border-gray-700 text-gray-500 hover:border-gray-500 hover:text-gray-300"
+                          photo.project != proj &&
+                            "border-gray-700 text-gray-500 hover:border-gray-500 hover:text-gray-300"
                         ]}
-                      ><%= proj %></button>
+                      >
+                        {proj}
+                      </button>
                     <% end %>
                   </div>
                 <% end %>
@@ -540,10 +615,14 @@ defmodule OrchestratorWeb.ReviewLive do
                     placeholder="new project…"
                     class="flex-1 bg-transparent border border-gray-700 focus:border-gray-400 px-2 py-1 font-mono text-[11px] text-gray-300 placeholder-gray-700 focus:outline-none"
                   />
-                  <button type="submit" class="font-sans text-[9px] uppercase tracking-widest text-gray-500 border border-gray-700 hover:border-gray-400 hover:text-gray-200 px-2 py-1 transition-colors">set</button>
+                  <button
+                    type="submit"
+                    class="font-sans text-[9px] uppercase tracking-widest text-gray-500 border border-gray-700 hover:border-gray-400 hover:text-gray-200 px-2 py-1 transition-colors"
+                  >
+                    set
+                  </button>
                 </form>
               </div>
-
             </div>
           </aside>
         </div>
@@ -559,14 +638,38 @@ defmodule OrchestratorWeb.ReviewLive do
             <p class="font-sans text-[10px] uppercase tracking-widest text-gray-500 mb-4">Keyboard</p>
             <table class="w-full">
               <tbody class="space-y-1">
-                <tr><td class="text-gray-500 pr-6">← →</td><td>previous / next</td></tr>
-                <tr><td class="text-gray-500 pr-6">space</td><td>next</td></tr>
-                <tr><td class="text-gray-500 pr-6">1–5</td><td>rate</td></tr>
-                <tr><td class="text-gray-500 pr-6">p</td><td>pick (= ★★★★★)</td></tr>
-                <tr><td class="text-gray-500 pr-6">u, 0</td><td>clear rating</td></tr>
-                <tr><td class="text-gray-500 pr-6">x</td><td>reject (soft, reversible)</td></tr>
-                <tr><td class="text-gray-500 pr-6">?</td><td>show / hide this</td></tr>
-                <tr><td class="text-gray-500 pr-6">esc</td><td>close help</td></tr>
+                <tr>
+                  <td class="text-gray-500 pr-6">← →</td>
+                  <td>previous / next</td>
+                </tr>
+                <tr>
+                  <td class="text-gray-500 pr-6">space</td>
+                  <td>next</td>
+                </tr>
+                <tr>
+                  <td class="text-gray-500 pr-6">1–5</td>
+                  <td>rate</td>
+                </tr>
+                <tr>
+                  <td class="text-gray-500 pr-6">p</td>
+                  <td>pick (= ★★★★★)</td>
+                </tr>
+                <tr>
+                  <td class="text-gray-500 pr-6">u, 0</td>
+                  <td>clear rating</td>
+                </tr>
+                <tr>
+                  <td class="text-gray-500 pr-6">x</td>
+                  <td>reject (soft, reversible)</td>
+                </tr>
+                <tr>
+                  <td class="text-gray-500 pr-6">?</td>
+                  <td>show / hide this</td>
+                </tr>
+                <tr>
+                  <td class="text-gray-500 pr-6">esc</td>
+                  <td>close help</td>
+                </tr>
               </tbody>
             </table>
             <p class="mt-6 text-[10px] text-gray-600 italic">click anywhere to close</p>

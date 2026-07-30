@@ -115,7 +115,15 @@ defmodule Orchestrator.ErrorLog do
 
   defp do_record(params) do
     %ErrorLog{}
-    |> Ecto.Changeset.cast(params, [:worker, :file, :reason, :status, :attempt, :max_attempts, :detail])
+    |> Ecto.Changeset.cast(params, [
+      :worker,
+      :file,
+      :reason,
+      :status,
+      :attempt,
+      :max_attempts,
+      :detail
+    ])
     |> Ecto.Changeset.validate_required([:worker, :reason])
     |> Repo.insert()
     |> handle_insert()

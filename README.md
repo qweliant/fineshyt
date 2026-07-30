@@ -4,7 +4,7 @@ I take photos. Mostly macro, mostly botanical, mostly black and white, mostly th
 
 This project is my answer to that question. I described my own aesthetic to an AI and let it go through my archive and tell me what fits. Fine shyt, if you will.
 
-It's also an excuse to get back into ML. The last time I did anything in this space was [deploying a transformer model in 2021](https://qwelian.com/posts/Deploying_Transformer_Models). Which like in AI years, is basically the Jurassic period. A lot has changed. Vision models that can actually reason about composition and aesthetic? That's new and worth playing with.
+It is also an excuse to get back into ML. The last time I did anything in this space was [deploying a transformer model in 2021](https://qwelian.com/posts/Deploying_Transformer_Models). Which like in AI years, is basically the Jurassic period. A lot has changed. Vision models that can actually reason about composition and aesthetic? That's new and worth playing with.
 
 ![Architecture](architecture.svg)
 
@@ -15,6 +15,18 @@ The first version of this project asked a vision LLM (LLaVA, via Ollama) to deci
 That worked. Sort of. But text prompts are a lossy way to describe a visual style, and LLaVA's read of "moody black-and-white macro" drifted from my read of it. My star ratings didn't feed back into the system; the model's verdict and my verdict lived on parallel tracks.
 
 So the architecture flipped. The vision LLM now does objective metadata only. Every photo gets a CLIP embedding, and a Ridge regression linear probe is trained on your star ratings. So the more you rate, the more `preference_score` drifts toward what you actually like. The MATCH badge is now driven by that personalized score, not by anyone's prose description. See [Photos.match_threshold/0](orchestrator/lib/orchestrator/photos.ex).
+
+## How it runs now (native packaging)
+
+This started as two Docker services (Phoenix + Python) talking to a Postgres+pgvector container, with Ollama on the host for the vision model. It's being progressively repackaged into a double-click desktop app so a non-developer can run it without a terminal. Where it stands:
+
+- **Desktop shell (Tauri).** The LiveView UI runs in a native window; the shell spawns and tears down everything else. (`desktop/`)
+- **Orchestrator runs native.** Phoenix ships as an Elixir release the shell spawns directly — no container.
+- **Vision LLM runs native (C5).** The shell spawns `llama-server` (llama.cpp) with a Qwen2.5-Omni vision GGUF on `:11434` — replaces Ollama, no separate install or ~5GB pull-by-hand.
+- **Database is SQLite (C3).** Postgres + pgvector is gone. Embeddings live in a float32 blob column; there's no in-DB vector search — every distance computation happens in the Python worker, so a plain blob suffices. One file, no DB server.
+- **ai_worker runs native (C4).** A ~3 MB PyApp launcher bootstraps a per-user Python venv on first run and re-execs it after that. The ~2GB torch/CLIP toolchain still exists, it just lives in `~/Library/Application Support/pyapp/` instead of a container image.
+
+That's the whole stack native, so **Docker is no longer a prerequisite for anything** — not `make dev`, not the desktop shell, not the release. The `make compose` path (everything in containers, any OpenAI-compatible LLM) still exists for self-hosters running this somewhere that isn't a laptop, and it's the only thing left in the repo that wants a Docker daemon. See [desktop/README.md](desktop/README.md) for the shell internals and the full phase roadmap.
 
 ## What it does
 
@@ -34,7 +46,7 @@ Single image curation still works too, at `/`. Drop a photo, get a museum placar
 
 ## Architecture
 
-**The Orchestrator** (`/orchestrator`) — Elixir, Phoenix LiveView, Oban, PostgreSQL + pgvector. This is the main service. It owns the UI, the job queue, the database, and the pub/sub fanout that makes the real-time updates work. Oban handles retries with backoff so a slow inference call doesn't just silently disappear. Background workers handle the pipeline: conversion, AI curation, CLIP embedding, preference model training, and burst detection are each on its own queue with appropriate concurrency limits.
+**The Orchestrator** (`/orchestrator`) — Elixir, Phoenix LiveView, Oban, SQLite (embeddings stored as a float32 blob; was Postgres + pgvector before C3). This is the main service. It owns the UI, the job queue, the database, and the pub/sub fanout that makes the real-time updates work. Oban handles retries with backoff so a slow inference call doesn't just silently disappear. Background workers handle the pipeline: conversion, AI curation, CLIP embedding, preference model training, and burst detection are each on its own queue with appropriate concurrency limits.
 
 **The AI Worker** (`/ai_worker`) — Python, FastAPI, Instructor, open_clip, scikit-learn. This is the AI microservice. Though it does takeup like 3GB of RAM. It gets an image over HTTP, encodes it to base64, asks the vision model what it sees, and enforces the response into a strict Pydantic schema via `instructor`. It also handles conversion (RAW/TIFF to JPEG with quality scoring), CLIP embedding (ViT-L-14, 768-dim), preference model training/scoring (Ridge regression linear probe), and burst detection (cosine similarity + temporal clustering).
 
@@ -44,7 +56,7 @@ When you import a photo, here's what happens:
 
 1. **ConversionWorker** — opens the source file (RAW, TIFF, whatever), computes sharpness/exposure scores on the full-res image, extracts EXIF timestamps, resizes to 1440px JPEG.
 2. **AiCurationWorker** — sends the JPEG to the vision LLM for subject, content type, mood, lighting critique, and tag suggestions. No style/taste judgment.
-3. **EmbeddingWorker** — computes a 768-dim CLIP image embedding, stores it in pgvector.
+3. **EmbeddingWorker** — computes a 768-dim CLIP image embedding, stores it as a float32 blob (decoded back to a list in Elixir; the distance math runs in the Python worker, not the DB).
 4. **PreferenceTrainWorker / PreferenceScoreWorker** — after the embedding lands, the pipeline forks. If the photo already has a star rating, it becomes a new training sample and `PreferenceTrainWorker` (debounced to one run per 5 min) refits the Ridge model and backfills `preference_score` across the archive. If the photo is unrated, a much cheaper `PreferenceScoreWorker` just scores it against the existing model — no retrain. This keeps batch imports of hundreds of unrated photos from triggering hundreds of pointless retrains.
 
 Each step is a separate Oban job. Failures retry independently without blocking the rest of the pipeline.
@@ -70,9 +82,9 @@ This is how I think about the architecture — a RADIO breakdown (**R**equiremen
 
 ### A — Architecture
 
-Two services plus infrastructure, decoupled by a Postgres-backed job queue.
+Two services plus infrastructure, decoupled by a SQLite-backed job queue (Oban's Lite engine).
 
-**1. Orchestrator ([orchestrator/](orchestrator/))** — Elixir / Phoenix LiveView / Oban / Postgres + pgvector. Owns the UI, DB, job queue, and pub/sub fanout. Workers live in [orchestrator/lib/orchestrator/workers/](orchestrator/lib/orchestrator/workers/):
+**1. Orchestrator ([orchestrator/](orchestrator/))** — Elixir / Phoenix LiveView / Oban / SQLite. Owns the UI, DB, job queue, and pub/sub fanout. Runs as a native Elixir release under the desktop shell (or as a container in the compose path). Workers live in [orchestrator/lib/orchestrator/workers/](orchestrator/lib/orchestrator/workers/):
 
 - `ConversionWorker` → RAW/TIFF → 1440px JPEG + sharpness / exposure
 - `AiCurationWorker` → vision-LLM metadata
@@ -82,11 +94,11 @@ Two services plus infrastructure, decoupled by a Postgres-backed job queue.
 - `BurstDetectionWorker` → near-duplicate grouping
 - `LocalBatchImportWorker` → directory walk
 
-**2. AI Worker ([ai_worker/src/fineshyt_ai/](ai_worker/src/fineshyt_ai/))** — Python / FastAPI / Instructor / open_clip / scikit-learn. Stateless inference service split along a transport/domain seam: every ML op is a plain function in `domain/`, and `transports/http/` is the thin FastAPI layer that marshals them. LLM-agnostic (LLaVA / Claude / Llama via `LLM_BASE_URL`). Holds CLIP (ViT-L-14, 768-dim) in process memory and a pickled Ridge preference model at `~/.fineshyt/preference_model.pkl`.
+**2. AI Worker ([ai_worker/src/fineshyt_ai/](ai_worker/src/fineshyt_ai/))** — Python / FastAPI / Instructor / open_clip / scikit-learn. Stateless inference service split along a transport/domain seam: every ML op is a plain function in `domain/`, and `transports/http/` is the thin FastAPI layer that marshals them. Filesystem-independent — `/convert`, `/curate`, and `/embed` all take uploaded bytes, so the worker needs no access to the photo library (which matters when photos live on a drive Docker can't mount). LLM-agnostic via `LLM_BASE_URL` — the desktop shell points it at a local `llama-server` (Qwen2.5-Omni); the compose path can use Claude / HuggingFace / any OpenAI-compatible endpoint. Holds CLIP (ViT-L-14, 768-dim) in process memory and a pickled Ridge preference model at `~/.fineshyt/preference_model.pkl`.
 
-**3. Infrastructure:** Postgres 16 + pgvector (Docker), on-disk JPEGs under `priv/static/uploads/`.
+**3. Infrastructure:** SQLite database file (WAL mode), on-disk JPEGs under `priv/static/uploads/`. No containers — since C4 the ai_worker ships as a PyApp launcher, so the native paths (dev, release, bundled app) touch Docker nowhere.
 
-**Flow:** import → Oban fans out a per-photo job chain → orchestrator calls the AI worker over HTTP → writes results back → LiveView pushes the update.
+**Flow:** import → Oban fans out a per-photo job chain → orchestrator reads the source bytes and calls the AI worker over HTTP → writes results back → LiveView pushes the update.
 
 ### D — Data Model
 
@@ -96,7 +108,7 @@ The `photos` table in [orchestrator/lib/orchestrator/photos/photo.ex:57-81](orch
 |---------------|---------------------------------------------------------------------------------------------|--------------------------------------------------|
 | Identity      | `file_path`, `url`, `source`                                                                | Orchestrator on ingest                           |
 | Tech quality  | `technical_score`, `sharpness_score`, `exposure_score`                                      | AI Worker `/convert` + `/quality_scores`         |
-| Semantic      | `clip_embedding` (pgvector, 768-dim)                                                        | AI Worker `/embed`                               |
+| Semantic      | `clip_embedding` (float32 blob, 768-dim)                                                    | AI Worker `/embed`                               |
 | Taste         | `preference_score` (0-100), `preference_model_version`, `user_rating` (1-5), `manual_match` | Ridge via `/preference/score`; user via LiveView |
 | LLM metadata  | `subject`, `content_type`, `artistic_mood`, `lighting_critique`, `suggested_tags[]`         | AI Worker `/curate`                              |
 | Organization  | `project`, `burst_group`, `captured_at`                                                     | User + `BurstDetectionWorker`                    |
@@ -114,9 +126,9 @@ Elixir ↔ Python, HTTP + JSON, all POST:
 
 | Endpoint                    | Input                                           | Output                                                 | Caller                                             |
 |-----------------------------|-------------------------------------------------|--------------------------------------------------------|----------------------------------------------------|
-| `/api/v1/convert`           | `{file_path}`                                   | `{jpeg_path, sharpness, exposure, captured_at}`        | `ConversionWorker`                                 |
+| `/api/v1/convert`           | multipart `file`                                | `{jpeg_path, sharpness, exposure, captured_at}`        | `ConversionWorker`                                 |
 | `/api/v1/curate`            | multipart `file`                                | `PhotoMetadata`                                        | `AiCurationWorker`                                 |
-| `/api/v1/embed`             | `{file_path}`                                   | `{embedding[768], model, dim}`                         | `EmbeddingWorker`                                  |
+| `/api/v1/embed`             | multipart `file`                                | `{embedding[768], model, dim}`                         | `EmbeddingWorker`                                  |
 | `/api/v1/preference/train`  | `{samples[{embedding, rating}], min_samples}`   | `{model_version, n_samples, train_r2}`                 | `PreferenceTrainWorker`                            |
 | `/api/v1/preference/score`  | `{embeddings[][]}`                              | `{scores[0-100], model_version}`                       | `PreferenceTrainWorker`, `PreferenceScoreWorker`   |
 | `/api/v1/exif`              | `{file_path}`                                   | `{captured_at}`                                        | backfill task                                      |
@@ -152,7 +164,7 @@ The Python restructure in [ai_worker/src/fineshyt_ai/](ai_worker/src/fineshyt_ai
 
 **Other angles worth time once the broker is in:**
 
-- **Native macOS app** — SwiftUI shell over the same orchestrator HTTP API. Real file-system access (no uploads dance) and proper RAW thumbnails via `ImageIO`.
+- **Native desktop app** — *now in progress* as a cross-platform Tauri shell (`desktop/`) wrapping the same LiveView, rather than a macOS-only SwiftUI rewrite. It already spawns the orchestrator release + llama-server natively; remaining work (C4) freezes the Python worker so there are zero host prerequisites. See [desktop/README.md](desktop/README.md).
 - **ONNX → Core ML for CLIP on-device.** Export ViT-L-14 to Core ML and run embeddings on the Apple Neural Engine. Kills the 3GB Python RAM footprint for the embedding path and makes a native offline app viable.
 - **Active learning for ratings.** Surface the photos Ridge is least confident about (closest to the decision boundary) instead of picking randomly. Gets from 20 → 200 rated labels much faster, with better-shaped training data.
 - **Replace Ridge with a small MLP head** once there are 200+ ratings. A linear probe flattens out; a 2-layer net on frozen CLIP features can capture non-linear taste curves.
@@ -160,11 +172,18 @@ The Python restructure in [ai_worker/src/fineshyt_ai/](ai_worker/src/fineshyt_ai
 
 ## LLM options
 
-The worker is configured via environment variables so you can point it at whatever you have:
+The worker is configured via environment variables so you can point it at whatever you have. The default is a local `llama-server` (no separate install); anything OpenAI-compatible works:
 
 ```bash
-# Local (default) — needs Ollama running with llava pulled
-LLM_BASE_URL=http://localhost:11434/v1/
+# Default — llama-server (llama.cpp), spawned by the Tauri shell or by
+# `make c5-llama`, serving a Qwen2.5-Omni vision GGUF on the Ollama port.
+LLM_BASE_URL=http://127.0.0.1:11434/v1/
+LLM_API_KEY=local
+LLM_MODEL=qwen2.5-omni
+
+# Ollama — needs Ollama running with a vision model pulled. Same port, so
+# this is a drop-in for the above.
+LLM_BASE_URL=http://127.0.0.1:11434/v1/
 LLM_API_KEY=ollama
 LLM_MODEL=llava
 
@@ -179,7 +198,7 @@ LLM_API_KEY=hf_...
 LLM_MODEL=meta-llama/Llama-3.2-11B-Vision-Instruct
 ```
 
-Local inference is free and private but will make your fans spin. 
+Local inference is free and private but will make your fans spin. Note: `localhost` is correct everywhere except the legacy compose path — a *containerised* ai_worker reaches the host's llama-server at `http://host.docker.internal:11434/v1/`, which is why compose reads `LLM_BASE_URL_DOCKER` rather than sharing `LLM_BASE_URL` with the native worker.
 
 ## Ingesting photos
 
@@ -204,6 +223,32 @@ Set `STATIC_UPLOADS_DIR` in `ai_worker/.env` to point at the orchestrator's stat
 ```bash
 STATIC_UPLOADS_DIR=/path/to/fineshyt/orchestrator/priv/static/uploads
 ```
+
+### XMP sidecar metadata (experimental)
+
+Fineshyt can read and write [XMP sidecars](https://qweliant.github.io/fineshyt/using-fineshyt.html) — the universal interchange format every serious photo editor (Lightroom, darktable, Capture One, Bridge) uses. This makes Fineshyt round-trip with whatever editing tool the user already has, without requiring any vendor SDK.
+
+On ingest, if a `.xmp` sidecar exists next to a source RAW, Fineshyt will:
+
+- import `xmp:Rating` → `user_rating` (so years of Lightroom history seed the preference model)
+- merge `dc:subject` keywords into `suggested_tags`
+
+Behavior controlled by `FINESHYT_SIDECAR_MODE`:
+
+| Value | Effect |
+| --- | --- |
+| `off` | No sidecar reads or writes |
+| `read` (default) | Read existing sidecars on ingest; never write back. Safe by default — does not modify any user files. |
+| `read-write` | Read on ingest **and** write Fineshyt's metadata back to the sidecar after curation. Writes are skipped if the sidecar's mtime is newer than the last sync (the user's editor has touched it since), so concurrent editing doesn't clobber. |
+
+Requires `exiftool` on PATH. The orchestrator Docker image bundles it; for native dev install:
+
+```bash
+brew install exiftool                  # macOS
+sudo apt install libimage-exiftool-perl # Debian / Ubuntu
+```
+
+Custom `fineshyt:` XMP namespace is used for fields no standard covers (`fineshyt:PreferenceScore`, `fineshyt:ArtisticMood`, etc.). Standard fields (`xmp:Rating`, `dc:subject`) are reused so other editors pick them up automatically.
 
 ## Backfill tasks
 
@@ -282,7 +327,7 @@ Photographers without a developer background should follow the [photographer's W
 
 ### Option 2: Native dev install (for hacking on the code)
 
-Prerequisites: [Mise](https://mise.jdx.dev/), [uv](https://github.com/astral-sh/uv), [Docker](https://www.docker.com/) (just for Postgres+pgvector).
+Prerequisites: [Mise](https://mise.jdx.dev/) and [uv](https://github.com/astral-sh/uv). No Docker. For the full native desktop shell, also Rust + Cargo; see [desktop/README.md](desktop/README.md).
 
 First time:
 
@@ -299,30 +344,45 @@ make dev
 - Gallery + single upload: [localhost:4000](http://localhost:4000)
 - AI worker API docs: [localhost:8000/docs](http://localhost:8000/docs)
 
+Both processes run in the foreground with interleaved logs; Ctrl-C stops the pair. Dev reads `orchestrator/priv/fineshyt.db` — the same library the desktop shell and the release use, so you don't curate into one database and browse another. Point somewhere else with `DATABASE_PATH=/tmp/scratch.db make dev`.
+
+The vision LLM is **optional in dev.** Only new imports call `/curate`; rating, sorting, burst review and export never touch it. When you are ingesting, start one first:
+
+```bash
+make c5-llama          # llama-server + Qwen2.5-Omni on :11434 (~5-7GB on first run)
+```
+
 ### Makefile reference
 
 Every target in [Makefile](Makefile). Run from the repo root.
 
-**Native dev** (Mise/uv/Docker on host, Phoenix and ai_worker run as bare processes):
+**Native dev** (Mise + uv on host, Phoenix and ai_worker run as bare processes, no Docker):
 
 | Target | What it does |
 | --- | --- |
-| `make setup` | One-time setup — boots the db, runs `mix deps.get`, `mix ecto.setup`, `uv sync` |
-| `make dev` | Boots db, then runs `mix phx.server` and the FastAPI worker in parallel (foreground, two log streams) |
-| `make start-phoenix` | Phoenix only (`mix phx.server` in `orchestrator/`) — invoked by `make dev` |
-| `make start-ai` | ai_worker only (`uv run fastapi dev src/main.py --reload` in `ai_worker/`) — invoked by `make dev` |
-| `make db-up` | Start just the Postgres+pgvector container in the background |
-| `make db-down` | `docker compose down` — stops services, preserves the `pgdata` volume |
-| `make reset` | `mix ecto.reset` — drops and recreates the db schema (loses all data) |
+| `make setup` | One-time setup — `mix deps.get`, `mix ecto.setup` (creates the SQLite file + migrates), `uv sync` |
+| `make dev` | Runs `mix phx.server` and the FastAPI worker in parallel (foreground, two log streams), both wired to `priv/fineshyt.db` and the shared uploads dir |
+| `make start-phoenix` | Phoenix only — invoked by `make dev` |
+| `make start-ai` | ai_worker only (`uv run fastapi dev`, with reload) — invoked by `make dev` |
+| `make reset` | `mix ecto.reset` — drops and recreates the schema. **Refuses without `CONFIRM=1`** and prints how many photos and ratings you're about to lose first |
 
-**Docker compose distribution** (everything runs in containers; for self-hosters who don't want a dev toolchain on the host):
+Every target above honours `DATABASE_PATH`, so `DATABASE_PATH=/tmp/scratch.db make dev` (or `make reset`) keeps the real library out of it.
+
+**Release path** (the exact thing the desktop shell spawns — prod config, no code reloader, digested assets):
+
+| Target | What it does |
+| --- | --- |
+| `make release` | Builds the Elixir release at `orchestrator/_build/prod/rel/orchestrator/` |
+| `make c2-run` | Runs that release + the native ai_worker launcher side by side. Use when a bug reproduces in the `.app` but not under `make dev` |
+
+**Docker compose distribution** (legacy; everything in containers, for self-hosters who don't want a dev toolchain on the host — the only path that still needs Docker):
 
 | Target | What it does |
 | --- | --- |
 | `make compose` | The one-command flow. Calls `compose-init` then `docker compose up --build`. Use this for first-time setup and routine starts. |
 | `make compose-init` | Idempotent bootstrap. Creates `.env` from `.env.example` if missing. Generates `SECRET_KEY_BASE` via `mix phx.gen.secret` (falls back to `openssl rand`). If `PHOTO_LIBRARIES` is set but `PHOTO_LIBRARY` isn't, fills `PHOTO_LIBRARY` from the first multi-drive entry. Runs `scripts/generate-compose-override.sh` to materialize the multi-drive bind-mounts. Bails if no photo paths are configured. |
 | `make compose-up` | `docker compose up -d` — detached, skips rebuild. Use after the first `make compose` when you don't need rebuilds. |
-| `make compose-down` | `docker compose down` — stops services, preserves `pgdata`, `uploads`, `models`, `preference` volumes. |
+| `make compose-down` | `docker compose down` — stops services, preserves the `sqlitedb`, `uploads`, `models`, `preference` volumes. |
 | `make compose-build` | `docker compose build` — rebuild images without starting them. |
 | `make compose-logs` | `docker compose logs -f` — tail all service logs. |
 
@@ -332,11 +392,21 @@ Every target in [Makefile](Makefile). Run from the repo root.
 | --- | --- |
 | `make export TARGET=/path/to/dir` | Run `mix fineshyt.export --target $(TARGET)` to write approved photos + `photos.json` manifest into the given directory. |
 
-> ⚠ **Never run** `docker compose down -v`, `docker volume prune`, or `docker system prune --volumes` — any of those wipe the `pgdata` volume and lose all ratings, embeddings, and AI metadata. To free disk safely, use `docker builder prune -a -f` and `docker image prune -a -f` (those only touch unused build cache and orphan images).
+**Desktop shell** (experimental, lives on the `experimental-tauri-native` branch):
+
+| Target | What it does |
+| --- | --- |
+| `make desktop-dev` | Compile and launch the Tauri 2.x shell in dev mode. The shell spawns three native children — the Phoenix release, the PyApp ai_worker launcher, and `llama-server` with a vision GGUF — polls for Phoenix on :4000, then navigates to `localhost:4000`. On quit it SIGKILLs each child. Requires Rust + Cargo. See [desktop/README.md](desktop/README.md). |
+| `make desktop-build` | Install `tauri-cli` if missing, then `cargo tauri build` for a release binary. Bundle is currently disabled (`bundle.active: false`); flip on once we want shippable artifacts. |
+| `make c5-llama` | Spawn `llama-server` with the Qwen2.5-Omni-7B vision model on :11434 (matches Ollama's port; existing `LLM_BASE_URL` keeps working). First launch downloads ~5–7 GB into `desktop/runtime/models/`. Useful for ai_worker testing without firing up the full desktop shell. |
+| `make c5-llama-stop` | Stop the llama-server spawned by `make c5-llama`. |
+| `make c5-llama-logs` | Tail llama-server's log file (`/tmp/fineshyt-llama-server.log`). |
+
+> ⚠ **The database is the irreplaceable part.** Natively it's a plain file at `orchestrator/priv/fineshyt.db` holding every rating, embedding, preference score and project assignment — back it up with `./scripts/backup.sh`. `make reset` now refuses without `CONFIRM=1`, but nothing protects you from `rm`. In the compose path the same data sits in the `sqlitedb` volume, so **never run** `docker compose down -v`, `docker volume prune`, or `docker system prune --volumes`. To free disk safely: `docker builder prune -a -f` and `docker image prune -a -f` (unused build cache and orphan images only).
 
 ## Running on Windows
 
-The whole stack — BEAM, Python, Postgres, pgvector, Ollama — works on Windows. Two paths, pick one. WSL2 is the smoother one because the Makefile and the rest of this repo assume bash; native Windows works but you skip the Makefile and run the underlying commands by hand.
+The whole stack — BEAM, Python, SQLite, a vision LLM — works on Windows. Two paths, pick one. WSL2 is the smoother one because the Makefile and the rest of this repo assume bash; native Windows works but you skip the Makefile and run the underlying commands by hand.
 
 ### Path A: WSL2 (recommended)
 
@@ -399,10 +469,7 @@ Doable, but you'll be running commands by hand instead of `make`, and the Browse
 **Setup (PowerShell, from the repo root):**
 
 ```powershell
-# 1. Postgres + pgvector
-docker compose up -d
-
-# 2. Elixir side
+# 1. Elixir side (SQLite — no DB container needed; ecto.setup creates the file)
 cd orchestrator
 mix local.hex --force
 mix local.rebar --force

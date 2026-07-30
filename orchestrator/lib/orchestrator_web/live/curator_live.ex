@@ -11,34 +11,40 @@ defmodule OrchestratorWeb.CuratorLive do
     if connected?(socket), do: Phoenix.PubSub.subscribe(Orchestrator.PubSub, "photo_updates")
 
     # Recover state if we reconnect mid-ingest — count both queues
-    pending = Repo.aggregate(
-      from(j in Oban.Job,
-        where: j.queue in ["ai_jobs", "conversion"] and j.state in ["available", "executing", "retryable"]
-      ),
-      :count
-    )
+    pending =
+      Repo.aggregate(
+        from(j in Oban.Job,
+          where:
+            j.queue in ["ai_jobs", "conversion"] and
+              j.state in ["available", "executing", "retryable"]
+        ),
+        :count
+      )
 
     # Backfill log from photos curated in the last 30 minutes
     cutoff = DateTime.utc_now() |> DateTime.add(-30 * 60, :second)
-    recent = Repo.all(
-      from p in Orchestrator.Photos.Photo,
-        where: p.inserted_at >= ^cutoff and p.curation_status == "complete",
-        order_by: [desc: p.inserted_at],
-        limit: 100,
-        select: %{
-          filename: fragment("regexp_replace(?, '^.*/', '')", p.file_path),
-          subject: p.subject,
-          content_type: p.content_type
-        }
-    )
 
-    activity_log = Enum.map(recent, fn r ->
-      %{
-        filename: r.filename || "",
-        subject: r.subject || "—",
-        content_type: r.content_type || "—"
-      }
-    end)
+    recent =
+      Repo.all(
+        from p in Orchestrator.Photos.Photo,
+          where: p.inserted_at >= ^cutoff and p.curation_status == "complete",
+          order_by: [desc: p.inserted_at],
+          limit: 100,
+          select: %{
+            file_path: p.file_path,
+            subject: p.subject,
+            content_type: p.content_type
+          }
+      )
+
+    activity_log =
+      Enum.map(recent, fn r ->
+        %{
+          filename: if(r.file_path, do: Path.basename(r.file_path), else: ""),
+          subject: r.subject || "—",
+          content_type: r.content_type || "—"
+        }
+      end)
 
     socket =
       socket
@@ -51,8 +57,6 @@ defmodule OrchestratorWeb.CuratorLive do
       |> assign(:import_failed_count, 0)
       |> assign(:import_error, nil)
       |> assign(:activity_log, activity_log)
-      |> assign(:dir_chips, default_chips())
-      |> assign(:can_browse, browse_supported?())
 
     {:ok, socket}
   end
@@ -64,28 +68,26 @@ defmodule OrchestratorWeb.CuratorLive do
 
   @impl Phoenix.LiveView
   def handle_event("browse_directory", _params, socket) do
-    case open_folder_dialog() do
-      {:ok, path} -> {:noreply, assign(socket, dir_path: path)}
-      :error      -> {:noreply, socket}
+    case System.cmd(
+           "osascript",
+           ["-e", ~s[POSIX path of (choose folder with prompt "Select a folder to ingest")]],
+           stderr_to_stdout: false
+         ) do
+      {path, 0} -> {:noreply, assign(socket, dir_path: String.trim(path, " /\n"))}
+      _ -> {:noreply, socket}
     end
   end
 
   @impl Phoenix.LiveView
   def handle_event("ingest", params, socket) do
-    # Expand `~` and normalize separators so the worker's File.dir? check
-    # actually finds paths typed by the user (or pasted from a Windows
-    # explorer with backslashes).
-    dir_path =
-      params
-      |> Map.get("dir_path", "")
-      |> String.trim()
-      |> expand_user_path()
-
+    dir_path = params |> Map.get("dir_path", "") |> String.trim()
     project = params |> Map.get("project", "") |> String.trim()
-    sample = case Integer.parse(Map.get(params, "sample", "50")) do
-      {n, _} when n > 0 -> n
-      _ -> 50
-    end
+
+    sample =
+      case Integer.parse(Map.get(params, "sample", "50")) do
+        {n, _} when n > 0 -> n
+        _ -> 50
+      end
 
     if dir_path != "" do
       %{"dir_path" => dir_path, "sample" => sample, "project" => project}
@@ -93,16 +95,17 @@ defmodule OrchestratorWeb.CuratorLive do
       |> Oban.insert()
     end
 
-    {:noreply, assign(socket,
-      status: if(dir_path != "", do: :ingesting, else: :idle),
-      dir_path: dir_path,
-      project: project,
-      import_error: nil,
-      import_queued: 0,
-      import_processed: 0,
-      import_failed_count: 0,
-      activity_log: []
-    )}
+    {:noreply,
+     assign(socket,
+       status: if(dir_path != "", do: :ingesting, else: :idle),
+       dir_path: dir_path,
+       project: project,
+       import_error: nil,
+       import_queued: 0,
+       import_processed: 0,
+       import_failed_count: 0,
+       activity_log: []
+     )}
   end
 
   @impl Phoenix.LiveView
@@ -114,17 +117,16 @@ defmodule OrchestratorWeb.CuratorLive do
     Oban.pause_queue(queue: :conversion)
     Oban.pause_queue(queue: :ai_jobs)
 
-    Oban.cancel_all_jobs(
-      from(j in Oban.Job, where: j.queue in ["ai_jobs", "conversion"])
-    )
+    Oban.cancel_all_jobs(from(j in Oban.Job, where: j.queue in ["ai_jobs", "conversion"]))
 
     Process.send_after(self(), :stop_sweep, 250)
 
-    {:noreply, assign(socket,
-      status: :idle,
-      import_queued: 0,
-      import_processed: 0
-    )}
+    {:noreply,
+     assign(socket,
+       status: :idle,
+       import_queued: 0,
+       import_processed: 0
+     )}
   end
 
   @impl Phoenix.LiveView
@@ -149,14 +151,16 @@ defmodule OrchestratorWeb.CuratorLive do
       subject: metadata["subject"] || "—",
       content_type: metadata["content_type"] || "—"
     }
+
     log = [entry | socket.assigns.activity_log] |> Enum.take(100)
     processed = socket.assigns.import_processed + 1
     done = processed >= socket.assigns.import_queued and socket.assigns.import_queued > 0
 
-    {:noreply, socket
-      |> assign(:activity_log, log)
-      |> assign(:import_processed, processed)
-      |> assign(:status, if(done, do: :done, else: :ingesting))}
+    {:noreply,
+     socket
+     |> assign(:activity_log, log)
+     |> assign(:import_processed, processed)
+     |> assign(:status, if(done, do: :done, else: :ingesting))}
   end
 
   @impl Phoenix.LiveView
@@ -164,33 +168,37 @@ defmodule OrchestratorWeb.CuratorLive do
     processed = socket.assigns.import_processed + 1
     failed_count = socket.assigns.import_failed_count + 1
     done = processed >= socket.assigns.import_queued and socket.assigns.import_queued > 0
+
     entry = %{
       filename: basename || "unknown",
       subject: reason || "curation failed",
       content_type: "—",
       status: :failed
     }
+
     log = [entry | socket.assigns.activity_log] |> Enum.take(100)
-    {:noreply, socket
-      |> assign(:activity_log, log)
-      |> assign(:import_processed, processed)
-      |> assign(:import_failed_count, failed_count)
-      |> assign(:status, if(done, do: :done, else: :ingesting))}
+
+    {:noreply,
+     socket
+     |> assign(:activity_log, log)
+     |> assign(:import_processed, processed)
+     |> assign(:import_failed_count, failed_count)
+     |> assign(:status, if(done, do: :done, else: :ingesting))}
   end
 
   @impl Phoenix.LiveView
   def handle_info({:curation_skipped, _ref, _basename}, socket) do
     processed = socket.assigns.import_processed + 1
     done = processed >= socket.assigns.import_queued and socket.assigns.import_queued > 0
-    {:noreply, socket
-      |> assign(:import_processed, processed)
-      |> assign(:status, if(done, do: :done, else: :ingesting))}
+
+    {:noreply,
+     socket
+     |> assign(:import_processed, processed)
+     |> assign(:status, if(done, do: :done, else: :ingesting))}
   end
 
   def handle_info(:stop_sweep, socket) do
-    Oban.cancel_all_jobs(
-      from(j in Oban.Job, where: j.queue in ["ai_jobs", "conversion"])
-    )
+    Oban.cancel_all_jobs(from(j in Oban.Job, where: j.queue in ["ai_jobs", "conversion"]))
 
     Oban.resume_queue(queue: :conversion)
     Oban.resume_queue(queue: :ai_jobs)
@@ -204,33 +212,42 @@ defmodule OrchestratorWeb.CuratorLive do
   def render(assigns) do
     ~H"""
     <div class="min-h-screen bg-[#fcfbf9] text-[#111111] font-serif selection:bg-[#111111] selection:text-[#fcfbf9]">
-
       <%!-- Header bar --%>
       <div class="border-b border-gray-200 px-8 py-4 flex items-center justify-between">
         <div>
           <span class="font-sans text-xs uppercase tracking-[0.4em] text-gray-400">fineshyt</span>
           <span class="font-sans text-xs text-gray-200 ml-3">·</span>
-          <span class="font-sans text-xs uppercase tracking-widest text-gray-300 ml-3">archival system</span>
+          <span class="font-sans text-xs uppercase tracking-widest text-gray-300 ml-3">
+            archival system
+          </span>
         </div>
         <div class="flex items-center gap-6">
-          <.link navigate={~p"/projects"} class="font-sans text-xs uppercase tracking-widest text-gray-400 hover:text-gray-800 transition-colors border-b border-gray-300 hover:border-gray-800 pb-0.5">
+          <.link
+            navigate={~p"/projects"}
+            class="font-sans text-xs uppercase tracking-widest text-gray-400 hover:text-gray-800 transition-colors border-b border-gray-300 hover:border-gray-800 pb-0.5"
+          >
             Projects
           </.link>
-          <.link navigate={~p"/review"} class="font-sans text-xs uppercase tracking-widest text-gray-400 hover:text-gray-800 transition-colors border-b border-gray-300 hover:border-gray-800 pb-0.5">
+          <.link
+            navigate={~p"/review"}
+            class="font-sans text-xs uppercase tracking-widest text-gray-400 hover:text-gray-800 transition-colors border-b border-gray-300 hover:border-gray-800 pb-0.5"
+          >
             Review
           </.link>
-          <.link navigate={~p"/gallery"} class="font-sans text-xs uppercase tracking-widest text-gray-400 hover:text-gray-800 transition-colors border-b border-gray-300 hover:border-gray-800 pb-0.5">
+          <.link
+            navigate={~p"/gallery"}
+            class="font-sans text-xs uppercase tracking-widest text-gray-400 hover:text-gray-800 transition-colors border-b border-gray-300 hover:border-gray-800 pb-0.5"
+          >
             Gallery →
           </.link>
         </div>
       </div>
 
       <div class="max-w-4xl mx-auto px-8 py-16">
-
         <%!-- Title --%>
         <div class="mb-16">
           <h1 class="text-[clamp(3rem,8vw,6rem)] font-black tracking-tight leading-none text-[#111111]">
-            FINE.<br/>SHYT.
+            FINESHYT.
           </h1>
           <p class="mt-4 font-serif italic text-gray-400 text-lg">
             An algorithmic study of composition, light, and medium. Fine shyt if you will.
@@ -239,7 +256,6 @@ defmodule OrchestratorWeb.CuratorLive do
 
         <%!-- Main ingest form --%>
         <form phx-submit="ingest" class="mb-10">
-
           <%!-- Path input --%>
           <div class="mb-2">
             <label class="font-sans text-[10px] uppercase tracking-[0.35em] text-gray-400 block mb-3">
@@ -270,29 +286,26 @@ defmodule OrchestratorWeb.CuratorLive do
                   ×
                 </button>
               <% end %>
-              <%= if @can_browse do %>
-                <button
-                  type="button"
-                  phx-click="browse_directory"
-                  class="px-4 py-4 font-sans text-[10px] uppercase tracking-widest text-gray-400 hover:text-[#111111] border-l border-gray-200 hover:bg-gray-50 transition-colors shrink-0"
-                >
-                  Browse
-                </button>
-              <% end %>
+              <button
+                type="button"
+                phx-click="browse_directory"
+                class="px-4 py-4 font-sans text-[10px] uppercase tracking-widest text-gray-400 hover:text-[#111111] border-l border-gray-200 hover:bg-gray-50 transition-colors shrink-0"
+              >
+                Browse
+              </button>
             </div>
           </div>
 
           <%!-- Quick-access suggestions --%>
           <div class="flex gap-2 mb-8 flex-wrap">
-            <%= for {label, path} <- @dir_chips do %>
+            <%= for path <- ["/Volumes", "~/Desktop", "~/Downloads", "~/Pictures"] do %>
               <button
                 type="button"
                 phx-click="set_path"
                 phx-value-dir_path={path}
-                title={path}
                 class="font-mono text-[10px] text-gray-400 border border-gray-200 px-2.5 py-1 hover:border-gray-500 hover:text-gray-700 transition-colors"
               >
-                <%= label %>
+                {path}
               </button>
             <% end %>
           </div>
@@ -333,14 +346,15 @@ defmodule OrchestratorWeb.CuratorLive do
           <div class="flex items-center justify-between">
             <div>
               <%= if @import_error do %>
-                <p class="font-sans text-xs text-red-700"><%= @import_error %></p>
+                <p class="font-sans text-xs text-red-700">{@import_error}</p>
               <% end %>
             </div>
             <%= if @status == :ingesting do %>
               <div class="flex items-center gap-4">
                 <div class="flex items-center gap-2 font-sans text-xs text-gray-500">
-                  <span class="w-1.5 h-1.5 bg-[#111111] rounded-full animate-ping inline-block"></span>
-                  <%= @import_processed %> / <%= @import_queued %> processed
+                  <span class="w-1.5 h-1.5 bg-[#111111] rounded-full animate-ping inline-block">
+                  </span>
+                  {@import_processed} / {@import_queued} processed
                 </div>
                 <button
                   type="button"
@@ -356,7 +370,7 @@ defmodule OrchestratorWeb.CuratorLive do
                 disabled={@dir_path == "" or @status == :ingesting}
                 class="font-sans text-xs uppercase tracking-[0.3em] bg-[#111111] text-[#fcfbf9] px-10 py-3.5 hover:bg-gray-800 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
               >
-                <%= if @status == :done, do: "Ingest Again →", else: "Ingest →" %>
+                {if @status == :done, do: "Ingest Again →", else: "Ingest →"}
               </button>
             <% end %>
           </div>
@@ -369,14 +383,18 @@ defmodule OrchestratorWeb.CuratorLive do
               <span class="font-sans text-[10px] uppercase tracking-widest text-gray-500">
                 <%= cond do %>
                   <% @status == :done and @import_failed_count > 0 -> %>
-                    Done — <%= @import_processed - @import_failed_count %> curated · <span class="text-red-500"><%= @import_failed_count %> failed</span>
+                    Done — {@import_processed - @import_failed_count} curated ·
+                    <span class="text-red-500">{@import_failed_count} failed</span>
                   <% @status == :done -> %>
-                    Done — <%= @import_processed %> curated
+                    Done — {@import_processed} curated
                   <% true -> %>
                     Processing...
                 <% end %>
               </span>
-              <button phx-click="clear_log" class="font-sans text-[10px] text-gray-400 hover:text-gray-700 uppercase tracking-widest transition-colors">
+              <button
+                phx-click="clear_log"
+                class="font-sans text-[10px] text-gray-400 hover:text-gray-700 uppercase tracking-widest transition-colors"
+              >
                 Clear
               </button>
             </div>
@@ -385,17 +403,19 @@ defmodule OrchestratorWeb.CuratorLive do
                 <%= if Map.get(entry, :status) == :failed do %>
                   <div class="flex items-center gap-3 px-4 py-2 font-mono text-xs bg-red-50/50">
                     <span class="w-3 shrink-0 text-red-400">✗</span>
-                    <span class="w-52 shrink-0 text-red-400 truncate"><%= entry.filename %></span>
-                    <span class="flex-1 text-red-300 truncate italic"><%= entry.subject %></span>
-                    <span class="shrink-0 font-sans text-[9px] uppercase tracking-wider text-red-300">failed</span>
+                    <span class="w-52 shrink-0 text-red-400 truncate">{entry.filename}</span>
+                    <span class="flex-1 text-red-300 truncate italic">{entry.subject}</span>
+                    <span class="shrink-0 font-sans text-[9px] uppercase tracking-wider text-red-300">
+                      failed
+                    </span>
                   </div>
                 <% else %>
                   <div class="flex items-center gap-3 px-4 py-2 font-mono text-xs">
                     <span class="w-3 shrink-0 text-gray-300">·</span>
-                    <span class="w-52 shrink-0 text-gray-400 truncate"><%= entry.filename %></span>
-                    <span class="flex-1 text-gray-500 truncate italic"><%= entry.subject %></span>
+                    <span class="w-52 shrink-0 text-gray-400 truncate">{entry.filename}</span>
+                    <span class="flex-1 text-gray-500 truncate italic">{entry.subject}</span>
                     <span class="shrink-0 font-sans text-[9px] uppercase tracking-wider text-gray-400">
-                      <%= entry.content_type %>
+                      {entry.content_type}
                     </span>
                   </div>
                 <% end %>
@@ -408,154 +428,17 @@ defmodule OrchestratorWeb.CuratorLive do
         <%= if @activity_log == [] and @status == :idle do %>
           <div class="mt-24 flex items-center gap-8 text-gray-300">
             <div class="flex-1 h-px bg-gray-200"></div>
-            <.link navigate={~p"/gallery"} class="font-sans text-[10px] uppercase tracking-widest hover:text-gray-600 transition-colors">
+            <.link
+              navigate={~p"/gallery"}
+              class="font-sans text-[10px] uppercase tracking-widest hover:text-gray-600 transition-colors"
+            >
               View Archive →
             </.link>
             <div class="flex-1 h-px bg-gray-200"></div>
           </div>
         <% end %>
-
       </div>
     </div>
     """
-  end
-
-  # ---- Cross-platform helpers ----------------------------------------
-
-  # Quick-access chips, dynamically built per OS and per environment.
-  #
-  # Each chip is `{label, absolute_path}` so we can show short labels in
-  # the UI while autofilling a real path the worker can resolve. We
-  # always filter out paths that don't exist on the running host — chips
-  # that lead to "directory not found" errors are worse than no chip.
-  #
-  # Chip ordering, highest priority first:
-  #   1. Each entry from PHOTO_LIBRARIES (multi-drive Docker mode), so
-  #      a photographer with several drives sees each as a clickable chip.
-  #   2. /photos (single-drive Docker mode bind-mount).
-  #   3. OS-default user folders (Desktop / Downloads / Pictures, plus
-  #      /Volumes on macOS or /mnt on Linux).
-  defp default_chips do
-    multi_drive_chips() ++ photos_chip() ++ os_default_chips()
-  end
-
-  defp multi_drive_chips do
-    case System.get_env("PHOTO_LIBRARIES") do
-      nil -> []
-      "" -> []
-      paths ->
-        paths
-        |> String.split(":", trim: true)
-        |> Enum.map(&String.trim/1)
-        |> Enum.reject(&(&1 == ""))
-        |> Enum.filter(&File.dir?/1)
-        |> Enum.map(fn path -> {Path.basename(path), path} end)
-    end
-  end
-
-  defp photos_chip do
-    if File.dir?("/photos"), do: [{"/photos", "/photos"}], else: []
-  end
-
-  defp os_default_chips do
-    home = System.user_home() || ""
-
-    raw =
-      case :os.type() do
-        {:win32, _} ->
-          [
-            {"Desktop", Path.join(home, "Desktop")},
-            {"Downloads", Path.join(home, "Downloads")},
-            {"Pictures", Path.join(home, "Pictures")}
-          ]
-
-        {:unix, :darwin} ->
-          [
-            {"/Volumes", "/Volumes"},
-            {"Desktop", Path.join(home, "Desktop")},
-            {"Downloads", Path.join(home, "Downloads")},
-            {"Pictures", Path.join(home, "Pictures")}
-          ]
-
-        {:unix, _} ->
-          [
-            {"Desktop", Path.join(home, "Desktop")},
-            {"Downloads", Path.join(home, "Downloads")},
-            {"Pictures", Path.join(home, "Pictures")},
-            {"/mnt", "/mnt"}
-          ]
-      end
-
-    Enum.filter(raw, fn {_label, path} -> File.dir?(path) end)
-  end
-
-  defp browse_supported? do
-    case :os.type() do
-      {:unix, :darwin} -> true
-      {:win32, _} -> true
-      {:unix, _} -> System.find_executable("zenity") != nil
-    end
-  end
-
-  # Pop a native folder picker per-OS. Returns `{:ok, path}` on selection,
-  # `:error` on cancel or unsupported platform.
-  defp open_folder_dialog do
-    case :os.type() do
-      {:unix, :darwin} -> mac_folder_dialog()
-      {:win32, _}      -> windows_folder_dialog()
-      {:unix, _}       -> linux_folder_dialog()
-    end
-  end
-
-  defp mac_folder_dialog do
-    script = ~s[POSIX path of (choose folder with prompt "Select a folder to ingest")]
-
-    case System.cmd("osascript", ["-e", script], stderr_to_stdout: false) do
-      {path, 0} -> {:ok, path |> String.trim() |> String.trim_trailing("/")}
-      _         -> :error
-    end
-  end
-
-  defp windows_folder_dialog do
-    # FolderBrowserDialog requires single-threaded apartment (-STA) and the
-    # System.Windows.Forms assembly. Output is just the selected path on
-    # stdout, or empty on cancel.
-    script = """
-    Add-Type -AssemblyName System.Windows.Forms | Out-Null
-    $d = New-Object System.Windows.Forms.FolderBrowserDialog
-    $d.Description = 'Select a folder to ingest'
-    if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-      Write-Output $d.SelectedPath
-    }
-    """
-
-    case System.cmd("powershell", ["-NoProfile", "-STA", "-Command", script], stderr_to_stdout: false) do
-      {output, 0} ->
-        case String.trim(output) do
-          "" -> :error
-          path -> {:ok, path}
-        end
-
-      _ ->
-        :error
-    end
-  end
-
-  defp linux_folder_dialog do
-    case System.cmd("zenity", ["--file-selection", "--directory", "--title=Select a folder to ingest"], stderr_to_stdout: false) do
-      {path, 0} -> {:ok, String.trim(path)}
-      _         -> :error
-    end
-  rescue
-    ErlangError -> :error
-  end
-
-  # Expand `~` and normalize separators. Empty string passes through so the
-  # form-validation branch in `handle_event("ingest", ...)` still fires.
-  defp expand_user_path(""), do: ""
-
-  defp expand_user_path(path) do
-    path
-    |> Path.expand()
   end
 end

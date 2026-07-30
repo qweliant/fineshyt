@@ -1,0 +1,21 @@
+<!--
+  Source for the Fineshyt desktop icon. "FS" in the same brand styling as
+  the title on architecture.svg + the photographer Pages site: ui-serif
+  (Georgia / Times-New-Roman fallback), font-weight 900, letter-spacing
+  pulled slightly tighter, cream background to match the brand palette.
+
+  Regenerate the full PNG/icns/ico set with `make desktop-icon` — it
+  rasterises this file via qlmanage and then runs `cargo tauri icon` to
+  produce every size Tauri's bundler expects.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <rect width="1024" height="1024" fill="#fcfbf9"/>
+  <text x="512" y="512"
+        text-anchor="middle"
+        dominant-baseline="central"
+        font-family="ui-serif, Georgia, 'Times New Roman', serif"
+        font-weight="900"
+        font-size="640"
+        fill="#111111"
+        letter-spacing="-22">FS</text>
+</svg>

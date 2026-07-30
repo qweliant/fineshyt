@@ -21,8 +21,6 @@ defmodule Orchestrator.Repo.Migrations.CreatePhotos do
       timestamps()
     end
 
-    create unique_index(:photos, [:instagram_shortcode],
-             where: "instagram_shortcode IS NOT NULL"
-           )
+    create unique_index(:photos, [:instagram_shortcode], where: "instagram_shortcode IS NOT NULL")
   end
 end

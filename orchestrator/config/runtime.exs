@@ -23,29 +23,58 @@ end
 # AI worker base URL. Read by Orchestrator.AiWorker.url/1. In docker
 # compose, the orchestrator container reaches the ai_worker container
 # via the compose-network DNS name. In native dev both run on the host.
-config :orchestrator, :ai_worker_url,
-  System.get_env("AI_WORKER_URL", "http://127.0.0.1:8000")
+config :orchestrator, :ai_worker_url, System.get_env("AI_WORKER_URL", "http://127.0.0.1:8000")
+
+# XMP sidecar behavior. Read by Orchestrator.Sidecars.mode/0.
+#   "off"        — read and write both disabled
+#   "read"       — read existing sidecars to seed metadata on ingest
+#                  (default; safe — never modifies user files)
+#   "read-write" — read on ingest AND write Fineshyt's metadata back
+#                  as XMP after curation completes
+config :orchestrator, :sidecar_mode, System.get_env("FINESHYT_SIDECAR_MODE", "read")
+
+# Where converted JPEGs live on disk. AiCurationWorker writes new
+# uploads here; Plug.Static serves /uploads/* from here (via a
+# symlink installed at boot, see Orchestrator.Application). When
+# unset, defaults to the release's priv/static/uploads — fine for
+# native dev but wrong for packaged builds where the release dir
+# is read-only. In Tauri C2 mode the shell points this at the
+# repo's existing uploads dir so the user's photo history is
+# preserved.
+config :orchestrator, :uploads_dir, System.get_env("STATIC_UPLOADS_DIR")
 
 config :orchestrator, OrchestratorWeb.Endpoint,
   http: [port: String.to_integer(System.get_env("PORT", "4000"))]
 
 if config_env() == :prod do
-  database_url =
-    System.get_env("DATABASE_URL") ||
-      raise """
-      environment variable DATABASE_URL is missing.
-      For example: ecto://USER:PASS@HOST/DATABASE
-      """
+  # SQLite database file. DATABASE_PATH wins (set by the Makefile c2 target,
+  # the Tauri shell, and docker compose). Otherwise default to a writable
+  # per-user data dir so a packaged double-click build has somewhere to live
+  # without any env wiring. The parent dir is created on boot in
+  # Orchestrator.Application before the Repo starts.
+  default_db_path =
+    case :os.type() do
+      {:unix, :darwin} ->
+        Path.join([
+          System.user_home!(),
+          "Library",
+          "Application Support",
+          "Fineshyt",
+          "fineshyt.db"
+        ])
 
-  maybe_ipv6 = if System.get_env("ECTO_IPV6") in ~w(true 1), do: [:inet6], else: []
+      _ ->
+        data_home =
+          System.get_env("XDG_DATA_HOME") || Path.join(System.user_home!(), ".local/share")
+
+        Path.join([data_home, "fineshyt", "fineshyt.db"])
+    end
 
   config :orchestrator, Orchestrator.Repo,
-    # ssl: true,
-    url: database_url,
-    pool_size: String.to_integer(System.get_env("POOL_SIZE") || "10"),
-    # For machines with several cores, consider starting multiple pools of `pool_size`
-    # pool_count: 4,
-    socket_options: maybe_ipv6
+    database: System.get_env("DATABASE_PATH") || default_db_path,
+    journal_mode: :wal,
+    busy_timeout: 5_000,
+    pool_size: String.to_integer(System.get_env("POOL_SIZE") || "5")
 
   # The secret key base is used to sign/encrypt cookies and other secrets.
   # A default value is used in config/dev.exs and config/test.exs but you

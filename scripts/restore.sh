@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
 #
-# restore.sh — Restore the database and uploads from a backup.
+# restore.sh — Restore the SQLite database and uploads from a backup.
 #
 # Usage:
 #   ./scripts/restore.sh                     # restore from "latest"
 #   ./scripts/restore.sh 2026-04-12T14:30:00 # restore a specific snapshot
 #
 # What it does:
-#   1. Drops and recreates the photo_curator_dev database
-#   2. Restores the pg_dump from the chosen backup
-#   3. Rsyncs the uploads back into priv/static/uploads
-#   4. Runs mix ecto.migrate to apply any migrations newer than the dump
+#   1. Replaces the SQLite database file with the chosen snapshot
+#   2. Rsyncs the uploads back into priv/static/uploads
+#   3. Runs mix ecto.migrate to apply any migrations newer than the snapshot
 #
+# IMPORTANT: stop the app (close the desktop window, or Ctrl-C `make dev`)
+# before restoring so nothing is writing to the db file.
 # ──────────────────────────────────────────────────────────────
 
 set -euo pipefail
@@ -20,10 +21,7 @@ set -euo pipefail
 BACKUP_DIR="${BACKUP_DIR:-$HOME/.fineshyt-backups}"
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 UPLOADS_DIR="$PROJECT_DIR/orchestrator/priv/static/uploads"
-DB_NAME="photo_curator_dev"
-DB_USER="postgres"
-COMPOSE_SERVICE="db"
-COMPOSE_FILE="$PROJECT_DIR/docker-compose.yml"
+DB_FILE="${DATABASE_PATH:-$PROJECT_DIR/orchestrator/priv/fineshyt.db}"
 
 # ── Resolve backup to restore ──────────────────────────────
 if [ -n "${1:-}" ]; then
@@ -43,27 +41,21 @@ else
   fi
 fi
 
-DUMP_FILE="$RESTORE_DIR/$DB_NAME.sql.gz"
+DUMP_FILE="$RESTORE_DIR/fineshyt.db.gz"
 
 if [ ! -f "$DUMP_FILE" ]; then
-  echo "ERROR: Dump file not found: $DUMP_FILE"
+  echo "ERROR: Snapshot db not found: $DUMP_FILE"
   echo ""
   echo "Available backups:"
   ls -1d "$BACKUP_DIR"/????-??-??T??:??:?? 2>/dev/null | xargs -n1 basename || echo "  (none)"
   exit 1
 fi
 
-# ── Preflight ───────────────────────────────────────────────
-if ! docker compose -f "$COMPOSE_FILE" ps --status running "$COMPOSE_SERVICE" 2>/dev/null | grep -q "$COMPOSE_SERVICE"; then
-  echo "ERROR: Docker service '$COMPOSE_SERVICE' is not running."
-  echo "       Start it with: docker compose up -d"
-  exit 1
-fi
-
 echo "Restoring from: $RESTORE_DIR"
 echo ""
-echo "  This will DROP and recreate the '$DB_NAME' database."
+echo "  This will OVERWRITE the database at $DB_FILE."
 echo "  Uploads in priv/static/uploads/ will be overwritten."
+echo "  Make sure the app is stopped first."
 echo ""
 read -r -p "Continue? [y/N] " confirm
 if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
@@ -71,30 +63,16 @@ if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
   exit 0
 fi
 
-# ── Drop and recreate database ──────────────────────────────
+# ── Restore database ────────────────────────────────────────
+# Remove any stale WAL/SHM sidecars so the restored db isn't shadowed by a
+# leftover write-ahead log from the previous file.
 echo ""
-echo "Dropping $DB_NAME …"
-docker compose -f "$COMPOSE_FILE" exec -T "$COMPOSE_SERVICE" \
-  psql -U "$DB_USER" -c "
-    SELECT pg_terminate_backend(pid)
-    FROM pg_stat_activity
-    WHERE datname = '$DB_NAME' AND pid <> pg_backend_pid();
-  " > /dev/null 2>&1 || true
+echo "Restoring database to $DB_FILE …"
+mkdir -p "$(dirname "$DB_FILE")"
+rm -f "$DB_FILE" "$DB_FILE-wal" "$DB_FILE-shm"
+gunzip -c "$DUMP_FILE" > "$DB_FILE"
 
-docker compose -f "$COMPOSE_FILE" exec -T "$COMPOSE_SERVICE" \
-  dropdb -U "$DB_USER" --if-exists "$DB_NAME"
-
-docker compose -f "$COMPOSE_FILE" exec -T "$COMPOSE_SERVICE" \
-  createdb -U "$DB_USER" "$DB_NAME"
-
-# ── Restore dump ────────────────────────────────────────────
-echo "Restoring database from $DUMP_FILE …"
-gunzip -c "$DUMP_FILE" \
-  | docker compose -f "$COMPOSE_FILE" exec -T "$COMPOSE_SERVICE" \
-      psql -U "$DB_USER" -d "$DB_NAME" --quiet --single-transaction
-
-ROW_COUNT=$(docker compose -f "$COMPOSE_FILE" exec -T "$COMPOSE_SERVICE" \
-  psql -U "$DB_USER" -d "$DB_NAME" -t -c "SELECT count(*) FROM photos;" 2>/dev/null | tr -d ' ')
+ROW_COUNT=$(sqlite3 "$DB_FILE" "SELECT count(*) FROM photos;" 2>/dev/null | tr -d ' ' || echo "?")
 echo "  → $ROW_COUNT photo records restored"
 
 # ── Restore uploads ─────────────────────────────────────────
@@ -111,6 +89,6 @@ fi
 # ── Run migrations ──────────────────────────────────────────
 echo "Running migrations …"
 cd "$PROJECT_DIR/orchestrator"
-mix ecto.migrate
+DATABASE_PATH="$DB_FILE" MIX_ENV=dev mix ecto.migrate
 echo ""
 echo "Restore complete from snapshot: $SNAPSHOT"

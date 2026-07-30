@@ -7,10 +7,11 @@ defmodule OrchestratorWeb.ProjectsLive do
   def mount(_params, _session, socket) do
     if connected?(socket), do: Phoenix.PubSub.subscribe(Orchestrator.PubSub, "photo_updates")
 
-    {:ok, socket
-      |> assign(:selected_project, nil)
-      |> assign(:project_photos, [])
-      |> assign(:projects, Photos.list_projects_with_covers())}
+    {:ok,
+     socket
+     |> assign(:selected_project, nil)
+     |> assign(:project_photos, [])
+     |> assign(:projects, Photos.list_projects_with_covers())}
   end
 
   @impl Phoenix.LiveView
@@ -30,9 +31,11 @@ defmodule OrchestratorWeb.ProjectsLive do
     Photos.set_project(String.to_integer(id), "")
     project = socket.assigns.selected_project
     photos = Photos.list_photos(filter: :all, project: project, sort: :score_desc, page: 1)
-    {:noreply, socket
-      |> assign(:project_photos, photos)
-      |> assign(:projects, Photos.list_projects_with_covers())}
+
+    {:noreply,
+     socket
+     |> assign(:project_photos, photos)
+     |> assign(:projects, Photos.list_projects_with_covers())}
   end
 
   # ── pubsub ────────────────────────────────────────────────────────────────
@@ -50,7 +53,6 @@ defmodule OrchestratorWeb.ProjectsLive do
   def render(assigns) do
     ~H"""
     <div class="min-h-screen bg-[#fcfbf9] text-[#111111] font-serif">
-
       <%!-- Header --%>
       <div class="border-b border-gray-200 px-8 py-4 flex items-center justify-between">
         <div>
@@ -59,17 +61,22 @@ defmodule OrchestratorWeb.ProjectsLive do
           <span class="font-sans text-xs uppercase tracking-widest text-gray-300 ml-3">projects</span>
         </div>
         <div class="flex items-center gap-6">
-          <.link navigate={~p"/gallery"} class="font-sans text-xs uppercase tracking-widest text-gray-400 hover:text-gray-800 transition-colors border-b border-gray-300 hover:border-gray-800 pb-0.5">
+          <.link
+            navigate={~p"/gallery"}
+            class="font-sans text-xs uppercase tracking-widest text-gray-400 hover:text-gray-800 transition-colors border-b border-gray-300 hover:border-gray-800 pb-0.5"
+          >
             Gallery
           </.link>
-          <.link navigate={~p"/"} class="font-sans text-xs uppercase tracking-widest text-gray-400 hover:text-gray-800 transition-colors border-b border-gray-300 hover:border-gray-800 pb-0.5">
+          <.link
+            navigate={~p"/"}
+            class="font-sans text-xs uppercase tracking-widest text-gray-400 hover:text-gray-800 transition-colors border-b border-gray-300 hover:border-gray-800 pb-0.5"
+          >
             ← Ingest
           </.link>
         </div>
       </div>
 
       <div class="p-6 md:p-12 lg:p-24">
-
         <%!-- Title --%>
         <div class="mb-16 border-b-[3px] border-[#111111] pb-6 flex flex-col md:flex-row md:items-end justify-between">
           <div>
@@ -84,12 +91,16 @@ defmodule OrchestratorWeb.ProjectsLive do
                 </button>
               </div>
               <h1 class="text-5xl md:text-7xl font-black tracking-tight leading-none break-words">
-                <%= String.upcase(@selected_project) %>
+                {String.upcase(@selected_project)}
               </h1>
               <p class="mt-4 text-lg font-light italic text-gray-600">
-                <%= length(@project_photos) %> photo<%= if length(@project_photos) != 1, do: "s" %>
-                <span class="font-sans text-sm not-italic text-gray-400 ml-2">·
-                  <.link navigate={~p"/gallery?project=#{@selected_project}"} class="underline hover:text-gray-600">
+                {length(@project_photos)} photo{if length(@project_photos) != 1, do: "s"}
+                <span class="font-sans text-sm not-italic text-gray-400 ml-2">
+                  ·
+                  <.link
+                    navigate={~p"/gallery?project=#{@selected_project}"}
+                    class="underline hover:text-gray-600"
+                  >
                     edit in gallery
                   </.link>
                 </span>
@@ -97,7 +108,7 @@ defmodule OrchestratorWeb.ProjectsLive do
             <% else %>
               <h1 class="text-6xl md:text-8xl font-black tracking-tight leading-none">PROJECTS.</h1>
               <p class="mt-4 text-lg font-light italic text-gray-600">
-                <%= length(@projects) %> project<%= if length(@projects) != 1, do: "s" %>
+                {length(@projects)} project{if length(@projects) != 1, do: "s"}
               </p>
             <% end %>
           </div>
@@ -131,27 +142,35 @@ defmodule OrchestratorWeb.ProjectsLive do
                       />
                     <% else %>
                       <div class="w-full h-full flex items-center justify-center">
-                        <span class="font-sans text-xs uppercase tracking-widest text-gray-300">no photos yet</span>
+                        <span class="font-sans text-xs uppercase tracking-widest text-gray-300">
+                          no photos yet
+                        </span>
                       </div>
                     <% end %>
-                    <div class="absolute inset-0 bg-[#111111]/0 group-hover:bg-[#111111]/20 transition-colors duration-300"></div>
+                    <div class="absolute inset-0 bg-[#111111]/0 group-hover:bg-[#111111]/20 transition-colors duration-300">
+                    </div>
                   </div>
                   <div class="flex items-baseline justify-between">
-                    <h2 class="font-serif text-xl font-bold tracking-tight group-hover:text-gray-600 transition-colors"><%= proj.name %></h2>
-                    <span class="font-sans text-xs text-gray-400 uppercase tracking-widest"><%= proj.count %></span>
+                    <h2 class="font-serif text-xl font-bold tracking-tight group-hover:text-gray-600 transition-colors">
+                      {proj.name}
+                    </h2>
+                    <span class="font-sans text-xs text-gray-400 uppercase tracking-widest">
+                      {proj.count}
+                    </span>
                   </div>
                 </.link>
               <% end %>
             </div>
           <% end %>
 
-        <%!-- Project detail --%>
+          <%!-- Project detail --%>
         <% else %>
           <%= if @project_photos == [] do %>
             <div class="text-center py-24 text-gray-400 font-serif italic text-xl">
               No photos in this project.
               <p class="mt-4 font-sans text-sm not-italic">
-                <.link navigate={~p"/gallery"} class="border-b border-gray-400">Go to gallery</.link> to assign photos here.
+                <.link navigate={~p"/gallery"} class="border-b border-gray-400">Go to gallery</.link>
+                to assign photos here.
               </p>
             </div>
           <% else %>
@@ -169,23 +188,25 @@ defmodule OrchestratorWeb.ProjectsLive do
                     <%= if photo.preference_score != nil do %>
                       <div class={[
                         "font-sans text-[9px] uppercase tracking-wider px-2 py-0.5 border font-bold",
-                        photo.preference_score >= 75 && "bg-fuchsia-900/80 text-fuchsia-200 border-fuchsia-700",
-                        photo.preference_score >= 50 && photo.preference_score < 75 && "bg-purple-900/80 text-purple-200 border-purple-700",
+                        photo.preference_score >= 75 &&
+                          "bg-fuchsia-900/80 text-fuchsia-200 border-fuchsia-700",
+                        photo.preference_score >= 50 && photo.preference_score < 75 &&
+                          "bg-purple-900/80 text-purple-200 border-purple-700",
                         photo.preference_score < 50 && "bg-gray-800/80 text-gray-300 border-gray-600"
                       ]}>
-                        <%= photo.preference_score %>
+                        {photo.preference_score}
                       </div>
                     <% end %>
                     <%= if photo.user_rating do %>
                       <div class="bg-[#fcfbf9]/90 border border-gray-300 font-sans text-[9px] px-2 py-0.5 text-gray-600">
-                        <%= String.duplicate("★", photo.user_rating) %>
+                        {String.duplicate("★", photo.user_rating)}
                       </div>
                     <% end %>
                   </div>
 
                   <%!-- Hover overlay --%>
                   <div class="absolute inset-0 bg-[#111111]/75 opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex flex-col justify-end p-4">
-                    <p class="text-[#fcfbf9] font-serif text-sm leading-snug mb-3"><%= photo.subject %></p>
+                    <p class="text-[#fcfbf9] font-serif text-sm leading-snug mb-3">{photo.subject}</p>
                     <div class="flex items-center justify-between">
                       <.link
                         navigate={~p"/gallery"}
@@ -208,7 +229,6 @@ defmodule OrchestratorWeb.ProjectsLive do
             </div>
           <% end %>
         <% end %>
-
       </div>
     </div>
     """

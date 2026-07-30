@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 820" font-family="ui-serif, Georgia, 'Times New Roman', serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 856" font-family="ui-serif, Georgia, 'Times New Roman', serif">
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
       <path d="M0,0 L10,5 L0,10 Z" fill="#111111"/>
@@ -8,17 +8,17 @@
     </marker>
   </defs>
 
-  <rect width="960" height="820" fill="#fcfbf9"/>
+  <rect width="960" height="856" fill="#fcfbf9"/>
 
   <text x="40" y="50" font-weight="900" font-size="30" fill="#111111" letter-spacing="-1">FINE. SHYT.</text>
-  <text x="40" y="72" font-family="ui-sans-serif, system-ui, sans-serif" font-size="10" fill="#666" letter-spacing="5">ARCHITECTURE · 2026</text>
+  <text x="40" y="72" font-family="ui-sans-serif, system-ui, sans-serif" font-size="10" fill="#666" letter-spacing="5">ARCHITECTURE · 2026 · NATIVE DESKTOP SHELL</text>
   <line x1="40" y1="85" x2="920" y2="85" stroke="#111111" stroke-width="2"/>
 
   <!-- Browser -->
   <g>
     <rect x="40" y="110" width="880" height="64" fill="#ffffff" stroke="#111111" stroke-width="2"/>
-    <text x="60" y="138" font-size="15" font-weight="700" fill="#111111">Browser — Phoenix LiveView</text>
-    <text x="60" y="160" font-family="ui-sans-serif, system-ui, sans-serif" font-size="10" fill="#666">Ingest  ·  Gallery  ·  Review  ·  Projects  —  real-time via WebSocket</text>
+    <text x="60" y="138" font-size="15" font-weight="700" fill="#111111">Tauri Desktop Shell — Phoenix LiveView (native window)</text>
+    <text x="60" y="160" font-family="ui-sans-serif, system-ui, sans-serif" font-size="10" fill="#666">Ingest  ·  Gallery  ·  Review  ·  Projects  —  real-time via WebSocket  ·  also any browser at :4000</text>
   </g>
 
   <!-- Browser <-> Orchestrator link -->
@@ -28,7 +28,7 @@
   <!-- Orchestrator -->
   <g>
     <rect x="40" y="212" width="880" height="238" fill="#ffffff" stroke="#111111" stroke-width="2"/>
-    <text x="60" y="240" font-size="15" font-weight="700" fill="#111111">Orchestrator — Elixir / Phoenix / Oban</text>
+    <text x="60" y="240" font-size="15" font-weight="700" fill="#111111">Orchestrator — Elixir / Phoenix / Oban  ·  native release (Tauri-spawned)</text>
     <text x="60" y="258" font-family="ui-sans-serif, system-ui, sans-serif" font-size="9" fill="#888" letter-spacing="2">PIPELINE STAGES (each on its own Oban queue)</text>
 
     <!-- Workers -->
@@ -49,7 +49,7 @@
       <text x="482" y="294" font-size="11" font-weight="700" fill="#111111">3 · EmbeddingWorker</text>
       <text x="482" y="313" font-size="9" fill="#555">CLIP ViT-L-14</text>
       <text x="482" y="327" font-size="9" fill="#555">768-dim image vector</text>
-      <text x="482" y="341" font-size="9" fill="#555">stored in pgvector</text>
+      <text x="482" y="341" font-size="9" fill="#555">stored as float32 blob</text>
 
       <rect x="675" y="272" width="225" height="78" fill="#111111"/>
       <text x="687" y="294" font-size="11" font-weight="700" fill="#fcfbf9">4 · PreferenceTrainWorker</text>
@@ -68,9 +68,9 @@
 
     <!-- DB -->
     <rect x="60" y="365" width="840" height="72" fill="#111111"/>
-    <text x="76" y="390" font-size="13" font-weight="700" fill="#fcfbf9">PostgreSQL 16 + pgvector</text>
-    <text x="76" y="412" font-family="ui-mono, 'SF Mono', Menlo, monospace" font-size="9.5" fill="#dddddd">photos: file_path  ·  user_rating  ·  manual_match  ·  preference_score  ·  clip_embedding  ·  sharpness/exposure  ·  subject/mood/tags</text>
-    <text x="76" y="428" font-family="ui-mono, 'SF Mono', Menlo, monospace" font-size="9.5" fill="#888">oban_jobs     ·    retries + unique-constraint debouncing</text>
+    <text x="76" y="390" font-size="13" font-weight="700" fill="#fcfbf9">SQLite (WAL) — embedded, no DB server  ·  was Postgres + pgvector (migrated in C3)</text>
+    <text x="76" y="412" font-family="ui-mono, 'SF Mono', Menlo, monospace" font-size="9.5" fill="#dddddd">photos: file_path · user_rating · manual_match · preference_score · clip_embedding (f32 blob) · sharpness/exposure · subject/mood/tags</text>
+    <text x="76" y="428" font-family="ui-mono, 'SF Mono', Menlo, monospace" font-size="9.5" fill="#888">oban_jobs (Oban Lite engine)     ·    retries + unique-constraint debouncing</text>
   </g>
 
   <!-- HTTP to AI Worker -->
@@ -81,7 +81,7 @@
   <g>
     <rect x="40" y="495" width="880" height="245" fill="#ffffff" stroke="#111111" stroke-width="2"/>
     <text x="60" y="523" font-size="15" font-weight="700" fill="#111111">AI Worker — Python / FastAPI</text>
-    <text x="60" y="541" font-family="ui-sans-serif, system-ui, sans-serif" font-size="9" fill="#888" letter-spacing="2">FOUR ENDPOINTS · STATELESS · SWAPPABLE</text>
+    <text x="60" y="541" font-family="ui-sans-serif, system-ui, sans-serif" font-size="9" fill="#888" letter-spacing="2">FOUR ENDPOINTS · STATELESS · BYTES-IN (filesystem-independent) · containerized today → frozen native binary (C4)</text>
 
     <g font-family="ui-sans-serif, system-ui, sans-serif">
       <rect x="60" y="560" width="202" height="150" fill="#fcfbf9" stroke="#111111"/>
@@ -99,8 +99,8 @@
       <text x="284" y="617" font-size="9" fill="#555">Pydantic-validated output</text>
       <text x="284" y="632" font-size="9" fill="#555">subject · content_type</text>
       <text x="284" y="647" font-size="9" fill="#555">mood · lighting · tags</text>
-      <text x="284" y="672" font-size="9" fill="#555">configurable: ollama ·</text>
-      <text x="284" y="686" font-size="9" fill="#555">Claude · HuggingFace</text>
+      <text x="284" y="672" font-size="9" fill="#555">embedded llama-server</text>
+      <text x="284" y="686" font-size="9" fill="#555">(Qwen2.5-Omni) · or any OpenAI API</text>
 
       <rect x="484" y="560" width="202" height="150" fill="#fcfbf9" stroke="#111111"/>
       <text x="496" y="582" font-size="11" font-weight="700" fill="#111111">/embed</text>
@@ -136,5 +136,9 @@
     <text x="365" y="782" font-size="9" fill="#555">taste-owning path (Ridge preference model)</text>
 
     <text x="40" y="802" font-size="9" fill="#999" font-style="italic">vision LLM produces objective metadata only — your ratings + the Ridge model own every taste call.</text>
+
+    <line x1="40" y1="818" x2="920" y2="818" stroke="#e5e5e5" stroke-width="1"/>
+    <text x="40" y="838" font-size="10" fill="#666" letter-spacing="2">PACKAGING</text>
+    <text x="135" y="838" font-size="9" fill="#555">native now: shell · orchestrator (Elixir release) · llama-server (vision LLM) · SQLite  —  still Docker: ai_worker (C4 freezes it → zero host prereqs)</text>
   </g>
 </svg>

@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Fineshyt</title>
+<style>
+  :root {
+    --bg: #fcfbf9;
+    --ink: #111111;
+    --muted: #7a7a7a;
+    --faint: #a8a8a8;
+    --line: #e5e5e5;
+    --accent: #b94900;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "Source Serif 4", Georgia, serif;
+    -webkit-font-smoothing: antialiased;
+    height: 100%;
+  }
+  body {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 32px;
+  }
+  h1 {
+    font-family: "Inter", system-ui, sans-serif;
+    font-weight: 900;
+    font-size: clamp(2.5rem, 7vw, 5rem);
+    letter-spacing: -0.02em;
+    line-height: 0.95;
+    margin: 0 0 24px;
+  }
+  .micro {
+    font-family: "Inter", system-ui, sans-serif;
+    text-transform: uppercase;
+    letter-spacing: 0.4em;
+    font-size: 10px;
+    color: var(--muted);
+    margin: 0 0 48px;
+  }
+  .phase-label {
+    font-family: "Inter", system-ui, sans-serif;
+    text-transform: uppercase;
+    letter-spacing: 0.24em;
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--ink);
+    margin: 0 0 10px;
+  }
+  .phase-detail {
+    font-style: italic;
+    color: var(--muted);
+    font-size: 1.05rem;
+    margin: 0 0 28px;
+    max-width: 36em;
+    line-height: 1.5;
+  }
+  .meta {
+    font-family: "JetBrains Mono", "Menlo", monospace;
+    font-size: 0.78rem;
+    color: var(--faint);
+    margin: 0 0 24px;
+    letter-spacing: 0.02em;
+  }
+  .spinner {
+    width: 8px;
+    height: 8px;
+    background: var(--ink);
+    border-radius: 50%;
+    margin: 0 auto;
+    animation: pulse 1.2s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 0.3; transform: scale(0.85); }
+    50%      { opacity: 1;   transform: scale(1); }
+  }
+  .error {
+    border-left: 3px solid var(--accent);
+    background: #fff7f0;
+    padding: 18px 22px;
+    margin: 24px auto 0;
+    max-width: 40em;
+    text-align: left;
+    font-family: "JetBrains Mono", "Menlo", monospace;
+    font-size: 0.85rem;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    color: #5a1f00;
+    display: none;
+  }
+  .tips {
+    margin: 40px auto 0;
+    max-width: 36em;
+    font-family: "Source Serif 4", Georgia, serif;
+    font-size: 0.95rem;
+    color: var(--muted);
+    line-height: 1.6;
+    text-align: left;
+    border-top: 1px solid var(--line);
+    padding-top: 20px;
+    display: none;
+  }
+  .tips.visible { display: block; }
+  .tips strong { color: var(--ink); font-weight: 600; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+  <span class="micro">fineshyt · archival system</span>
+  <h1>FINE.<br/>SHYT.</h1>
+
+  <p id="phase-label" class="phase-label">Booting</p>
+  <p id="phase-detail" class="phase-detail">Resolving services…</p>
+  <p id="meta" class="meta">elapsed 00:00</p>
+  <div id="spinner" class="spinner"></div>
+  <pre id="error" class="error"></pre>
+
+  <div id="tips" class="tips">
+    <p><strong>While you wait —</strong> on a first launch, Fineshyt downloads a
+    vision-language model (~4 GB) that runs entirely on your machine. Nothing
+    is sent to a cloud service. Subsequent launches take about 30 seconds.</p>
+  </div>
+
+  <script type="module">
+    const PHOENIX_URL = "http://localhost:4000/";
+    const POLL_INTERVAL_MS = 1000;
+    const TIPS_DELAY_MS = 30_000;   // show "what's happening" tip after 30s
+    const startTime = Date.now();
+
+    const $label = document.getElementById("phase-label");
+    const $detail = document.getElementById("phase-detail");
+    const $meta = document.getElementById("meta");
+    const $spinner = document.getElementById("spinner");
+    const $error = document.getElementById("error");
+    const $tips = document.getElementById("tips");
+
+    function fmtElapsed(ms) {
+      const sec = Math.floor(ms / 1000);
+      const m = String(Math.floor(sec / 60)).padStart(2, "0");
+      const s = String(sec % 60).padStart(2, "0");
+      return `${m}:${s}`;
+    }
+
+    let tickHandle = null;
+    function tick() {
+      $meta.textContent = `elapsed ${fmtElapsed(Date.now() - startTime)}`;
+      if (Date.now() - startTime > TIPS_DELAY_MS) {
+        $tips.classList.add("visible");
+      }
+    }
+    tickHandle = setInterval(tick, 1000);
+
+    function setPhase(label, detail) {
+      if (label) $label.textContent = label;
+      if (detail !== undefined) $detail.textContent = detail || "";
+    }
+
+    function showError(message) {
+      setPhase("Couldn't start fineshyt", "");
+      $spinner.classList.add("hidden");
+      $error.textContent = message;
+      $error.style.display = "block";
+      $tips.classList.remove("visible");
+      // Freeze the elapsed counter so the error screen doesn't keep ticking
+      // up minutes while the user tries to figure out what went wrong.
+      if (tickHandle) {
+        clearInterval(tickHandle);
+        tickHandle = null;
+      }
+      $meta.style.display = "none";
+    }
+
+    // Phoenix poll — once it answers on :4000, navigate. Same logic as before:
+    // window.location.href is bulletproof in WKWebView where Rust-side
+    // navigates have been flaky.
+    async function pollAndNavigate() {
+      while (true) {
+        try {
+          await fetch(PHOENIX_URL, { mode: "no-cors", cache: "no-store" });
+          window.location.href = PHOENIX_URL;
+          return;
+        } catch (_) {
+          await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+        }
+      }
+    }
+
+    async function setupTauriListeners() {
+      // Wait for Tauri's JS API to be injected. On cold launches the script
+      // runs before the bridge is ready.
+      const start = Date.now();
+      while (!window.__TAURI__ && Date.now() - start < 3000) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      if (!window.__TAURI__?.event?.listen) return;
+      const { listen } = window.__TAURI__.event;
+
+      // Register live listeners FIRST so we don't miss anything that fires
+      // between now and the get_startup_state() call.
+      await listen("startup-phase", (e) => {
+        const payload = e.payload || {};
+        setPhase(payload.label, payload.detail);
+      });
+
+      await listen("services-failed", (e) => {
+        showError(String(e.payload || "unknown error"));
+      });
+
+      // Race recovery: Rust's startup pipeline runs in parallel with the
+      // webview loading. On the fastest failure paths (e.g. llama-server
+      // not found, fails in ~1s) Rust can emit `services-failed` BEFORE we
+      // got here to register the listener — Tauri's emit is fire-and-forget
+      // with no replay, so the event is lost. Query the state explicitly to
+      // recover any phase/failure that already happened.
+      try {
+        const invoke = window.__TAURI__.core?.invoke || window.__TAURI__.invoke;
+        if (typeof invoke === "function") {
+          const state = await invoke("get_startup_state");
+          if (state?.failure) {
+            showError(String(state.failure));
+            return;
+          }
+          if (state?.phase_label) {
+            setPhase(state.phase_label, state.phase_detail);
+          }
+        }
+      } catch (err) {
+        // Non-fatal — live listeners will pick up future events. We just
+        // can't recover ones that already fired.
+        console.warn("get_startup_state failed:", err);
+      }
+    }
+
+    setupTauriListeners();
+    pollAndNavigate();
+  </script>
+</body>
+</html>

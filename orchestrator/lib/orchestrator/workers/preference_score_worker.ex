@@ -36,13 +36,14 @@ defmodule Orchestrator.Workers.PreferenceScoreWorker do
         :ok
 
       true ->
-        embedding = Pgvector.to_list(photo.clip_embedding)
+        embedding = photo.clip_embedding
 
         case Req.post(Orchestrator.AiWorker.url("/api/v1/preference/score"),
                json: %{embeddings: [embedding]},
                receive_timeout: 30_000
              ) do
-          {:ok, %Req.Response{status: 200, body: %{"scores" => [score], "model_version" => version}}} ->
+          {:ok,
+           %Req.Response{status: 200, body: %{"scores" => [score], "model_version" => version}}} ->
             Photos.update_preference_scores([{photo_id, score, version}])
 
             Phoenix.PubSub.broadcast(
@@ -54,16 +55,27 @@ defmodule Orchestrator.Workers.PreferenceScoreWorker do
             :ok
 
           {:ok, %Req.Response{status: 400}} ->
-            Logger.debug("PreferenceScoreWorker: no model trained yet, skipping photo #{photo_id}")
+            Logger.debug(
+              "PreferenceScoreWorker: no model trained yet, skipping photo #{photo_id}"
+            )
+
             :ok
 
           {:ok, %Req.Response{status: status, body: body}} ->
             detail = get_in(body, ["detail"]) || "status #{status}"
-            record_error(job, photo_id, "API #{status}: #{inspect(detail)}", status: status, detail: body)
+
+            record_error(job, photo_id, "API #{status}: #{inspect(detail)}",
+              status: status,
+              detail: body
+            )
+
             {:error, inspect(detail)}
 
           {:error, reason} ->
-            record_error(job, photo_id, "Transport: #{inspect(reason)}", detail: %{transport: inspect(reason)})
+            record_error(job, photo_id, "Transport: #{inspect(reason)}",
+              detail: %{transport: inspect(reason)}
+            )
+
             {:error, inspect(reason)}
         end
     end

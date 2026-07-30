@@ -64,7 +64,7 @@ defmodule Orchestrator.Photos.Photo do
     field :sharpness_score, :integer
     field :exposure_score, :integer
 
-    field :clip_embedding, Pgvector.Ecto.Vector
+    field :clip_embedding, Orchestrator.Embedding
     field :preference_score, :integer
     field :preference_model_version, :integer
 
@@ -77,8 +77,20 @@ defmodule Orchestrator.Photos.Photo do
     field :project, :string
     field :captured_at, :naive_datetime
     field :burst_group, :integer
+    # Filename-copy group ID — siblings under macOS-style "X copy.ext"
+    # naming. Populated by mix fineshyt.detect_dup_copies (Phase 1 of the
+    # dedup work). See `burst_group` for the parallel concept.
+    field :dup_group, :integer
     field :curation_status, :string, default: "complete"
     field :failure_reason, :string
+
+    # XMP sidecar tracking. `source_path` is the original RAW/source file
+    # the JPEG was converted from — XMP sidecars sit next to it as
+    # `<source>.xmp`. `sidecar_synced_at` records the last time
+    # Fineshyt wrote the sidecar so we can skip-if-newer when the user's
+    # editor has touched it since.
+    field :source_path, :string
+    field :sidecar_synced_at, :naive_datetime
 
     timestamps()
   end
@@ -107,12 +119,30 @@ defmodule Orchestrator.Photos.Photo do
   def changeset(photo, attrs) do
     photo
     |> cast(attrs, [
-      :file_path, :url, :source,
+      :file_path,
+      :url,
+      :source,
       :manual_match,
-      :technical_score, :sharpness_score, :exposure_score,
-      :clip_embedding, :preference_score, :preference_model_version,
-      :subject, :artistic_mood, :lighting_critique, :content_type, :suggested_tags,
-      :user_rating, :project, :captured_at, :burst_group, :curation_status, :failure_reason
+      :technical_score,
+      :sharpness_score,
+      :exposure_score,
+      :clip_embedding,
+      :preference_score,
+      :preference_model_version,
+      :subject,
+      :artistic_mood,
+      :lighting_critique,
+      :content_type,
+      :suggested_tags,
+      :user_rating,
+      :project,
+      :captured_at,
+      :burst_group,
+      :dup_group,
+      :curation_status,
+      :failure_reason,
+      :source_path,
+      :sidecar_synced_at
     ])
     |> validate_inclusion(:user_rating, 1..5, message: "must be between 1 and 5")
     |> validate_required([:file_path])

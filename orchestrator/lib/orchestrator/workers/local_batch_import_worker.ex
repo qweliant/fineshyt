@@ -29,12 +29,16 @@ defmodule Orchestrator.Workers.LocalBatchImportWorker do
           _ -> file_paths
         end
 
-      stems = Enum.map(sampled, fn p -> Path.rootname(Path.basename(p)) end)
+      # Use Photos.normalize_stem/1 on both sides so an incoming
+      # `IMG_001 copy.NEF` collides with an already-ingested `IMG_001.jpg`
+      # (Finder-copy dedup at ingest time; see also `mix fineshyt.detect_dup_copies`
+      # for cleaning up history that already slipped through).
+      stems = Enum.map(sampled, &Orchestrator.Photos.normalize_stem/1)
       already_done = Orchestrator.Photos.existing_stems(stems)
 
       new_paths =
         Enum.reject(sampled, fn path ->
-          MapSet.member?(already_done, Path.rootname(Path.basename(path)))
+          MapSet.member?(already_done, Orchestrator.Photos.normalize_stem(path))
         end)
 
       skipped = length(sampled) - length(new_paths)
@@ -49,9 +53,9 @@ defmodule Orchestrator.Workers.LocalBatchImportWorker do
 
         %{
           "file_path" => file_path,
-          "ref"       => ref,
-          "source"    => "local",
-          "project"   => project
+          "ref" => ref,
+          "source" => "local",
+          "project" => project
         }
         |> Orchestrator.Workers.ConversionWorker.new()
         |> Oban.insert()

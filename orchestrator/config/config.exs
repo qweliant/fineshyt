@@ -11,10 +11,6 @@ config :orchestrator,
   ecto_repos: [Orchestrator.Repo],
   generators: [timestamp_type: :utc_datetime]
 
-# Register the pgvector extension with Postgrex so `%Pgvector{}` round-trips
-# through the `clip_embedding vector(768)` column on the photos table.
-config :orchestrator, Orchestrator.Repo, types: Orchestrator.PostgresTypes
-
 # Configure the endpoint
 config :orchestrator, OrchestratorWeb.Endpoint,
   url: [host: "localhost"],
@@ -65,11 +61,14 @@ config :logger, :default_formatter,
 config :phoenix, :json_library, Jason
 
 config :orchestrator, Oban,
-  engine: Oban.Engines.Basic,
+  # Lite engine targets SQLite (ecto_sqlite3). Postgres-specific features
+  # (advisory locks, LISTEN/NOTIFY) aren't available, but for a single-user
+  # desktop app the Lite engine's polling-based dispatch is plenty.
+  engine: Oban.Engines.Lite,
   queues: [
     # 4 concurrent RAW→JPEG conversions (~150MB RAM each, safe on 16GB)
     conversion: 4,
-    # Strictly 1 LLM call at a time — Ollama serializes anyway
+    # Strictly 1 LLM call at a time — the local vision model serializes anyway
     ai_jobs: 1,
     # CLIP image embeddings. One model in RAM; small concurrency avoids
     # thrashing CPU against Ollama inference on the same box.

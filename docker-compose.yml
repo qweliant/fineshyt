@@ -1,39 +1,25 @@
-# ⚠ WARNING: `docker compose down -v` DESTROYS the pgdata volume and all
+# ⚠ WARNING: `docker compose down -v` DESTROYS the sqlitedb volume and all
 # database contents (photos, embeddings, scores). Use `docker compose down`
 # (without -v) to stop services safely. Back up first: ./scripts/backup.sh
 #
-# See .env.example for the variables this file expects.
+# Since C3 the orchestrator uses a native SQLite database (no Postgres
+# container). See .env.example for the variables this file expects.
 
 services:
-  db:
-    # pgvector/pgvector:pg15 is the drop-in for postgres:15 with the `vector`
-    # extension preinstalled — required by the CLIP embedding column on the
-    # photos table. pgdata volume carries over cleanly since the underlying
-    # Postgres version is unchanged.
-    image: pgvector/pgvector:pg15
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres_password
-      POSTGRES_DB: photo_curator_dev
-    ports:
-      - "5432:5432"
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d photo_curator_dev"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-
   orchestrator:
+    # Profile-gated: only starts on `docker compose --profile compose up`
+    # (i.e. via `make compose`). Bare `docker compose up -d` starts nothing
+    # (both services are profile-gated), so native dev doesn't collide with
+    # a containerised orchestrator on port 4000.
+    profiles: ["compose"]
     build: ./orchestrator
     depends_on:
-      db:
-        condition: service_healthy
       ai_worker:
         condition: service_started
     environment:
-      DATABASE_URL: ecto://postgres:postgres_password@db:5432/photo_curator_dev
+      # SQLite db lives on the sqlitedb named volume so it survives container
+      # re-creation. The app creates the file + parent dir on boot.
+      DATABASE_PATH: /app/data/fineshyt.db
       SECRET_KEY_BASE: ${SECRET_KEY_BASE:?Set SECRET_KEY_BASE in .env — run `make compose-init` to generate one}
       PHX_HOST: ${PHX_HOST:-localhost}
       PHX_SCHEME: http
@@ -56,6 +42,8 @@ services:
     ports:
       - "4000:4000"
     volumes:
+      # Persistent SQLite database (since C3). Survives container re-creation.
+      - sqlitedb:/app/data
       # Shared with ai_worker so the orchestrator can write converted JPEGs
       # at a path the worker can read back. If UPLOADS_DIR is unset, this
       # resolves to the `uploads` named volume below; if set to a host path
@@ -64,20 +52,44 @@ services:
       # manager.
       - ${UPLOADS_DIR:-uploads}:/app/priv/static/uploads
       # User's photo library. Read-only — fineshyt never mutates source files.
-      - ${PHOTO_LIBRARY:?Set PHOTO_LIBRARY in .env — see .env.example}:/photos:ro
+      # Path-mirrored (host source == container target) so the orchestrator
+      # in C2 native mode and the still-containerised ai_worker both refer
+      # to photos by the same absolute path. Without mirroring, the
+      # orchestrator sends host paths the container can't resolve.
+      - "${PHOTO_LIBRARY:?Set PHOTO_LIBRARY in .env}:${PHOTO_LIBRARY}:ro"
+      - "/Users/qwelian/Pictures:/Users/qwelian/Pictures:ro"
 
   ai_worker:
+    # Profile gating:
+    #   - "compose" → full Docker stack (orchestrator + ai_worker both in containers).
+    #   - "c2"      → C2 mode: orchestrator runs as a local Elixir release on
+    #                 the host (with a native SQLite db since C3), but
+    #                 ai_worker stays containerized (still has a 2GB+ Python
+    #                 ML toolchain; freezing that into a sidecar is C4 work).
+    #                 `--profile c2` brings up just the ai_worker — the only
+    #                 service the native orchestrator still needs.
+    profiles: ["compose", "c2"]
     build: ./ai_worker
     environment:
-      LLM_BASE_URL: ${LLM_BASE_URL:-http://host.docker.internal:11434/v1/}
+      # Deliberately NOT ${LLM_BASE_URL}: that variable is now the *native*
+      # worker's URL (127.0.0.1), which inside a container points at the
+      # container itself. Containers need host.docker.internal, so the
+      # compose path gets its own override knob.
+      LLM_BASE_URL: ${LLM_BASE_URL_DOCKER:-http://host.docker.internal:11434/v1/}
       LLM_API_KEY: ${LLM_API_KEY:-ollama}
       LLM_MODEL: ${LLM_MODEL:-llava}
       STATIC_UPLOADS_DIR: /app/priv/static/uploads
     ports:
       - "8000:8000"
     volumes:
+      # The ai_worker is filesystem-independent w.r.t. the user's photo
+      # library: /convert and /curate receive source bytes as multipart
+      # uploads (the orchestrator reads the originals off disk and streams
+      # them), and /embed reads the converted JPEG back out of this shared
+      # uploads volume. So no PHOTO_LIBRARY bind-mount is needed here — which
+      # is what lets the worker run even when photos live on a drive Docker
+      # Desktop can't bind-mount (e.g. an exFAT external SSD on macOS).
       - ${UPLOADS_DIR:-uploads}:/app/priv/static/uploads
-      - ${PHOTO_LIBRARY:?Set PHOTO_LIBRARY in .env — see .env.example}:/photos:ro
       # CLIP model + HF cache. ~2GB on first run; persist so re-creating the
       # container doesn't re-download.
       - models:/cache
@@ -90,7 +102,7 @@ services:
       - "host.docker.internal:host-gateway"
 
 volumes:
-  pgdata:
+  sqlitedb:
   uploads:
   models:
   preference:

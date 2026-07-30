@@ -1,0 +1,8 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "resources": {
+      "../runtime/bin/fineshyt-ai-worker": "bin/fineshyt-ai-worker"
+    }
+  }
+}

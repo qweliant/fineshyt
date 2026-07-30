@@ -1,14 +1,21 @@
 import Config
 
-# Configure your database
+# Configure your database (SQLite — file lives in priv/, created on migrate).
+#
+# Dev shares `priv/fineshyt.db` with the desktop shell and the native
+# release path on purpose: they're the same machine and the same library,
+# and keeping a separate `orchestrator_dev.db` meant `mix phx.server`
+# booted into an empty gallery while every other entrypoint saw the real
+# 12k photos. `DATABASE_PATH` still wins so you can point dev at a scratch
+# copy (`DATABASE_PATH=/tmp/scratch.db mix phx.server`) — which is also
+# what `make reset` expects you to do before wiping anything.
 config :orchestrator, Orchestrator.Repo,
-  username: "postgres",
-  password: "postgres_password",
-  hostname: "localhost",
-  database: "photo_curator_dev",
+  database: System.get_env("DATABASE_PATH") || Path.expand("../priv/fineshyt.db", __DIR__),
+  journal_mode: :wal,
+  busy_timeout: 5_000,
+  pool_size: 5,
   stacktrace: true,
-  show_sensitive_data_on_connection_error: true,
-  pool_size: 10
+  show_sensitive_data_on_connection_error: true
 
 # For development, we disable any cache and enable
 # debugging and code reloading.
