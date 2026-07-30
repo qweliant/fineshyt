@@ -458,12 +458,22 @@ fn resolve_resource(_app: &AppHandle, rel: &str) -> Result<PathBuf, String> {
         return Ok(resources.join(rel));
     }
 
-    // (Windows / Linux bundle) Resources live next to the binary in a
-    // `resources/` folder. Probe for it; if found, that's the bundle layout.
+    // (Windows / Linux bundle) The exact layout depends on which Tauri
+    // bundler was used. WiX (`.msi`) puts resources directly next to the
+    // .exe — so `bin/llama/llama-server.exe` ends up at `<install>\bin\
+    // llama\llama-server.exe`. NSIS (`.exe`) sometimes uses a `resources\`
+    // subfolder. .AppImage uses `usr/share/<app>/resources/`. Probe in
+    // priority order: actual file existence at each candidate root.
     if let Some(parent) = exe.parent() {
-        let resources = parent.join("resources");
-        if resources.is_dir() {
-            return Ok(resources.join(rel));
+        let candidates = [
+            parent.join(rel),                                  // flat (WiX)
+            parent.join("resources").join(rel),                // NSIS subfolder
+            parent.join("..").join("Resources").join(rel),     // legacy macOS-ish
+        ];
+        for candidate in candidates {
+            if candidate.exists() {
+                return Ok(candidate);
+            }
         }
     }
 

@@ -3,7 +3,11 @@ name = "ai_worker"
 version = "0.1.0"
 description = "Worker for AI tasks, including image processing and model inference."
 readme = "README.md"
-requires-python = ">=3.9"
+# >=3.10, not >=3.9: the pinned python-multipart declares Requires-Python
+# >=3.10, so uv (which resolves across the whole declared range, not just
+# the interpreter in hand) fails the lock outright on >=3.9. Nothing here
+# ever ran on 3.9 — PyApp bootstraps 3.12 and the Docker image is 3.12.
+requires-python = ">=3.10"
 dependencies = [
     "fastapi[standard]>=0.128.8",
     # Pin python-multipart explicitly: fastapi[standard] pulls it transitively,

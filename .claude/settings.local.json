@@ -18,7 +18,13 @@
       "Bash(mix phx.gen.release --docker)",
       "Bash(docker compose *)",
       "Bash(sqlite3 orchestrator/priv/fineshyt.db)",
-      "Bash(make release *)"
+      "Bash(make release *)",
+      "Bash(uv lock *)",
+      "Bash(uv sync *)",
+      "Bash(grep -nE \"^[a-zA-Z0-9_.$%\\(\\)/-]+:\" Makefile)",
+      "Read(//Users/qwelian/.claude/**)",
+      "Read(//Users/qwelian/Programs/**)",
+      "Read(//Users/qwelian/**)"
     ]
   }
 }

@@ -78,10 +78,10 @@ Launcher size with embedded Python: **~19 MB** (vs ~3 MB without embed). The +16
 
 - Rust toolchain (`rustup`, `cargo`) — `cargo --version` should work.
 - Node.js — only needed if you want to use `cargo tauri` CLI for packaged builds. Dev mode (`cargo run`) doesn't require it.
-- Docker Desktop on the host (for the still-containerised ai_worker — the only remaining container since C3 dropped Postgres).
-- `brew install llama.cpp` — provides the `llama-server` binary the shell spawns for the embedded vision LLM. (Replaces Ollama.)
+- No Docker. C4 replaced the containerised ai_worker with the PyApp launcher, so the shell spawns three native children and never talks to a daemon.
+- `llama-server`, resolved bundled-first: `make desktop-stage-llama` drops a pinned build into `desktop/runtime/bin/llama/`, and only if that's missing does the shell fall back to probing Homebrew paths (`brew install llama.cpp`).
 - A built Phoenix release at `orchestrator/_build/prod/rel/orchestrator/bin/server`. Build it with `make release` from the repo root.
-- The repo's normal `.env` set up (run `make compose-init` once at the repo root).
+- No `.env` required — the shell mints a `SECRET_KEY_BASE` if it can't find one.
 
 The vision GGUF (~5–7 GB) downloads automatically into `desktop/runtime/models/` on the first launch via llama-server's `-hf` flag.
 
@@ -100,8 +100,7 @@ The boot flow you'll see in the terminal:
 
 ```text
 [fineshyt-desktop] startup: resolving repo root
-[fineshyt-desktop] startup: running `make compose-init` in ...
-[fineshyt-desktop] startup: starting ai_worker via `--profile c2`
+[fineshyt-desktop] startup: spawning ai_worker (PyApp launcher)
 [fineshyt-desktop] startup: spawning llama-server (vision LLM)
 [fineshyt-desktop] startup: waiting for llama-server on 127.0.0.1:11434 (first launch downloads ~5–7 GB)
 ... llama-server boot lines, including "server is listening on http://127.0.0.1:11434" ...
@@ -146,18 +145,16 @@ desktop/
 **Boot sequence:**
 
 1. Tauri opens the window with the splash HTML loaded from `frontend/index.html`.
-2. A background thread runs `make compose-init` (idempotent — bootstraps `.env` if needed) then `docker compose --profile c2 up -d` (brings up just the ai_worker — the only container).
+2. A background thread spawns the PyApp ai_worker launcher (`desktop/runtime/bin/fineshyt-ai-worker`) and waits for `:8000`. First run is slow — PyApp is pip-installing ~1 GB into `~/Library/Application Support/pyapp/`.
 3. It spawns `llama-server` (vision LLM) and waits for `:11434`, then spawns the native orchestrator release (which runs migrations against the SQLite db) and waits for Phoenix on `:4000`.
 4. When the port opens, the splash JS navigates to `http://localhost:4000`.
-5. On window close, the shell SIGTERMs the orchestrator + llama-server children and runs `docker compose --profile c2 down` to leave the system clean.
+5. On window close, the shell SIGKILLs each child. Nothing outlives the window — see `make desktop-kill-orphans` for the cleanup when that promise fails.
 
-If anything goes wrong (Docker not installed, `.env` missing required values, Phoenix doesn't come up in time), the splash page swaps in an error message instead of an infinite spinner.
+If anything goes wrong (missing release binary, model still downloading, Phoenix doesn't come up in time), the splash page swaps in an error message instead of an infinite spinner.
 
 ## Known sharp edges
 
 - **Splash page is static HTML.** No fancy progress bar yet. Just a "starting…" line that becomes an error string if startup fails.
-- **No first-run wizard.** If `.env` isn't set up, the shell errors out with the exact compose error string. Future work: detect this and show a folder-picker UI.
-- **Network-conflict path.** If something is already on port 4000, the shell will happily navigate to whatever's there. We're not yet checking `is this our Phoenix or someone else's`.
-- **Quit-while-building.** If you close the window during the initial `docker compose up --build` (the slow first time), the cleanup `down` may fight the still-running build. Containers usually get cleaned up correctly anyway, but this isn't bulletproof.
-
-These all become phase C2+ concerns once C1 has proven the shape works.
+- **No first-run wizard.** There's no folder-picker for the photo library yet; you set it in the gallery's Directory field.
+- **Network-conflict path.** If something is already on port 4000, the shell will happily navigate to whatever's there. We're not yet checking `is this our Phoenix or someone else's`. This is the failure mode `make desktop-kill-orphans` exists for — an orphaned BEAM from a previous run holding :4000 against the bundled app's empty database looks exactly like "all my photos vanished".
+- **Quit-while-downloading.** Closing the window during the first-launch GGUF or PyApp download kills the child mid-write; the next launch re-downloads rather than resuming.

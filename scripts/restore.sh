@@ -11,7 +11,7 @@
 #   2. Rsyncs the uploads back into priv/static/uploads
 #   3. Runs mix ecto.migrate to apply any migrations newer than the snapshot
 #
-# IMPORTANT: stop the app (close the desktop window / `make c2-services-down`)
+# IMPORTANT: stop the app (close the desktop window, or Ctrl-C `make dev`)
 # before restoring so nothing is writing to the db file.
 # ──────────────────────────────────────────────────────────────
 

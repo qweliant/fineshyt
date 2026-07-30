@@ -71,7 +71,11 @@ services:
     profiles: ["compose", "c2"]
     build: ./ai_worker
     environment:
-      LLM_BASE_URL: ${LLM_BASE_URL:-http://host.docker.internal:11434/v1/}
+      # Deliberately NOT ${LLM_BASE_URL}: that variable is now the *native*
+      # worker's URL (127.0.0.1), which inside a container points at the
+      # container itself. Containers need host.docker.internal, so the
+      # compose path gets its own override knob.
+      LLM_BASE_URL: ${LLM_BASE_URL_DOCKER:-http://host.docker.internal:11434/v1/}
       LLM_API_KEY: ${LLM_API_KEY:-ollama}
       LLM_MODEL: ${LLM_MODEL:-llava}
       STATIC_UPLOADS_DIR: /app/priv/static/uploads

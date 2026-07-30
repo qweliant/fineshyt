@@ -1,4 +1,19 @@
-.PHONY: dev db-up db-down setup export reset start-phoenix start-ai compose compose-init compose-up compose-down compose-build compose-logs desktop-dev desktop-build desktop-icon desktop-stage-phoenix release c2-services c2-services-down c2-run c5-llama c5-llama-stop c5-llama-logs ai-worker-launcher
+.PHONY: dev setup export reset start-phoenix start-ai start-ai-native start-release compose compose-init compose-up compose-down compose-build compose-logs desktop-dev desktop-build desktop-icon desktop-stage-phoenix release c2-run c5-llama c5-llama-stop c5-llama-logs ai-worker-launcher
+
+## Absolute paths, resolved once. The dev targets spawn two child processes
+## from different working directories (orchestrator/ and ai_worker/), and
+## they have to agree on where the uploads cache and the database live —
+## relative paths silently gave each one its own.
+REPO_ROOT    := $(shell pwd)
+DEV_UPLOADS  := $(REPO_ROOT)/orchestrator/priv/static/uploads
+## An inherited DATABASE_PATH wins, so `DATABASE_PATH=/tmp/scratch.db make dev`
+## (or `make reset`) points every target at the scratch file consistently —
+## including the safety check in `reset`, which would otherwise report the
+## real library's photo count while dropping a different database.
+DEV_DB       := $(if $(DATABASE_PATH),$(DATABASE_PATH),$(REPO_ROOT)/orchestrator/priv/fineshyt.db)
+## The vision LLM is optional in dev — only *new* imports call /curate.
+## `make c5-llama` starts one on this port when you're ingesting.
+DEV_LLM_URL  ?= http://127.0.0.1:11434/v1/
 
 CINNA  := \033[38;5;153m
 KUROMI := \033[38;5;135m
@@ -7,7 +22,14 @@ KITTY  := \033[38;5;218m
 BOLD   := \033[1m
 RESET  := \033[0m
 
-dev: db-up
+## ---- Native dev ---------------------------------------------------------
+##
+## Zero Docker. Phoenix runs under `mix phx.server` (code reload) against
+## priv/fineshyt.db — the same file the desktop shell and the release read,
+## so dev, `make c2-run` and the .app all see one library. The ai_worker
+## runs under uv with --reload.
+
+dev:
 	@printf "$(CINNA)$(BOLD)"
 	@printf "⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢎⠱⠊⡱⠀⠀⠀⠀⠀⠀\n"
 	@printf "⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⡠⠤⠒⠒⠒⠒⠤⢄⣑⠁⠀⠀⠀⠀⠀⠀⠀⠀\n"
@@ -21,45 +43,26 @@ dev: db-up
 	@printf "$(RESET)\n"
 	@$(MAKE) -j 2 start-phoenix start-ai
 
-db-up:
-	@printf "$(KEROPPI)$(BOLD)"
-	@printf "⠀⠀⠀⢀⡤⠤⠤⠤⣄⠀⠀⠀⠀⠀⣠⣤⣄⣀⠀⠀⠀⠀⠀\n"
-	@printf "⠀⢀⡴⠉⠀⠀⠀⢀⡀⠙⣆⢀⠔⢁⣀⠀⠀⠉⠳⣄⠀⠀⠀\n"
-	@printf "⠀⣾⠀⠀⠀⠀⠀⣿⣿⡇⠘⡏⠀⣿⣿⡇⠀⠀⠀⢸⡆⠀⠀\n"
-	@printf "⠀⢿⡀⠀⠀⠀⠀⠉⠉⠀⢠⡇⠀⠈⠉⠀⠀⠀⠀⢰⡇⠀⠀\n"
-	@printf "⠀⢨⢷⣄⠀⠀⠀⠀⢀⣴⠏⠹⣦⡀⠀⠀⠀⠀⣠⣟⠀⠀⠀\n"
-	@printf "⢠⠃⠀⠈⠛⠓⠒⠚⠋⠀⠀⠀⠀⠙⠓⠒⠚⠋⠀⠈⢧⠀⠀\n"
-	@printf "⢸⠀⢰⣿⣷⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢰⣿⣷⠀⢸⡇  keroppi is starting the db!\n"
-	@printf "⠸⡀⠈⠛⠋⠀⣤⣀⠀⠀⠀⠀⠀⠀⢀⣠⡄⠙⠋⠀⡼⠁⠀\n"
-	@printf "⠀⠹⢦⡀⠀⠀⠀⠙⠻⢶⣄⣠⣴⠾⠛⠁⠀⢀⣠⡞⠀⠀⠀\n"
-	@printf "⠀⠀⠀⠈⠙⠿⠶⠶⠶⠶⠶⠶⠶⠶⠶⠖⠟⠋⠁⠀⠀⠀⠀\n"
-	@printf "$(RESET)\n"
-	@docker compose up -d
-
-db-down:
-	@printf "$(KUROMI)$(BOLD)"
-	@printf "⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀⣀⣀⣀⣀⢠⠋⠉⠉⠒⠲⢤⣀⣠⡀⠀\n"
-	@printf "⠀⠀⠀⠀⠀⠀⣀⣀⣀⢀⡠⠖⠋⠉⠀⠀⠀⠀⠉⠉⠢⣄⠀⠀⠀⢀⠼⠤⠇⠀\n"
-	@printf "⠀⠀⠀⣀⠔⠊⠁⠀⢨⠏⠀⠀⠀⣠⣶⣶⣦⠀⠀⠀⠀⠀⠱⣄⡴⠃⠀⠀⠀⠀\n"
-	@printf "⢸⣉⠿⣁⠀⠀⠀⢀⡇⠀⠀⠀⠀⢿⣽⣿⣼⡠⠤⢄⣀⠀⠀⢱⠀⠀⠀⠀⠀⠀\n"
-	@printf "⠀⠀⠀⠀⠑⢦⡀⢸⠀⠀⠀⡠⠒⠒⠚⠛⠉⠀⢠⣀⡌⠳⡀⡌⠀⠀⠀⠀⠀⠀\n"
-	@printf "⠀⠀⠀⠀⠀⠀⠉⠉⣆⠀⢰⠁⣀⣀⠀⠀⣀⠀⠈⡽⣧⢀⡷⠁⠀⠀⠀⠀⠀⠀\n"
-	@printf "⠀⠀⠀⠀⠀⡤⢄⠀⠈⠢⣸⣄⢽⣞⡂⠀⠈⠁⣀⡜⠁⣩⡷⠿⠆  fine, shutting it all down.\n"
-	@printf "⠀⠀⠀⠀⢯⣁⡸⠀⠀⠀⡬⣽⣿⡀⠙⣆⡸⠛⠠⢧⠀⡿⠯⠆\n"
-	@printf "⠀⠀⠀⠀⣀⡀⠀⠀⡤⠤⣵⠁⢸⣻⡤⠏⠀⠀⠀⠀⢹⠀⠀⠀⡊⠱⣀\n"
-	@printf "⠀⠀⢀⠜⠀⢘⠀⠀⠱⠲⢜⣢⣤⣧⠀⠀⠀⠀⠀⢴⠇⠀⠀⠀⠧⠠⠜\n"
-	@printf "⠀⠀⠘⠤⠤⠚⠀⠀⠀⠀⠀⠀⢸⠁⠁⠀⣀⠎⠀⠻⡀\n"
-	@printf "⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠣⣀⣀⡴⠤⠄⠴⠁\n"
-	@printf "$(RESET)\n"
-	@docker compose down
-
+## DATABASE_PATH is passed explicitly rather than left to config/dev.exs's
+## default so that `make dev` and `make c2-run` (prod release, where dev.exs
+## isn't loaded at all) provably read the same file.
 start-phoenix:
-	@cd orchestrator && mix phx.server
+	@cd orchestrator && \
+		DATABASE_PATH="$(DEV_DB)" \
+		STATIC_UPLOADS_DIR="$(DEV_UPLOADS)" \
+		AI_WORKER_URL=http://127.0.0.1:8000 \
+		mix phx.server
 
+## STATIC_UPLOADS_DIR has to match the orchestrator's: /embed reads the
+## converted JPEG back off disk by path, so a mismatch here surfaces much
+## later as "embedding failed, file not found" on an otherwise fine import.
 start-ai:
-	@cd ai_worker && uv run fastapi dev src/main.py --reload
+	@cd ai_worker && \
+		STATIC_UPLOADS_DIR="$(DEV_UPLOADS)" \
+		LLM_BASE_URL="$(DEV_LLM_URL)" \
+		uv run fastapi dev src/main.py --port 8000
 
-setup: db-up
+setup:
 	@printf "$(CINNA)$(BOLD)"
 	@printf "⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢎⠱⠊⡱⠀⠀⠀⠀⠀⠀\n"
 	@printf "⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⡠⠤⠒⠒⠒⠒⠤⢄⣑⠁⠀⠀⠀⠀⠀⠀⠀⠀\n"
@@ -71,10 +74,27 @@ setup: db-up
 	@printf "⠀⠑⠂⠤⠔⠒⠁⠀⠀⡎⠱⡃⠀⠀⡄⠀⠄⠀⠀⠠⠟⠉⡷⠁\n"
 	@printf "⠀⠀⠀⠀⠀⠀⠀⠀⠀⠹⠤⠤⠴⣄⡸⠤⣄⠴⠤⠴⠄⠼⠀\n"
 	@printf "$(RESET)\n"
-	@cd orchestrator && mix deps.get && mix ecto.setup
+	@cd orchestrator && DATABASE_PATH="$(DEV_DB)" mix deps.get && DATABASE_PATH="$(DEV_DB)" mix ecto.setup
 	@cd ai_worker && uv sync
+	@printf "$(KEROPPI)$(BOLD)→ ready. 'make dev' to start.$(RESET)\n"
 
-reset: db-up
+## Guarded since dev moved onto the real library: `mix ecto.reset` is
+## ecto.drop + ecto.setup, so an absent-minded `make reset` used to cost a
+## 73 KB scratch file and now costs every rating, embedding and preference
+## score in fineshyt.db. Requires CONFIRM=1 and prints what's at stake.
+reset:
+	@if [ "$(CONFIRM)" != "1" ]; then \
+		COUNT=$$(sqlite3 "$(DEV_DB)" 'select count(*) from photos' 2>/dev/null || echo '?'); \
+		RATED=$$(sqlite3 "$(DEV_DB)" 'select count(*) from photos where user_rating is not null' 2>/dev/null || echo '?'); \
+		printf "$(KUROMI)$(BOLD)\n"; \
+		printf "!! 'make reset' DROPS $(DEV_DB)\n"; \
+		printf "!! that database holds $$COUNT photos, $$RATED of them rated.\n"; \
+		printf "!! there is no undo. back up first:  ./scripts/backup.sh\n\n"; \
+		printf "$(RESET)"; \
+		printf "if you meant it:            make reset CONFIRM=1\n"; \
+		printf "scratch db instead:         DATABASE_PATH=/tmp/scratch.db make reset CONFIRM=1\n"; \
+		exit 1; \
+	fi
 	@printf "$(KUROMI)$(BOLD)"
 	@printf "⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀⣀⣀⣀⣀⢠⠋⠉⠉⠒⠲⢤⣀⣠⡀⠀\n"
 	@printf "⠀⠀⠀⠀⠀⠀⣀⣀⣀⢀⡠⠖⠋⠉⠀⠀⠀⠀⠉⠉⠢⣄⠀⠀⠀⢀⠼⠤⠇⠀\n"
@@ -89,14 +109,20 @@ reset: db-up
 	@printf "⠀⠀⠘⠤⠤⠚⠀⠀⠀⠀⠀⠀⢸⠁⠁⠀⣀⠎⠀⠻⡀\n"
 	@printf "⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠣⣀⣀⡴⠤⠄⠴⠁\n"
 	@printf "$(RESET)\n"
-	@cd orchestrator && mix ecto.reset
+	@cd orchestrator && DATABASE_PATH="$(DEV_DB)" mix ecto.reset
 
-## ---- Compose distribution -----------------------------------------------
+## ---- Compose distribution (legacy, self-hosters only) -------------------
 ##
-## `make compose` is the one-command flow for self-hosters: bootstrap a .env
-## with a fresh SECRET_KEY_BASE, build images, and start everything.
-## PHOTO_LIBRARY is the only value the user has to fill in by hand — we
-## can't guess where their photos live.
+## Nothing below here is part of the dev or desktop path any more — dev is
+## native (`make dev`), the desktop shell spawns its children directly, and
+## the ai_worker ships as a PyApp launcher. These targets remain for
+## self-hosters who want the whole stack in containers on a box that isn't
+## this laptop. Docker is required for these and only these.
+##
+## `make compose` is the one-command flow: bootstrap a .env with a fresh
+## SECRET_KEY_BASE, build images, and start everything. PHOTO_LIBRARY is the
+## only value the user has to fill in by hand — we can't guess where their
+## photos live.
 
 compose: compose-init
 	@docker compose --profile compose up --build
@@ -354,6 +380,18 @@ c5-llama:
 	@command -v llama-server >/dev/null 2>&1 || \
 		(printf "$(KUROMI)✗ llama-server not found. Run 'brew install llama.cpp'.$(RESET)\n"; exit 1)
 	@mkdir -p desktop/runtime/models
+	@printf "$(KEROPPI)$(BOLD)"
+	@printf "⠀⠀⠀⢀⡤⠤⠤⠤⣄⠀⠀⠀⠀⠀⣠⣤⣄⣀⠀⠀⠀⠀⠀\n"
+	@printf "⠀⢀⡴⠉⠀⠀⠀⢀⡀⠙⣆⢀⠔⢁⣀⠀⠀⠉⠳⣄⠀⠀⠀\n"
+	@printf "⠀⣾⠀⠀⠀⠀⠀⣿⣿⡇⠘⡏⠀⣿⣿⡇⠀⠀⠀⢸⡆⠀⠀\n"
+	@printf "⠀⢿⡀⠀⠀⠀⠀⠉⠉⠀⢠⡇⠀⠈⠉⠀⠀⠀⠀⢰⡇⠀⠀\n"
+	@printf "⠀⢨⢷⣄⠀⠀⠀⠀⢀⣴⠏⠹⣦⡀⠀⠀⠀⠀⣠⣟⠀⠀⠀\n"
+	@printf "⢠⠃⠀⠈⠛⠓⠒⠚⠋⠀⠀⠀⠀⠙⠓⠒⠚⠋⠀⠈⢧⠀⠀\n"
+	@printf "⢸⠀⢰⣿⣷⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢰⣿⣷⠀⢸⡇  keroppi is waking up the vision model!\n"
+	@printf "⠸⡀⠈⠛⠋⠀⣤⣀⠀⠀⠀⠀⠀⠀⢀⣠⡄⠙⠋⠀⡼⠁⠀  (first run downloads ~5-7GB)\n"
+	@printf "⠀⠹⢦⡀⠀⠀⠀⠙⠻⢶⣄⣠⣴⠾⠛⠁⠀⢀⣠⡞⠀⠀⠀\n"
+	@printf "⠀⠀⠀⠈⠙⠿⠶⠶⠶⠶⠶⠶⠶⠶⠶⠖⠟⠋⠁⠀⠀⠀⠀\n"
+	@printf "$(RESET)\n"
 	@printf "$(CINNA)$(BOLD)→ starting llama-server with $(C5_MODEL) on :$(C5_PORT)...$(RESET)\n"
 	@LLAMA_CACHE=$$(pwd)/desktop/runtime/models nohup \
 		llama-server -hf $(C5_MODEL) \
@@ -434,13 +472,16 @@ $(AI_WORKER_LAUNCHER): $(AI_WORKER_WHEEL)
 		rm -rf $$TMP
 	@printf "$(KEROPPI)→ launcher ready at $@ ($$(du -sh $@ | cut -f1))$(RESET)\n"
 
-## ---- Phase C2 — Elixir release as a local sidecar -----------------------
+## ---- Release path (was phase C2) ----------------------------------------
 ##
-## C2 drops the orchestrator out of Docker and runs it as a native Elixir
-## release on the host. db and ai_worker stay containerized (those move
-## later in C3 and C4). Use `make release` to build the release artifact,
-## `make c2-services` to bring up db + ai_worker, and `make c2-run` to
-## start everything in one go for testing without Tauri in the loop.
+## The orchestrator as a native Elixir release, which is what the desktop
+## shell actually spawns. `make c2-run` exercises that exact path without
+## Tauri in the loop — useful when a bug reproduces in the .app but not
+## under `make dev` (prod config, no code reloader, digested assets).
+##
+## C3 (SQLite) and C4 (PyApp launcher) landed, so the old `c2-services`
+## container step is gone: this runs the same native ai_worker binary the
+## bundled app does.
 
 release:
 	@printf "$(CINNA)$(BOLD)→ building Phoenix release (MIX_ENV=prod)...$(RESET)\n"
@@ -451,48 +492,40 @@ release:
 		MIX_ENV=prod mix release --overwrite
 	@printf "$(KEROPPI)$(BOLD)→ release ready at orchestrator/_build/prod/rel/orchestrator/$(RESET)\n"
 
-c2-services:
-	@printf "$(KEROPPI)$(BOLD)→ starting db + ai_worker (orchestrator runs locally in C2 mode)...$(RESET)\n"
-	@docker compose --profile c2 up -d
-	@docker compose --profile c2 ps
+## Runs the release and the native ai_worker side by side, same as `dev`.
+c2-run: ai-worker-launcher
+	@$(MAKE) -j 2 start-release start-ai-native
 
-c2-services-down:
-	@printf "$(KUROMI)$(BOLD)→ stopping db + ai_worker...$(RESET)\n"
-	@docker compose --profile c2 down
+## The PyApp launcher rather than `uv run`: this target is here to mimic the
+## bundled app, and the bundled app has no uv.
+start-ai-native:
+	@STATIC_UPLOADS_DIR="$(DEV_UPLOADS)" \
+	 AI_WORKER_HOST=127.0.0.1 \
+	 AI_WORKER_PORT=8000 \
+	 LLM_BASE_URL="$(DEV_LLM_URL)" \
+	 $(AI_WORKER_LAUNCHER)
 
-c2-run: c2-services
+start-release:
 	@printf "$(CINNA)$(BOLD)→ starting native orchestrator release (Ctrl+C to stop)...$(RESET)\n"
 	@if [ ! -x orchestrator/_build/prod/rel/orchestrator/bin/server ]; then \
 		printf "$(KUROMI)✗ release not built yet. Run 'make release' first.$(RESET)\n"; \
 		exit 1; \
 	fi
-	@if [ ! -f .env ]; then \
-		printf "$(KUROMI)✗ .env missing. Run 'make compose-init' first.$(RESET)\n"; \
-		exit 1; \
-	fi
-	@SECRET=$$(grep '^SECRET_KEY_BASE=' .env | cut -d= -f2-); \
+	@# SECRET_KEY_BASE: reuse .env's if there is one, otherwise mint an
+	@# ephemeral one. Only effect of a fresh secret on a single-user local
+	@# tool is that the LiveView session cookie is re-issued, so there's no
+	@# reason to make this a hard prerequisite the way the compose path did.
+	@SECRET=$$([ -f .env ] && grep '^SECRET_KEY_BASE=' .env | cut -d= -f2- || true); \
 	if [ -z "$$SECRET" ]; then \
-		printf "$(KUROMI)✗ SECRET_KEY_BASE missing in .env. Run 'make compose-init'.$(RESET)\n"; \
-		exit 1; \
+		printf "$(CINNA)→ no SECRET_KEY_BASE in .env, using an ephemeral one$(RESET)\n"; \
+		SECRET=$$(cd orchestrator && mix phx.gen.secret 2>/dev/null || openssl rand -base64 48 | tr -d '\n'); \
 	fi; \
-	UPLOADS=$$(pwd)/orchestrator/priv/static/uploads; \
-	DATABASE_PATH="$$(pwd)/orchestrator/priv/fineshyt.db" \
-	SECRET_KEY_BASE="$$SECRET" \
-	PHX_HOST=localhost \
-	PHX_SCHEME=http \
-	PHX_URL_PORT=4000 \
-	PORT=4000 \
-	AI_WORKER_URL=http://localhost:8000 \
-	STATIC_UPLOADS_DIR="$$UPLOADS" \
+	export SECRET_KEY_BASE="$$SECRET" \
+		DATABASE_PATH="$(DEV_DB)" \
+		STATIC_UPLOADS_DIR="$(DEV_UPLOADS)" \
+		AI_WORKER_URL=http://127.0.0.1:8000 \
+		PHX_HOST=localhost PHX_SCHEME=http PHX_URL_PORT=4000 PORT=4000; \
 	./orchestrator/_build/prod/rel/orchestrator/bin/migrate && \
-	DATABASE_PATH="$$(pwd)/orchestrator/priv/fineshyt.db" \
-	SECRET_KEY_BASE="$$SECRET" \
-	PHX_HOST=localhost \
-	PHX_SCHEME=http \
-	PHX_URL_PORT=4000 \
-	PORT=4000 \
-	AI_WORKER_URL=http://localhost:8000 \
-	STATIC_UPLOADS_DIR="$$UPLOADS" \
 	./orchestrator/_build/prod/rel/orchestrator/bin/server
 
 export:
@@ -507,4 +540,4 @@ export:
 	@printf "⠀⠀⠴⠛⠙⣳⠋⠉⠉⠙⣆⠀⠀⢰⡟⠉⠈⠙⢷⠟⠉⠙⠂⠀\n"
 	@printf "⠀⠀⠀⠀⠀⢻⣄⣠⣤⣴⠟⠛⠛⠛⢧⣤⣤⣀⡾⠀⠀⠀⠀⠀\n"
 	@printf "$(RESET)\n"
-	@cd orchestrator && mix fineshyt.export --target $(TARGET)
+	@cd orchestrator && DATABASE_PATH="$(DEV_DB)" mix fineshyt.export --target $(TARGET)
